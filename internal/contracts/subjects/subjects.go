@@ -4,6 +4,9 @@ package subjects
 // This is the single authoritative source of all subject strings.
 // Business logic MUST import these constants; hardcoding subject strings elsewhere is forbidden.
 const (
+	// SubjectWildcard matches all runeforge subjects. Used for JetStream stream configuration.
+	SubjectWildcard = "runeforge.>"
+
 	SubjectSourceTaskDetected = "runeforge.source.task.detected"
 	SubjectSourceTaskChanged  = "runeforge.source.task.changed"
 	SubjectJobCreated         = "runeforge.job.created"
