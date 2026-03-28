@@ -150,10 +150,14 @@ A source connector fetches tasks from an external system. To add one:
 ```go
 // internal/source/connector.go
 type Connector interface {
-    FetchAll(ctx context.Context) ([]RawTask, error)
-    FetchSince(ctx context.Context, since time.Time) ([]RawTask, error)
-    WriteBack(ctx context.Context, op WritebackOp) error
-    Provider() string
+    // Name returns the provider identifier (e.g., matches source_connections.provider_type).
+    Name() string
+
+    // FetchTasks fetches raw tasks from the upstream system using the given connection.
+    FetchTasks(ctx context.Context, conn models.SourceConnection) ([]RawTask, error)
+
+    // NormalizeTask converts a raw upstream task into the normalized internal representation.
+    NormalizeTask(raw RawTask) (NormalizedTask, error)
 }
 ```
 

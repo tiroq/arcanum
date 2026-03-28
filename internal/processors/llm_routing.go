@@ -54,9 +54,10 @@ type routingInput struct {
 }
 
 type routingOutput struct {
-	SuggestedList string  `json:"suggested_list"`
-	Confidence    float64 `json:"confidence"`
-	Reasoning     string  `json:"reasoning"`
+	SuggestedList   string  `json:"suggested_list"`
+	Confidence      float64 `json:"confidence"`
+	Reasoning       string  `json:"reasoning"`
+	AlternativeList *string `json:"alternative_list,omitempty"`
 }
 
 // Process calls the LLM to suggest a target list/project for the task.
@@ -68,7 +69,7 @@ func (p *LLMRoutingProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		}
 	}
 
-	const templateID = "routing"
+	const templateID = "task_routing"
 	const templateVersion = "v1"
 
 	tpl, err := p.prompts.Load(templateID, templateVersion)
@@ -77,8 +78,9 @@ func (p *LLMRoutingProcessor) Process(ctx context.Context, jc JobContext) (Proce
 	}
 
 	vars := map[string]string{
-		"title":       input.Title,
-		"description": input.Description,
+		"Title":          input.Title,
+		"Description":    input.Description,
+		"AvailableLists": "Inbox, Work, Personal, Errands, Someday",
 	}
 	userPrompt, err := p.prompts.Render(tpl, vars)
 	if err != nil {

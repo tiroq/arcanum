@@ -5,12 +5,13 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
 
 	"github.com/tiroq/arcanum/internal/health"
 )
 
 // NewRouter builds the HTTP router with all routes registered.
-func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.ReadinessChecker, adminToken string) http.Handler {
+func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.ReadinessChecker, adminToken string, logger *zap.Logger) http.Handler {
 	mux := http.NewServeMux()
 
 	// Infrastructure routes (no auth required)
@@ -20,7 +21,7 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 
 	// Admin-protected API routes
 	auth := authMiddleware(adminToken)
-	log := loggingMiddleware
+	log := loggingMiddleware(logger)
 	rec := recoveryMiddleware
 	chain := func(h http.HandlerFunc) http.Handler {
 		return rec(log(auth(h)))

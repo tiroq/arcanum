@@ -131,8 +131,9 @@ All LLM calls go through the `providers.Provider` interface:
 
 ```go
 type Provider interface {
-    Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
     Name() string
+    Generate(ctx context.Context, req GenerateRequest) (GenerateResponse, error)
+    HealthCheck(ctx context.Context) error
 }
 ```
 
@@ -142,10 +143,9 @@ Similarly, all source integrations go through the `source.Connector` interface:
 
 ```go
 type Connector interface {
-    FetchAll(ctx context.Context) ([]RawTask, error)
-    FetchSince(ctx context.Context, since time.Time) ([]RawTask, error)
-    WriteBack(ctx context.Context, op WritebackOp) error
-    Provider() string
+    Name() string
+    FetchTasks(ctx context.Context, conn models.SourceConnection) ([]RawTask, error)
+    NormalizeTask(raw RawTask) (NormalizedTask, error)
 }
 ```
 

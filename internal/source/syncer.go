@@ -110,15 +110,28 @@ func (s *Syncer) SyncConnection(ctx context.Context, conn models.SourceConnectio
 			s.metrics.JobsCreated.Inc()
 		}
 
-		evt := events.NewSourceTaskDetectedEvent(
-			detection.SourceTaskID.String(),
-			conn.ID.String(),
-			raw.ExternalID,
-			detection.ChangeType,
-			time.Now().UTC(),
-		)
-		if err := s.publisher.Publish(ctx, subjects.SubjectSourceTaskDetected, evt); err != nil {
-			s.logger.Warn("publish detected event failed", zap.Error(err))
+		// Publish the appropriate event based on change type.
+		if detection.ChangeType == "new" {
+			evt := events.NewSourceTaskDetectedEvent(
+				detection.SourceTaskID.String(),
+				conn.ID.String(),
+				raw.ExternalID,
+				detection.ChangeType,
+				time.Now().UTC(),
+			)
+			if err := s.publisher.Publish(ctx, subjects.SubjectSourceTaskDetected, evt); err != nil {
+				s.logger.Warn("publish detected event failed", zap.Error(err))
+			}
+		} else {
+			evt := events.NewSourceTaskChangedEvent(
+				detection.SourceTaskID.String(),
+				detection.PreviousHash,
+				detection.NewHash,
+				time.Now().UTC(),
+			)
+			if err := s.publisher.Publish(ctx, subjects.SubjectSourceTaskChanged, evt); err != nil {
+				s.logger.Warn("publish changed event failed", zap.Error(err))
+			}
 		}
 
 		jobEvt := events.NewJobCreatedEvent(

@@ -60,13 +60,17 @@ docker-infra: ## Start only infrastructure (postgres + nats)
 	docker compose -f deploy/docker-compose/docker-compose.yml up -d postgres nats
 
 # Database
-migrate-up: ## Run all pending migrations
-	@echo "Running migrations..."
-	$(GO) run ./cmd/api-gateway migrate
+MIGRATIONS_PATH = internal/db/migrations
+DB_URL ?= postgres://runeforge:runeforge@localhost:5432/runeforge?sslmode=disable
 
-migrate-down: ## Rollback last migration
+migrate-up: ## Run all pending migrations (requires golang-migrate CLI)
+	@which migrate > /dev/null || (echo "migrate CLI not installed (see https://github.com/golang-migrate/migrate)" && exit 1)
+	migrate -path $(MIGRATIONS_PATH) -database "$(DB_URL)" up
+
+migrate-down: ## Rollback last migration (requires golang-migrate CLI)
 	@echo "Rolling back last migration..."
-	$(GO) run ./cmd/api-gateway migrate-down
+	@which migrate > /dev/null || (echo "migrate CLI not installed (see https://github.com/golang-migrate/migrate)" && exit 1)
+	migrate -path $(MIGRATIONS_PATH) -database "$(DB_URL)" down 1
 
 db-shell: ## Open psql shell
 	docker compose -f deploy/docker-compose/docker-compose.yml exec postgres psql -U runeforge runeforge
@@ -102,7 +106,7 @@ seed: ## Seed database with test data
 
 # Health checks
 health: ## Check health of running services
-	@curl -s http://localhost:8080/health | jq . || echo "api-gateway not responding"
-	@curl -s http://localhost:8081/health | jq . || echo "source-sync not responding"
-	@curl -s http://localhost:8082/health | jq . || echo "orchestrator not responding"
-	@curl -s http://localhost:8083/health | jq . || echo "worker not responding"
+	@curl -s http://localhost:8080/healthz | jq . || echo "api-gateway not responding"
+	@curl -s http://localhost:8081/healthz | jq . || echo "source-sync not responding"
+	@curl -s http://localhost:8082/healthz | jq . || echo "orchestrator not responding"
+	@curl -s http://localhost:8083/healthz | jq . || echo "worker not responding"

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
@@ -50,6 +51,9 @@ func (q *Queue) Enqueue(ctx context.Context, params EnqueueParams) (*models.Proc
 		if err == nil {
 			q.logger.Debug("job deduplicated", zap.String("dedupe_key", *params.DedupeKey))
 			return nil, nil
+		}
+		if err != pgx.ErrNoRows {
+			return nil, fmt.Errorf("check dedupe key: %w", err)
 		}
 		// pgx.ErrNoRows means no conflict — proceed with insert.
 	}
@@ -112,6 +116,10 @@ func (q *Queue) Lease(ctx context.Context, workerID string, jobTypes []string) (
 		&job.Payload, &job.LeasedAt, &job.LeaseExpiry, &job.ScheduledAt,
 		&job.CreatedAt, &job.UpdatedAt,
 	)
+	if err == pgx.ErrNoRows {
+		// No jobs available — normal steady-state condition.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("lease job: %w", err)
 	}
@@ -154,9 +162,10 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg strin
 
 	const update = `
 		UPDATE processing_jobs
-		SET status = $1, attempt_count = $2, scheduled_at = $3, updated_at = $4
+		SET status = $1, attempt_count = $2, scheduled_at = $3, updated_at = $4,
+		    error_code = $6, error_message = $7
 		WHERE id = $5`
-	if _, err := q.db.Exec(ctx, update, newStatus, newAttemptCount, scheduledAt, now, jobID); err != nil {
+	if _, err := q.db.Exec(ctx, update, newStatus, newAttemptCount, scheduledAt, now, jobID, errCode, errMsg); err != nil {
 		return fmt.Errorf("fail job %s: %w", jobID, err)
 	}
 

@@ -12,7 +12,7 @@ All events carry a `"version": "v1"` field for future schema evolution.
 
 | Stream name | Subjects | Retention |
 |---|---|---|
-| `RUNEFORGE` | `runeforge.>` | `WorkQueuePolicy` with `MaxAge = 7d` |
+| `RUNEFORGE` | `runeforge.>` | `LimitsPolicy` with `MaxAge = 7d` |
 
 ---
 
@@ -59,10 +59,10 @@ Fired when an existing task's `content_hash` changes between polls.
 
 ### `runeforge.job.created`
 
-Published by: `orchestrator`  
+Published by: `source-sync`  
 Consumed by: `worker`
 
-Signals that a processing job is ready to be leased.
+Emitted by `source-sync` immediately after enqueueing a DB job, signaling that a processing job is ready to be leased.
 
 ```json
 {

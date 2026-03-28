@@ -90,6 +90,8 @@ type ProcessingJob struct {
 	AttemptCount int             `db:"attempt_count"`
 	MaxAttempts  int             `db:"max_attempts"`
 	Payload      json.RawMessage `db:"payload"`
+	ErrorCode    *string         `db:"error_code"`
+	ErrorMessage *string         `db:"error_message"`
 	LeasedAt     *time.Time      `db:"leased_at"`
 	LeaseExpiry  *time.Time      `db:"lease_expiry"`
 	ScheduledAt  *time.Time      `db:"scheduled_at"`

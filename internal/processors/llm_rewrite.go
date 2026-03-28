@@ -68,7 +68,7 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		}
 	}
 
-	const templateID = "rewrite"
+	const templateID = "task_title_rewrite"
 	const templateVersion = "v1"
 
 	tpl, err := p.prompts.Load(templateID, templateVersion)
@@ -77,8 +77,8 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 	}
 
 	vars := map[string]string{
-		"title":       input.Title,
-		"description": input.Description,
+		"Title":       input.Title,
+		"Description": input.Description,
 	}
 	userPrompt, err := p.prompts.Render(tpl, vars)
 	if err != nil {

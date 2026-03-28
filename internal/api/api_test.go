@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 	"github.com/tiroq/arcanum/internal/health"
 )
 
@@ -15,7 +16,7 @@ func newTestRouter() http.Handler {
 	registry := prometheus.NewRegistry()
 	handlers := &Handlers{}
 	rc := &health.ReadinessChecker{}
-	return NewRouter(handlers, registry, rc, testAdminToken)
+	return NewRouter(handlers, registry, rc, testAdminToken, zap.NewNop())
 }
 
 func TestHealthEndpoint(t *testing.T) {

@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -40,20 +41,31 @@ func (d *ChangeDetector) Detect(ctx context.Context, connID uuid.UUID, task Norm
 		descPtr = &task.Description
 	}
 
-	// Try to insert a new source task; if it already exists return the existing id and hash.
+	// Serialize the normalized task as the stored payload.
+	normalizedPayload, err := json.Marshal(task)
+	if err != nil {
+		return DetectionResult{}, fmt.Errorf("marshal normalized payload: %w", err)
+	}
+
+	// Upsert source task. On conflict update all mutable fields so the row mirrors the upstream source.
 	const upsertTask = `
 		INSERT INTO source_tasks (id, source_connection_id, external_id, title, description, raw_payload, content_hash, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 		ON CONFLICT (source_connection_id, external_id)
-		DO UPDATE SET updated_at = EXCLUDED.updated_at
+		DO UPDATE SET
+		    title        = EXCLUDED.title,
+		    description  = EXCLUDED.description,
+		    raw_payload  = EXCLUDED.raw_payload,
+		    status       = EXCLUDED.status,
+		    updated_at   = EXCLUDED.updated_at
 		RETURNING id, content_hash`
 
 	newID := uuid.New()
 	var taskID uuid.UUID
 	var storedHash string
 
-	err := d.db.QueryRow(ctx, upsertTask,
-		newID, connID, task.ExternalID, task.Title, descPtr, []byte("{}"), task.Hash, task.Status, now,
+	err = d.db.QueryRow(ctx, upsertTask,
+		newID, connID, task.ExternalID, task.Title, descPtr, normalizedPayload, task.Hash, task.Status, now,
 	).Scan(&taskID, &storedHash)
 	if err != nil {
 		return DetectionResult{}, fmt.Errorf("upsert source task: %w", err)
@@ -89,7 +101,7 @@ func (d *ChangeDetector) Detect(ctx context.Context, connID uuid.UUID, task Norm
 		INSERT INTO source_task_snapshots (id, source_task_id, snapshot_version, content_hash, raw_payload, snapshot_taken_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`
 	if _, err := d.db.Exec(ctx, insertSnapshot,
-		snapshotID, taskID, snapshotVersion, task.Hash, []byte("{}"), now,
+		snapshotID, taskID, snapshotVersion, task.Hash, normalizedPayload, now,
 	); err != nil {
 		return DetectionResult{}, fmt.Errorf("insert snapshot: %w", err)
 	}

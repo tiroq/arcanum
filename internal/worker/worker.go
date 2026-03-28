@@ -97,7 +97,11 @@ func (w *Worker) poll(ctx context.Context) {
 	jobTypes := []string{"llm_rewrite", "llm_routing", "rules_classify", "composite"}
 	job, err := w.queue.Lease(ctx, w.workerID, jobTypes)
 	if err != nil {
-		// No jobs available is expected; log only unexpected errors.
+		w.logger.Error("lease job failed", zap.Error(err))
+		return
+	}
+	if job == nil {
+		// No jobs available — normal steady-state.
 		return
 	}
 

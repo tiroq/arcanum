@@ -40,10 +40,19 @@ func authMiddleware(adminToken string) func(http.HandlerFunc) http.HandlerFunc {
 }
 
 // loggingMiddleware logs each request method, path, status code, and duration.
-func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
-		next(rw, r)
+func loggingMiddleware(logger *zap.Logger) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+			next(rw, r)
+			logger.Info("request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", rw.status),
+				zap.Duration("duration", time.Since(start)),
+			)
+		}
 	}
 }
 
@@ -70,19 +79,4 @@ func (rw *responseWriter) WriteHeader(status int) {
 	rw.ResponseWriter.WriteHeader(status)
 }
 
-// withLogger wires a logger into the logging middleware for structured output.
-func withLogger(logger *zap.Logger) func(http.HandlerFunc) http.HandlerFunc {
-	return func(next http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
-			next(rw, r)
-			logger.Info("request",
-				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.Int("status", rw.status),
-				zap.Duration("duration", time.Since(start)),
-			)
-		}
-	}
-}
+

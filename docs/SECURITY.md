@@ -4,13 +4,13 @@
 
 ### Admin-Token
 
-All API endpoints (except `/health` and `/metrics`) require an `Admin-Token` header. This is a shared secret configured via the `ADMIN_TOKEN` environment variable.
+All API endpoints (except `/health`, `/healthz`, `/metrics`) require an `X-Admin-Token` header. This is a shared secret configured via the `ADMIN_TOKEN` environment variable.
 
 ```
-Admin-Token: <your-secret-token>
+X-Admin-Token: <your-secret-token>
 ```
 
-The middleware in `internal/api/middleware.go` validates the token on every request. Missing or incorrect tokens receive `401 Unauthorized`.
+The middleware in `internal/api/middleware.go` validates the token on every request. Missing tokens receive `401 Unauthorized`; incorrect tokens receive `403 Forbidden`.
 
 **Token requirements:**
 - Minimum 16 characters recommended in production

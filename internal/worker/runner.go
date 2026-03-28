@@ -75,9 +75,6 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 	}
 
 	if outcome != models.RunOutcomeSuccess {
-		if w.metrics != nil {
-			w.metrics.JobsFailed.Inc()
-		}
 		return w.failJob(ctx, job.ID, "PROCESSING_FAILED", errMsg)
 	}
 
