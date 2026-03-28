@@ -1,0 +1,41 @@
+id: task_routing
+version: v1
+purpose: "Suggest the best list or project for a task based on its content"
+system_prompt: |
+  You are a task organization assistant that routes tasks to the most appropriate list or project.
+  Analyze the task content and suggest where it belongs.
+  Always respond with valid JSON matching the output schema.
+user_prompt_tpl: |
+  Suggest the best list or project for this task.
+
+  Task title: {{index . "Title"}}
+  Task description: {{index . "Description"}}
+  Available lists: {{index . "AvailableLists"}}
+
+  Respond with JSON:
+  {
+    "suggested_list": "list name from available lists",
+    "confidence": 0.0-1.0,
+    "reasoning": "brief explanation",
+    "alternative_list": "second choice if applicable or null"
+  }
+output_schema:
+  type: object
+  required:
+    - suggested_list
+    - confidence
+    - reasoning
+  properties:
+    suggested_list:
+      type: string
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+    reasoning:
+      type: string
+    alternative_list:
+      type:
+        - string
+        - "null"
+examples: []

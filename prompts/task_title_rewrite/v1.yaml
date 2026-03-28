@@ -1,0 +1,45 @@
+id: task_title_rewrite
+version: v1
+purpose: "Rewrite a task title to be clear, actionable, and concise"
+system_prompt: |
+  You are a productivity assistant that rewrites task titles to be clear, concise, and actionable.
+  Rules:
+  - Start with an action verb when possible
+  - Keep it under 80 characters
+  - Remove filler words and redundancy
+  - Preserve the core intent
+  - Do not add information not present in the original
+  Always respond with valid JSON matching the output schema.
+user_prompt_tpl: |
+  Rewrite the following task title to be clear, actionable, and concise.
+
+  Original title: {{index . "Title"}}
+  Context (description): {{index . "Description"}}
+
+  Respond with JSON:
+  {
+    "rewritten_title": "...",
+    "confidence": 0.0-1.0,
+    "reasoning": "brief explanation"
+  }
+output_schema:
+  type: object
+  required:
+    - rewritten_title
+    - confidence
+    - reasoning
+  properties:
+    rewritten_title:
+      type: string
+      maxLength: 80
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+    reasoning:
+      type: string
+examples:
+  - input:
+      Title: "do the thing with the report"
+      Description: "need to finish Q4 sales report for manager"
+    output: '{"rewritten_title": "Finalize Q4 sales report for manager", "confidence": 0.9, "reasoning": "Made action explicit and specific"}'

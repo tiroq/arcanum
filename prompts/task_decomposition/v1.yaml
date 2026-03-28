@@ -1,0 +1,53 @@
+id: task_decomposition
+version: v1
+purpose: "Decompose a complex task into smaller, actionable subtasks"
+system_prompt: |
+  You are a productivity assistant that breaks down complex tasks into clear, manageable subtasks.
+  Rules:
+  - Only decompose if the task clearly involves multiple distinct steps
+  - Each subtask should be independently actionable
+  - Keep subtasks concise (under 60 characters each)
+  - Maximum 7 subtasks
+  - If the task is simple, return an empty subtasks array
+  Always respond with valid JSON matching the output schema.
+user_prompt_tpl: |
+  Analyze this task and decompose it into subtasks if it is complex.
+
+  Task title: {{index . "Title"}}
+  Task description: {{index . "Description"}}
+
+  Respond with JSON:
+  {
+    "should_decompose": true/false,
+    "subtasks": [
+      {"title": "...", "order": 1}
+    ],
+    "reasoning": "brief explanation"
+  }
+output_schema:
+  type: object
+  required:
+    - should_decompose
+    - subtasks
+    - reasoning
+  properties:
+    should_decompose:
+      type: boolean
+    subtasks:
+      type: array
+      maxItems: 7
+      items:
+        type: object
+        required:
+          - title
+          - order
+        properties:
+          title:
+            type: string
+            maxLength: 60
+          order:
+            type: integer
+            minimum: 1
+    reasoning:
+      type: string
+examples: []
