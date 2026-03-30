@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/tiroq/arcanum/internal/db/models"
+	"github.com/tiroq/arcanum/internal/providers"
 )
 
 // JobContext is passed to all processors.
@@ -29,9 +31,11 @@ type ProcessResult struct {
 	PromptTemplateID      string
 	PromptTemplateVersion string
 	ModelProvider         string
+	ModelRole             providers.ModelRole
 	ModelName             string
 	TokensUsed            int
 	DurationMS            int64
+	TimeoutUsed           time.Duration
 }
 
 // Processor is the abstraction for all processing implementations.
