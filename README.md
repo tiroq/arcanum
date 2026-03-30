@@ -2,6 +2,10 @@
 
 Runeforge is a self-hosted autonomous agent platform that processes tasks from upstream systems (starting with Google Tasks), applies LLM-driven transformations, and proposes improvements with full auditability.
 
+### Multi-Model Support
+
+The platform supports role-based model selection for Ollama. Processors request logical model roles (`default`, `fast`, `planner`, `review`) rather than hardcoded model names. Each role can be configured to use a different model and timeout via environment variables, enabling operators to balance latency and reasoning capability per workload. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+
 ## Quick Start
 
 ### Prerequisites
