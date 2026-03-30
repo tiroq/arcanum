@@ -46,11 +46,11 @@ type openAIResponseFormat struct {
 }
 
 type openAIRequest struct {
-	Model          string               `json:"model"`
-	Messages       []openAIMessage      `json:"messages"`
-	Temperature    float64              `json:"temperature,omitempty"`
-	MaxTokens      int                  `json:"max_tokens,omitempty"`
-	TopP           float64              `json:"top_p,omitempty"`
+	Model          string                `json:"model"`
+	Messages       []openAIMessage       `json:"messages"`
+	Temperature    float64               `json:"temperature,omitempty"`
+	MaxTokens      int                   `json:"max_tokens,omitempty"`
+	TopP           float64               `json:"top_p,omitempty"`
 	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -96,7 +96,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			wait := time.Duration(math.Pow(2, float64(attempt-1))*float64(time.Second))
+			wait := time.Duration(math.Pow(2, float64(attempt-1)) * float64(time.Second))
 			select {
 			case <-ctx.Done():
 				return GenerateResponse{}, ctx.Err()
