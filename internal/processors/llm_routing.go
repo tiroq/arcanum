@@ -9,8 +9,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tiroq/arcanum/internal/metrics"
-	"github.com/tiroq/arcanum/internal/providers"
 	"github.com/tiroq/arcanum/internal/prompts"
+	"github.com/tiroq/arcanum/internal/providers"
 )
 
 // LLMRoutingProcessor classifies tasks and suggests a target list/project.
@@ -20,7 +20,7 @@ type LLMRoutingProcessor struct {
 	logger          *zap.Logger
 	metrics         *metrics.Metrics
 	defaultProvider string
-	defaultModel    string
+	modelRole       providers.ModelRole
 }
 
 // NewLLMRoutingProcessor creates a new LLMRoutingProcessor.
@@ -29,7 +29,7 @@ func NewLLMRoutingProcessor(
 	templateLoader *prompts.TemplateLoader,
 	logger *zap.Logger,
 	m *metrics.Metrics,
-	defaultProvider, defaultModel string,
+	defaultProvider string,
 ) *LLMRoutingProcessor {
 	return &LLMRoutingProcessor{
 		providers:       providerReg,
@@ -37,7 +37,7 @@ func NewLLMRoutingProcessor(
 		logger:          logger,
 		metrics:         m,
 		defaultProvider: defaultProvider,
-		defaultModel:    defaultModel,
+		modelRole:       providers.RoleFast,
 	}
 }
 
@@ -94,7 +94,7 @@ func (p *LLMRoutingProcessor) Process(ctx context.Context, jc JobContext) (Proce
 
 	start := time.Now()
 	genResp, err := provider.Generate(ctx, providers.GenerateRequest{
-		Model:                 p.defaultModel,
+		ModelRole:             p.modelRole,
 		SystemPrompt:          tpl.SystemPrompt,
 		UserPrompt:            userPrompt,
 		Temperature:           0.2,
@@ -133,8 +133,10 @@ func (p *LLMRoutingProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		PromptTemplateID:      templateID,
 		PromptTemplateVersion: templateVersion,
 		ModelProvider:         p.defaultProvider,
-		ModelName:             p.defaultModel,
+		ModelRole:             p.modelRole,
+		ModelName:             genResp.Model,
 		TokensUsed:            genResp.TokensTotal,
 		DurationMS:            durationMS,
+		TimeoutUsed:           genResp.TimeoutUsed,
 	}, nil
 }
