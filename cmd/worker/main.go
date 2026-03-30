@@ -12,12 +12,22 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
+
+	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/db"
 	"github.com/tiroq/arcanum/internal/health"
+	"github.com/tiroq/arcanum/internal/jobs"
 	"github.com/tiroq/arcanum/internal/logging"
+	"github.com/tiroq/arcanum/internal/messaging"
 	"github.com/tiroq/arcanum/internal/metrics"
-	"go.uber.org/zap"
+	"github.com/tiroq/arcanum/internal/processors"
+	"github.com/tiroq/arcanum/internal/prompts"
+	"github.com/tiroq/arcanum/internal/providers"
+	"github.com/tiroq/arcanum/internal/providers/execution"
+	"github.com/tiroq/arcanum/internal/providers/profile"
+	"github.com/tiroq/arcanum/internal/worker"
 )
 
 const (
@@ -50,8 +60,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init metrics: %w", err)
 	}
-	_ = m
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -73,6 +81,77 @@ func run() error {
 	defer nc.Drain() //nolint:errcheck
 	logger.Info("nats connected", zap.String("url", cfg.NATS.URL))
 
+	// --- Worker dependencies ---
+
+	queue := jobs.NewQueue(pool, logger)
+
+	publisher, err := messaging.NewPublisher(nc, logger)
+	if err != nil {
+		return fmt.Errorf("create publisher: %w", err)
+	}
+
+	auditor := audit.NewPostgresAuditRecorder(pool)
+	templateLoader := prompts.NewTemplateLoader("prompts")
+
+	// --- Provider setup with execution profiles ---
+
+	ollamaCfg := cfg.Providers.Ollama
+	ollamaBase := providers.NewOllamaProvider("ollama", ollamaCfg, logger)
+
+	profiles, err := profile.ResolveFromConfig(
+		ollamaCfg.DefaultModel,
+		ollamaCfg.FastModel,
+		ollamaCfg.PlannerModel,
+		ollamaCfg.ReviewModel,
+		ollamaCfg.DefaultProfile,
+		ollamaCfg.FastProfile,
+		ollamaCfg.PlannerProfile,
+		ollamaCfg.ReviewProfile,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve execution profiles: %w", err)
+	}
+
+	execProvider := execution.NewExecutingProvider(ollamaBase, profiles, m, logger)
+
+	providerReg := providers.NewProviderRegistry()
+	providerReg.Register("ollama", execProvider)
+	logger.Info("registered ollama provider with execution profiles")
+
+	// --- Processor registry ---
+
+	const defaultProviderName = "ollama"
+
+	rewriteProc := processors.NewLLMRewriteProcessor(providerReg, templateLoader, logger, m, defaultProviderName)
+	routingProc := processors.NewLLMRoutingProcessor(providerReg, templateLoader, logger, m, defaultProviderName)
+	rulesProc := processors.NewRulesOnlyProcessor()
+	compositeProc := processors.NewCompositeProcessor("composite", rewriteProc, routingProc)
+
+	procRegistry := processors.NewRegistry()
+	procRegistry.Register(rewriteProc)
+	procRegistry.Register(routingProc)
+	procRegistry.Register(rulesProc)
+	procRegistry.Register(compositeProc)
+
+	// --- Worker ---
+
+	workerID, err := os.Hostname()
+	if err != nil {
+		workerID = fmt.Sprintf("worker-%d", os.Getpid())
+	}
+
+	w := worker.New(queue, procRegistry, publisher, pool, auditor, m, logger, workerID)
+
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+
+	if err := w.Start(workerCtx); err != nil {
+		return fmt.Errorf("start worker: %w", err)
+	}
+	logger.Info("worker started", zap.String("worker_id", workerID))
+
+	// --- HTTP health/metrics server ---
+
 	readiness := &health.ReadinessChecker{DB: pool, NATS: nc}
 
 	mux := http.NewServeMux()
@@ -87,7 +166,7 @@ func run() error {
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}
 
-	logger.Info("starting worker", zap.Int("port", cfg.HTTP.Port))
+	logger.Info("starting http server", zap.Int("port", cfg.HTTP.Port))
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -100,6 +179,11 @@ func run() error {
 	<-quit
 
 	logger.Info("shutting down worker")
+
+	// Stop worker first so in-flight jobs complete before connections close.
+	w.Stop()
+	workerCancel()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
 	defer shutdownCancel()
 
