@@ -70,10 +70,20 @@ type OpenRouterConfig struct {
 }
 
 type OllamaConfig struct {
-	BaseURL        string        `envconfig:"OLLAMA_BASE_URL" default:"http://localhost:11434"`
-	DefaultModel   string        `envconfig:"OLLAMA_DEFAULT_MODEL" default:"llama3.2"`
-	TimeoutSeconds int           `envconfig:"OLLAMA_TIMEOUT_SECONDS" default:"120"`
+	BaseURL        string `envconfig:"OLLAMA_BASE_URL" default:"http://localhost:11434"`
+	DefaultModel   string `envconfig:"OLLAMA_DEFAULT_MODEL" default:"llama3.2"`
+	FastModel      string `envconfig:"OLLAMA_FAST_MODEL"`
+	PlannerModel   string `envconfig:"OLLAMA_PLANNER_MODEL"`
+	ReviewModel    string `envconfig:"OLLAMA_REVIEW_MODEL"`
+
+	TimeoutSeconds        int `envconfig:"OLLAMA_TIMEOUT_SECONDS" default:"120"`
+	FastTimeoutSeconds    int `envconfig:"OLLAMA_FAST_TIMEOUT_SECONDS"`
+	PlannerTimeoutSeconds int `envconfig:"OLLAMA_PLANNER_TIMEOUT_SECONDS"`
+
+	// Computed duration fields (derived from *Seconds fields in Load).
 	Timeout        time.Duration
+	FastTimeout    time.Duration
+	PlannerTimeout time.Duration
 }
 
 type FeatureFlags struct {
@@ -135,6 +145,16 @@ func Load() (*Config, error) {
 	cfg.Providers.OpenAI.Timeout = time.Duration(cfg.Providers.OpenAI.TimeoutSeconds) * time.Second
 	cfg.Providers.OpenRouter.Timeout = time.Duration(cfg.Providers.OpenRouter.TimeoutSeconds) * time.Second
 	cfg.Providers.Ollama.Timeout = time.Duration(cfg.Providers.Ollama.TimeoutSeconds) * time.Second
+	if cfg.Providers.Ollama.FastTimeoutSeconds > 0 {
+		cfg.Providers.Ollama.FastTimeout = time.Duration(cfg.Providers.Ollama.FastTimeoutSeconds) * time.Second
+	} else {
+		cfg.Providers.Ollama.FastTimeout = cfg.Providers.Ollama.Timeout
+	}
+	if cfg.Providers.Ollama.PlannerTimeoutSeconds > 0 {
+		cfg.Providers.Ollama.PlannerTimeout = time.Duration(cfg.Providers.Ollama.PlannerTimeoutSeconds) * time.Second
+	} else {
+		cfg.Providers.Ollama.PlannerTimeout = cfg.Providers.Ollama.Timeout
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
@@ -156,6 +176,15 @@ func (c *Config) validate() error {
 	if c.Retry.BackoffMultiplier <= 0 {
 		errs = append(errs, "RETRY_BACKOFF_MULTIPLIER must be greater than 0")
 	}
+	if c.Providers.Ollama.TimeoutSeconds <= 0 {
+		errs = append(errs, "OLLAMA_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.Providers.Ollama.FastTimeoutSeconds < 0 {
+		errs = append(errs, "OLLAMA_FAST_TIMEOUT_SECONDS must be non-negative")
+	}
+	if c.Providers.Ollama.PlannerTimeoutSeconds < 0 {
+		errs = append(errs, "OLLAMA_PLANNER_TIMEOUT_SECONDS must be non-negative")
+	}
 
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 	if !validLevels[strings.ToLower(c.Logging.Level)] {
@@ -171,4 +200,41 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+// ResolveModel returns the configured model name for the given role.
+// If a role-specific model is not configured, it falls back to DefaultModel.
+func (c *OllamaConfig) ResolveModel(role string) string {
+	switch role {
+	case "fast":
+		if c.FastModel != "" {
+			return c.FastModel
+		}
+	case "planner":
+		if c.PlannerModel != "" {
+			return c.PlannerModel
+		}
+	case "review":
+		if c.ReviewModel != "" {
+			return c.ReviewModel
+		}
+	}
+	return c.DefaultModel
+}
+
+// ResolveTimeout returns the configured timeout for the given role.
+// If a role-specific timeout is not configured, it falls back to Timeout.
+func (c *OllamaConfig) ResolveTimeout(role string) time.Duration {
+	switch role {
+	case "fast":
+		if c.FastTimeoutSeconds > 0 {
+			return c.FastTimeout
+		}
+	case "planner":
+		if c.PlannerTimeoutSeconds > 0 {
+			return c.PlannerTimeout
+		}
+	}
+	// "review" and "default" both use the base timeout.
+	return c.Timeout
 }

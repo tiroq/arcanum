@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,4 +73,99 @@ func TestConfigValidation_InvalidMaxConns(t *testing.T) {
 	_, err := config.Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "DATABASE_MAX_CONNS")
+}
+
+func TestOllamaMultiModelDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "llama3.2", cfg.Providers.Ollama.DefaultModel)
+	assert.Empty(t, cfg.Providers.Ollama.FastModel)
+	assert.Empty(t, cfg.Providers.Ollama.PlannerModel)
+	assert.Empty(t, cfg.Providers.Ollama.ReviewModel)
+	assert.Equal(t, 120, cfg.Providers.Ollama.TimeoutSeconds)
+	assert.Equal(t, 0, cfg.Providers.Ollama.FastTimeoutSeconds)
+	assert.Equal(t, 0, cfg.Providers.Ollama.PlannerTimeoutSeconds)
+}
+
+func TestOllamaMultiModelOverrides(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_DEFAULT_MODEL", "qwen2.5:7b-instruct")
+	t.Setenv("OLLAMA_FAST_MODEL", "llama3.2:3b")
+	t.Setenv("OLLAMA_PLANNER_MODEL", "qwen2.5:14b-instruct")
+	t.Setenv("OLLAMA_REVIEW_MODEL", "qwen2.5:7b-instruct")
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "180")
+	t.Setenv("OLLAMA_FAST_TIMEOUT_SECONDS", "90")
+	t.Setenv("OLLAMA_PLANNER_TIMEOUT_SECONDS", "240")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "qwen2.5:7b-instruct", cfg.Providers.Ollama.DefaultModel)
+	assert.Equal(t, "llama3.2:3b", cfg.Providers.Ollama.FastModel)
+	assert.Equal(t, "qwen2.5:14b-instruct", cfg.Providers.Ollama.PlannerModel)
+	assert.Equal(t, "qwen2.5:7b-instruct", cfg.Providers.Ollama.ReviewModel)
+	assert.Equal(t, 180, cfg.Providers.Ollama.TimeoutSeconds)
+	assert.Equal(t, 90, cfg.Providers.Ollama.FastTimeoutSeconds)
+	assert.Equal(t, 240, cfg.Providers.Ollama.PlannerTimeoutSeconds)
+}
+
+func TestOllamaTimeoutDerivation(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "180")
+	t.Setenv("OLLAMA_FAST_TIMEOUT_SECONDS", "90")
+	t.Setenv("OLLAMA_PLANNER_TIMEOUT_SECONDS", "240")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, 180*time.Second, cfg.Providers.Ollama.Timeout)
+	assert.Equal(t, 90*time.Second, cfg.Providers.Ollama.FastTimeout)
+	assert.Equal(t, 240*time.Second, cfg.Providers.Ollama.PlannerTimeout)
+}
+
+func TestOllamaTimeoutFallback(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_TIMEOUT_SECONDS", "180")
+	// Do not set FAST or PLANNER timeout -> should fallback to default
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, 180*time.Second, cfg.Providers.Ollama.FastTimeout)
+	assert.Equal(t, 180*time.Second, cfg.Providers.Ollama.PlannerTimeout)
+}
+
+func TestOllamaResolveModel(t *testing.T) {
+	ollamaCfg := config.OllamaConfig{
+		DefaultModel: "qwen2.5:7b-instruct",
+		FastModel:    "llama3.2:3b",
+		PlannerModel: "qwen2.5:14b-instruct",
+	}
+
+	assert.Equal(t, "qwen2.5:7b-instruct", ollamaCfg.ResolveModel("default"))
+	assert.Equal(t, "llama3.2:3b", ollamaCfg.ResolveModel("fast"))
+	assert.Equal(t, "qwen2.5:14b-instruct", ollamaCfg.ResolveModel("planner"))
+	// review not set, should fallback
+	assert.Equal(t, "qwen2.5:7b-instruct", ollamaCfg.ResolveModel("review"))
+	// unknown role falls back
+	assert.Equal(t, "qwen2.5:7b-instruct", ollamaCfg.ResolveModel("unknown"))
+}
+
+func TestOllamaResolveTimeout(t *testing.T) {
+	ollamaCfg := config.OllamaConfig{
+		TimeoutSeconds:        180,
+		Timeout:               180 * time.Second,
+		FastTimeoutSeconds:    90,
+		FastTimeout:           90 * time.Second,
+		PlannerTimeoutSeconds: 240,
+		PlannerTimeout:        240 * time.Second,
+	}
+
+	assert.Equal(t, 180*time.Second, ollamaCfg.ResolveTimeout("default"))
+	assert.Equal(t, 90*time.Second, ollamaCfg.ResolveTimeout("fast"))
+	assert.Equal(t, 240*time.Second, ollamaCfg.ResolveTimeout("planner"))
+	assert.Equal(t, 180*time.Second, ollamaCfg.ResolveTimeout("review"))
 }
