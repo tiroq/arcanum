@@ -139,6 +139,34 @@ type Provider interface {
 
 Implementations: `openai`, `openrouter`, `ollama`. The worker selects a provider at startup via configuration. Adding a new provider requires implementing only this interface — no other service changes.
 
+### Multi-Model Role Support
+
+Processors do not reference raw model names. Instead, they request a **logical model role** via `GenerateRequest.ModelRole`:
+
+| Role | Purpose | Example Use |
+|------|---------|-------------|
+| `default` | Balanced general-purpose model | General rewrite, default LLM tasks |
+| `fast` | Low-latency lightweight tasks | Classification, tagging, quick routing |
+| `planner` | Heavier reasoning and decomposition | Planning, decomposition, agent spawning |
+| `review` | Critique, evaluation, and validation | Self-review, validation passes |
+
+The provider layer resolves the role to a concrete model name and timeout based on configuration. If a role-specific model is not configured, the provider falls back to the default model. This design allows operators to assign different models to different workloads without changing application logic.
+
+**Ollama role-based configuration example:**
+
+```env
+OLLAMA_DEFAULT_MODEL=qwen2.5:7b-instruct
+OLLAMA_FAST_MODEL=llama3.2:3b
+OLLAMA_PLANNER_MODEL=qwen2.5:14b-instruct
+OLLAMA_REVIEW_MODEL=qwen2.5:7b-instruct
+
+OLLAMA_TIMEOUT_SECONDS=180
+OLLAMA_FAST_TIMEOUT_SECONDS=90
+OLLAMA_PLANNER_TIMEOUT_SECONDS=240
+```
+
+**Execution records** persist both the requested model role and the resolved model name, ensuring full traceability in `processing_runs.result_payload`.
+
 Similarly, all source integrations go through the `source.Connector` interface:
 
 ```go

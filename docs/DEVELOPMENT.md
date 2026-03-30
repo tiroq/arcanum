@@ -99,7 +99,13 @@ Key variables by service:
 | `OPENAI_API_KEY` | No | — | Required if using OpenAI provider |
 | `OPENAI_DEFAULT_MODEL` | No | `gpt-4o-mini` | Model name |
 | `OLLAMA_BASE_URL` | No | `http://localhost:11434` | Ollama base URL |
-| `OLLAMA_DEFAULT_MODEL` | No | `llama3.2` | Model name |
+| `OLLAMA_DEFAULT_MODEL` | No | `llama3.2` | Default (general-purpose) model name |
+| `OLLAMA_FAST_MODEL` | No | — | Fast model for low-latency tasks (falls back to default) |
+| `OLLAMA_PLANNER_MODEL` | No | — | Planner model for heavy reasoning (falls back to default) |
+| `OLLAMA_REVIEW_MODEL` | No | — | Review model for critique/validation (falls back to default) |
+| `OLLAMA_TIMEOUT_SECONDS` | No | `120` | Default timeout for Ollama calls |
+| `OLLAMA_FAST_TIMEOUT_SECONDS` | No | — | Timeout override for fast role (falls back to default) |
+| `OLLAMA_PLANNER_TIMEOUT_SECONDS` | No | — | Timeout override for planner role (falls back to default) |
 | `PROMPTS_PATH` | No | — | Path to prompt template directory (worker) |
 | `FEATURE_AUTO_APPROVE` | No | `false` | Auto-approve all proposals |
 | `FEATURE_WRITEBACK_ENABLED` | No | `false` | Enable writeback to source |
