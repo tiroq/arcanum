@@ -20,7 +20,7 @@ type LLMRewriteProcessor struct {
 	logger          *zap.Logger
 	metrics         *metrics.Metrics
 	defaultProvider string
-	defaultModel    string
+	modelRole       providers.ModelRole
 }
 
 // NewLLMRewriteProcessor creates a new LLMRewriteProcessor.
@@ -29,7 +29,7 @@ func NewLLMRewriteProcessor(
 	templateLoader *prompts.TemplateLoader,
 	logger *zap.Logger,
 	m *metrics.Metrics,
-	defaultProvider, defaultModel string,
+	defaultProvider string,
 ) *LLMRewriteProcessor {
 	return &LLMRewriteProcessor{
 		providers:       providerReg,
@@ -37,7 +37,7 @@ func NewLLMRewriteProcessor(
 		logger:          logger,
 		metrics:         m,
 		defaultProvider: defaultProvider,
-		defaultModel:    defaultModel,
+		modelRole:       providers.RoleDefault,
 	}
 }
 
@@ -92,7 +92,7 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 
 	start := time.Now()
 	genResp, err := provider.Generate(ctx, providers.GenerateRequest{
-		Model:                 p.defaultModel,
+		ModelRole:             p.modelRole,
 		SystemPrompt:          tpl.SystemPrompt,
 		UserPrompt:            userPrompt,
 		Temperature:           0.3,
@@ -131,8 +131,10 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		PromptTemplateID:      templateID,
 		PromptTemplateVersion: templateVersion,
 		ModelProvider:         p.defaultProvider,
-		ModelName:             p.defaultModel,
+		ModelRole:             p.modelRole,
+		ModelName:             genResp.Model,
 		TokensUsed:            genResp.TokensTotal,
 		DurationMS:            durationMS,
+		TimeoutUsed:           genResp.TimeoutUsed,
 	}, nil
 }
