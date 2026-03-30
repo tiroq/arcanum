@@ -10,28 +10,33 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tiroq/arcanum/internal/config"
 )
 
-// OllamaProvider implements Provider for a local Ollama instance.
+// OllamaProvider implements Provider for a local Ollama instance with role-based model selection.
 type OllamaProvider struct {
-	name    string
-	baseURL string
-	client  *http.Client
-	logger  *zap.Logger
+	name   string
+	cfg    config.OllamaConfig
+	client *http.Client
+	logger *zap.Logger
 }
 
-// NewOllamaProvider creates a new OllamaProvider.
-func NewOllamaProvider(name, baseURL string, timeout time.Duration, logger *zap.Logger) *OllamaProvider {
+// NewOllamaProvider creates a new OllamaProvider with role-based configuration.
+func NewOllamaProvider(name string, cfg config.OllamaConfig, logger *zap.Logger) *OllamaProvider {
 	return &OllamaProvider{
-		name:    name,
-		baseURL: baseURL,
-		client:  &http.Client{Timeout: timeout},
-		logger:  logger,
+		name:   name,
+		cfg:    cfg,
+		client: &http.Client{Timeout: cfg.Timeout},
+		logger: logger,
 	}
 }
 
 // Name returns the provider name.
 func (p *OllamaProvider) Name() string { return p.name }
+
+// Config returns the provider's Ollama configuration (for diagnostics).
+func (p *OllamaProvider) Config() config.OllamaConfig { return p.cfg }
 
 type ollamaMessage struct {
 	Role    string `json:"role"`
@@ -50,8 +55,43 @@ type ollamaChatResponse struct {
 	Done    bool          `json:"done"`
 }
 
+// ResolveModel returns the model name for a given role, falling back to DefaultModel.
+func (p *OllamaProvider) ResolveModel(role ModelRole) string {
+	return p.cfg.ResolveModel(role.String())
+}
+
+// ResolveTimeout returns the timeout for a given role, falling back to the default timeout.
+func (p *OllamaProvider) ResolveTimeout(role ModelRole) time.Duration {
+	return p.cfg.ResolveTimeout(role.String())
+}
+
 // Generate calls Ollama's /api/chat endpoint synchronously.
+// If req.ModelRole is set and req.Model is empty, the model is resolved from configuration.
 func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (GenerateResponse, error) {
+	role := req.ModelRole
+	if role == "" {
+		role = RoleDefault
+	}
+
+	model := req.Model
+	usedFallback := false
+	if model == "" {
+		model = p.ResolveModel(role)
+		if role != RoleDefault && model == p.cfg.DefaultModel {
+			usedFallback = true
+		}
+	}
+
+	timeout := p.ResolveTimeout(role)
+
+	p.logger.Debug("ollama role resolution",
+		zap.String("provider", p.name),
+		zap.String("role", role.String()),
+		zap.String("resolved_model", model),
+		zap.Duration("resolved_timeout", timeout),
+		zap.Bool("used_fallback", usedFallback),
+	)
+
 	messages := make([]ollamaMessage, 0, 2)
 	if req.SystemPrompt != "" {
 		messages = append(messages, ollamaMessage{Role: "system", Content: req.SystemPrompt})
@@ -59,7 +99,7 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 	messages = append(messages, ollamaMessage{Role: "user", Content: req.UserPrompt})
 
 	body := ollamaChatRequest{
-		Model:    req.Model,
+		Model:    model,
 		Messages: messages,
 		Stream:   false,
 	}
@@ -69,8 +109,11 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 		return GenerateResponse{}, fmt.Errorf("%s: marshal request: %w", p.name, err)
 	}
 
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	start := time.Now()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/api/chat", bytes.NewReader(data))
+	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, p.cfg.BaseURL+"/api/chat", bytes.NewReader(data))
 	if err != nil {
 		return GenerateResponse{}, fmt.Errorf("%s: create request: %w", p.name, err)
 	}
@@ -100,21 +143,24 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 
 	p.logger.Debug("ollama call complete",
 		zap.String("provider", p.name),
-		zap.String("model", req.Model),
+		zap.String("model_role", role.String()),
+		zap.String("model", model),
 		zap.Int64("duration_ms", durationMS),
 	)
 
 	return GenerateResponse{
-		Content:    resp.Message.Content,
-		Model:      resp.Model,
-		Provider:   p.name,
-		DurationMS: durationMS,
+		Content:     resp.Message.Content,
+		Model:       resp.Model,
+		ModelRole:   role.String(),
+		Provider:    p.name,
+		DurationMS:  durationMS,
+		TimeoutUsed: timeout,
 	}, nil
 }
 
 // HealthCheck verifies Ollama is reachable via /api/tags.
 func (p *OllamaProvider) HealthCheck(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.BaseURL+"/api/tags", nil)
 	if err != nil {
 		return fmt.Errorf("%s: health check: %w", p.name, err)
 	}
@@ -129,4 +175,39 @@ func (p *OllamaProvider) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("%s: health check: unexpected status %d", p.name, resp.StatusCode)
 	}
 	return nil
+}
+
+// DiagnosticInfo returns diagnostic information about the Ollama provider configuration.
+func (p *OllamaProvider) DiagnosticInfo() map[string]interface{} {
+	info := map[string]interface{}{
+		"base_url":        p.cfg.BaseURL,
+		"default_model":   p.cfg.DefaultModel,
+		"default_timeout": p.cfg.Timeout.String(),
+	}
+	if p.cfg.FastModel != "" {
+		info["fast_model"] = p.cfg.FastModel
+	} else {
+		info["fast_model"] = p.cfg.DefaultModel + " (fallback)"
+	}
+	if p.cfg.PlannerModel != "" {
+		info["planner_model"] = p.cfg.PlannerModel
+	} else {
+		info["planner_model"] = p.cfg.DefaultModel + " (fallback)"
+	}
+	if p.cfg.ReviewModel != "" {
+		info["review_model"] = p.cfg.ReviewModel
+	} else {
+		info["review_model"] = p.cfg.DefaultModel + " (fallback)"
+	}
+	if p.cfg.FastTimeoutSeconds > 0 {
+		info["fast_timeout"] = p.cfg.FastTimeout.String()
+	} else {
+		info["fast_timeout"] = p.cfg.Timeout.String() + " (fallback)"
+	}
+	if p.cfg.PlannerTimeoutSeconds > 0 {
+		info["planner_timeout"] = p.cfg.PlannerTimeout.String()
+	} else {
+		info["planner_timeout"] = p.cfg.Timeout.String() + " (fallback)"
+	}
+	return info
 }

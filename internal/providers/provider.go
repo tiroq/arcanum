@@ -10,6 +10,7 @@ import (
 // GenerateRequest holds all parameters for a generation call.
 type GenerateRequest struct {
 	Model                 string
+	ModelRole             ModelRole
 	SystemPrompt          string
 	UserPrompt            string
 	Temperature           float64
@@ -26,11 +27,13 @@ type GenerateRequest struct {
 type GenerateResponse struct {
 	Content          string
 	Model            string
+	ModelRole        string
 	Provider         string
 	TokensPrompt     int
 	TokensCompletion int
 	TokensTotal      int
 	DurationMS       int64
+	TimeoutUsed      time.Duration
 }
 
 // Provider is the LLM provider interface.

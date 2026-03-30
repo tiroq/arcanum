@@ -136,6 +136,7 @@ func (p *OpenAIProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 		return GenerateResponse{
 			Content:          content,
 			Model:            resp.Model,
+			ModelRole:        string(req.ModelRole),
 			Provider:         p.name,
 			TokensPrompt:     resp.Usage.PromptTokens,
 			TokensCompletion: resp.Usage.CompletionTokens,
