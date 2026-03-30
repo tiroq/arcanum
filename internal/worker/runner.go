@@ -75,6 +75,9 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 		if result.OutputPayload != nil {
 			meta["output"] = json.RawMessage(result.OutputPayload)
 		}
+		if result.ExecutionTrace != nil {
+			meta["execution_trace"] = json.RawMessage(result.ExecutionTrace)
+		}
 		if enriched, mErr := json.Marshal(meta); mErr == nil {
 			runResultPayload = enriched
 		}
