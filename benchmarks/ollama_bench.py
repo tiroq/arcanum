@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import csv
 import difflib
 import json
 import math
@@ -9,7 +10,6 @@ import os
 import platform
 import re
 import statistics
-import subprocess
 import sys
 import time
 import urllib.error
@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 DEFAULT_BASE_URL = "http://localhost:11434"
-
 
 SHORT_PROMPT = "Summarize why idempotent job orchestration matters in two short paragraphs."
 
@@ -83,16 +82,47 @@ Required JSON schema:
 }
 """.strip()
 
+SCENARIOS = [
+    {
+        "name": "short",
+        "prompt": SHORT_PROMPT,
+        "expectation": "text",
+    },
+    {
+        "name": "medium",
+        "prompt": MEDIUM_PROMPT,
+        "expectation": "text",
+    },
+    {
+        "name": "long",
+        "prompt": LONG_PROMPT,
+        "expectation": "text",
+    },
+    {
+        "name": "json_agent",
+        "prompt": JSON_AGENT_PROMPT,
+        "expectation": "json_agent",
+    },
+]
+
+THINK_MODES = {"thinking", "nothinking", "provider_default"}
+
 
 @dataclass
 class RunResult:
     model_requested: str
     model_resolved: str
     scenario: str
+    expectation: str
     concurrency: int
     run_kind: str
     ok: bool
     error: Optional[str]
+
+    requested_think_mode: str
+    effective_think_mode: str
+    think_mode_source: str
+
     total_duration_ns: Optional[int]
     load_duration_ns: Optional[int]
     prompt_eval_count: Optional[int]
@@ -103,9 +133,16 @@ class RunResult:
     prompt_tps: Optional[float]
     gen_tps: Optional[float]
     response_chars: Optional[int]
+    response_text: Optional[str]
+
     json_valid: Optional[bool]
-    json_quality_score: Optional[float]
-    quality_notes: Optional[List[str]]
+    schema_score: Optional[float]
+    usefulness_score: Optional[float]
+    quality_score: Optional[float]
+
+    gated_usable: Optional[bool]
+    scenario_rank_score: Optional[float]
+    rejection_reason: Optional[str]
 
 
 def ns_to_s(value: Optional[int]) -> Optional[float]:
@@ -197,21 +234,32 @@ def ollama_tags(base_url: str, timeout_s: int) -> List[str]:
     return names
 
 
-def ollama_ps(base_url: str, timeout_s: int) -> Dict[str, Any]:
-    try:
-        return http_get_json(f"{base_url.rstrip('/')}/api/ps", timeout_s)
-    except Exception:
-        return {"models": []}
+def ollama_generate(
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout_s: int,
+    think_mode: str,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    }
 
+    # provider_default means: do not send "think" at all
+    if think_mode == "thinking":
+        payload["think"] = True
+    elif think_mode == "nothinking":
+        payload["think"] = False
+    elif think_mode == "provider_default":
+        pass
+    else:
+        raise ValueError(f"Unsupported think_mode: {think_mode}")
 
-def ollama_generate(base_url: str, model: str, prompt: str, timeout_s: int) -> Dict[str, Any]:
     return http_post_json(
         f"{base_url.rstrip('/')}/api/generate",
-        {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-        },
+        payload,
         timeout_s=timeout_s,
     )
 
@@ -234,7 +282,6 @@ def ollama_unload(base_url: str, model: str, timeout_s: int) -> None:
 
 def ollama_pull(base_url: str, model: str, timeout_s: int) -> bool:
     try:
-        # stream=false is not universally guaranteed for pull, so use urllib raw read
         body = json.dumps({"name": model, "stream": False}).encode("utf-8")
         req = urllib.request.Request(
             f"{base_url.rstrip('/')}/api/pull",
@@ -250,17 +297,11 @@ def ollama_pull(base_url: str, model: str, timeout_s: int) -> bool:
 
 
 def search_ollama_library(query: str, timeout_s: int = 20) -> List[str]:
-    """
-    Best-effort public library lookup.
-    This is not required for local benchmarking, but helps suggest correct names.
-    """
     candidates: List[str] = []
     try:
         encoded = urllib.parse.quote(query)
         url = f"https://ollama.com/search?q={encoded}"
         html = urllib.request.urlopen(url, timeout=timeout_s).read().decode("utf-8", errors="ignore")
-
-        # Best-effort parse of /library/<name> links from search results
         found = re.findall(r'href="/library/([^"/?]+)', html)
         for item in found:
             if item not in candidates:
@@ -275,11 +316,6 @@ def normalize_model_hint(name: str) -> str:
 
 
 def expand_model_guesses(name: str) -> List[str]:
-    """
-    Create useful fallback guesses.
-    Example:
-    qwen2.5:7b-instruct -> [qwen2.5:7b-instruct, qwen2.5:7b, qwen2.5]
-    """
     name = normalize_model_hint(name)
     guesses = [name]
 
@@ -292,12 +328,7 @@ def expand_model_guesses(name: str) -> List[str]:
         if tag.endswith("-instruct"):
             guesses.append(f"{family}:{tag[:-len('-instruct')]}")
     else:
-        # if no tag, try common instruct-ish defaults
-        guesses.extend([
-            f"{name}:latest",
-            f"{name}:7b",
-            f"{name}:8b",
-        ])
+        guesses.extend([f"{name}:latest", f"{name}:7b", f"{name}:8b", f"{name}:1.5b", f"{name}:3b"])
 
     out = []
     seen = set()
@@ -313,7 +344,6 @@ def pick_closest_model(requested: str, installed: List[str], remote_hints: List[
     if not candidates:
         return None, []
 
-    # Strong family-based match first
     req = normalize_model_hint(requested)
     family = req.split(":")[0]
     family_matches = [c for c in candidates if c.lower().startswith(family)]
@@ -323,7 +353,6 @@ def pick_closest_model(requested: str, installed: List[str], remote_hints: List[
             return close[0], close
         return family_matches[0], family_matches[:5]
 
-    # General fuzzy match
     close = difflib.get_close_matches(req, candidates, n=5, cutoff=0.0)
     if close:
         return close[0], close
@@ -338,36 +367,25 @@ def resolve_model_name(
     auto_pull: bool,
     resolve_closest: bool,
 ) -> Tuple[str, List[str], bool]:
-    """
-    Returns:
-      resolved_name,
-      suggestions,
-      pulled
-    """
     installed = ollama_tags(base_url, timeout_s)
     installed_set = set(installed)
 
-    # Exact installed
     if requested in installed_set:
         return requested, [], False
 
-    # Try guesses
     guesses = expand_model_guesses(requested)
     for g in guesses:
         if g in installed_set:
             return g, [f"resolved installed alias from {requested} -> {g}"], False
 
-    # Search remote hints
     remote_hints = search_ollama_library(requested)
     best, suggestions = pick_closest_model(requested, installed, remote_hints)
 
-    # Auto-pull exact requested first
     if auto_pull:
         print(f"Model '{requested}' is not installed. Attempting pull...")
         if ollama_pull(base_url, requested, timeout_s):
             return requested, [f"pulled requested model {requested}"], True
 
-        # Try guessed names
         for g in guesses:
             if g == requested:
                 continue
@@ -375,7 +393,6 @@ def resolve_model_name(
             if ollama_pull(base_url, g, timeout_s):
                 return g, [f"requested model not found; pulled guessed model {g}"], True
 
-        # Try best fuzzy suggestion
         if best:
             print(f"Trying suggested model '{best}'...")
             if ollama_pull(base_url, best, timeout_s):
@@ -385,68 +402,242 @@ def resolve_model_name(
         return best, suggestions, False
 
     suggestion_msgs = suggestions or [f"no exact installed match for {requested}"]
-    raise ValueError(
-        f"Model '{requested}' not found locally. Suggestions: {', '.join(suggestion_msgs)}"
-    )
+    raise ValueError(f"Model '{requested}' not found locally. Suggestions: {', '.join(suggestion_msgs)}")
 
 
-def score_json_quality(response_text: str) -> Tuple[bool, float, List[str]]:
+def try_parse_json(text: str) -> Tuple[bool, Optional[Any]]:
+    try:
+        parsed = json.loads(text)
+        return True, parsed
+    except Exception:
+        return False, None
+
+
+def score_json_agent_output(text: str) -> Tuple[bool, float, float, float, List[str]]:
+    json_valid, parsed = try_parse_json(text)
     notes: List[str] = []
 
-    try:
-        data = json.loads(response_text)
-    except Exception as e:
-        return False, 0.0, [f"invalid JSON: {e}"]
+    if not json_valid:
+        return False, 0.0, 0.0, 0.0, ["invalid JSON"]
 
-    score = 0.0
+    schema_score = 0.0
+    usefulness_score = 0.0
 
-    if isinstance(data, dict):
-        score += 1.0
-    else:
-        return False, 0.5, ["JSON parsed but top-level object is not a dictionary"]
+    if not isinstance(parsed, dict):
+        return True, 10.0, 5.0, 8.0, ["top-level JSON is not an object"]
 
     required_keys = ["title", "priority", "steps", "risks", "review_model_role"]
-    for key in required_keys:
-        if key in data:
-            score += 1.0
-        else:
-            notes.append(f"missing key: {key}")
+    present = sum(1 for k in required_keys if k in parsed)
+    schema_score += (present / len(required_keys)) * 50.0
 
-    title = data.get("title")
+    title = parsed.get("title")
     if isinstance(title, str) and title.strip():
-        score += 1.0
+        schema_score += 10.0
+        if len(title.strip()) >= 8:
+            usefulness_score += 5.0
     else:
-        notes.append("title is empty or not a string")
+        notes.append("title invalid")
 
-    priority = data.get("priority")
+    priority = parsed.get("priority")
     if priority in {"low", "medium", "high", "critical"}:
-        score += 1.0
+        schema_score += 10.0
+        usefulness_score += 5.0
     else:
-        notes.append("priority is not one of low|medium|high|critical")
+        notes.append("priority invalid")
 
-    steps = data.get("steps")
-    if isinstance(steps, list) and steps and all(isinstance(x, str) and x.strip() for x in steps):
-        score += 1.0
+    steps = parsed.get("steps")
+    if isinstance(steps, list):
+        schema_score += 10.0
+        non_empty_steps = [s for s in steps if isinstance(s, str) and s.strip()]
+        if len(non_empty_steps) >= 3:
+            usefulness_score += 15.0
+        elif len(non_empty_steps) >= 1:
+            usefulness_score += 8.0
+        avg_step_len = statistics.mean([len(s.strip()) for s in non_empty_steps]) if non_empty_steps else 0
+        if avg_step_len >= 12:
+            usefulness_score += 5.0
+        if not non_empty_steps:
+            notes.append("steps empty")
     else:
-        notes.append("steps is not a non-empty list of strings")
+        notes.append("steps invalid")
 
-    risks = data.get("risks")
-    if isinstance(risks, list) and risks and all(isinstance(x, str) and x.strip() for x in risks):
-        score += 1.0
+    risks = parsed.get("risks")
+    if isinstance(risks, list):
+        schema_score += 10.0
+        non_empty_risks = [r for r in risks if isinstance(r, str) and r.strip()]
+        if len(non_empty_risks) >= 2:
+            usefulness_score += 10.0
+        elif len(non_empty_risks) >= 1:
+            usefulness_score += 5.0
+        if not non_empty_risks:
+            notes.append("risks empty")
     else:
-        notes.append("risks is not a non-empty list of strings")
+        notes.append("risks invalid")
 
-    review_model_role = data.get("review_model_role")
+    review_model_role = parsed.get("review_model_role")
     if isinstance(review_model_role, str) and review_model_role.strip():
-        score += 1.0
+        schema_score += 10.0
+        usefulness_score += 5.0
     else:
-        notes.append("review_model_role is empty or not a string")
+        notes.append("review_model_role invalid")
 
-    # Normalize to 0..10
-    max_score = 10.0
-    score = min(score, max_score)
+    combined_text = " ".join([
+        title if isinstance(title, str) else "",
+        " ".join(steps) if isinstance(steps, list) else "",
+        " ".join(risks) if isinstance(risks, list) else "",
+    ]).strip().lower()
 
-    return True, score, notes
+    if len(combined_text) < 40:
+        usefulness_score -= 10.0
+        notes.append("combined content too short")
+
+    vague_markers = ["todo", "tbd", "n/a", "none", "unknown"]
+    if any(v in combined_text for v in vague_markers):
+        usefulness_score -= 8.0
+        notes.append("contains vague markers")
+
+    usefulness_score = max(0.0, min(100.0, usefulness_score))
+    quality_score = 0.6 * schema_score + 0.4 * usefulness_score
+    return True, schema_score, usefulness_score, quality_score, notes
+
+
+def score_text_output(text: str) -> Tuple[float, float, float, List[str]]:
+    notes: List[str] = []
+    stripped = text.strip()
+    if not stripped:
+        return 0.0, 0.0, 0.0, ["empty text output"]
+
+    words = re.findall(r"\S+", stripped)
+    headings = len(re.findall(r"(^|\n)(#+\s|[A-Z][A-Za-z0-9 _-]{2,}:)", stripped))
+    bullets = len(re.findall(r"(^|\n)\s*[-*]\s+", stripped))
+
+    schema_score = 0.0
+    usefulness_score = 0.0
+
+    if len(words) >= 40:
+        schema_score += 30.0
+    elif len(words) >= 20:
+        schema_score += 15.0
+    else:
+        schema_score += 5.0
+        notes.append("too short")
+
+    if headings >= 2:
+        schema_score += 20.0
+    elif headings >= 1:
+        schema_score += 10.0
+
+    if bullets >= 3:
+        usefulness_score += 15.0
+    elif bullets >= 1:
+        usefulness_score += 8.0
+
+    keywords = [
+        "idempot", "queue", "worker", "writeback", "rollback",
+        "provider", "prompt", "audit", "retry", "history"
+    ]
+    matched = sum(1 for k in keywords if k in stripped.lower())
+    usefulness_score += min(30.0, matched * 3.0)
+
+    if len(words) >= 120:
+        usefulness_score += 15.0
+    elif len(words) >= 60:
+        usefulness_score += 8.0
+
+    low_info_markers = ["i don't know", "cannot", "unknown", "n/a"]
+    if any(m in stripped.lower() for m in low_info_markers):
+        usefulness_score -= 10.0
+        notes.append("contains low-information markers")
+
+    schema_score = max(0.0, min(100.0, schema_score))
+    usefulness_score = max(0.0, min(100.0, usefulness_score))
+    quality_score = 0.4 * schema_score + 0.6 * usefulness_score
+    return schema_score, usefulness_score, quality_score, notes
+
+
+def normalize_score_higher_better(value: Optional[float], best: float) -> float:
+    if value is None or best <= 0:
+        return 0.0
+    return max(0.0, min(1.0, value / best))
+
+
+def normalize_score_lower_better(value: Optional[float], best: float) -> float:
+    if value is None or value <= 0 or best <= 0:
+        return 0.0
+    return max(0.0, min(1.0, best / value))
+
+
+def evaluate_gate(expectation: str, result: RunResult, json_quality_threshold: float) -> Tuple[bool, Optional[str]]:
+    if not result.ok:
+        return False, "request failed"
+
+    if expectation == "json_agent":
+        if result.json_valid is not True:
+            return False, "invalid json"
+        if result.quality_score is None:
+            return False, "missing quality score"
+        if result.quality_score < json_quality_threshold:
+            return False, f"json quality below threshold {json_quality_threshold}"
+        return True, None
+
+    if result.quality_score is None or result.quality_score <= 0:
+        return False, "empty or unusable text output"
+
+    return True, None
+
+
+def assign_scenario_scores(results: List[RunResult], json_quality_threshold: float) -> None:
+    # Evaluate gating first
+    for r in results:
+        usable, reason = evaluate_gate(r.expectation, r, json_quality_threshold)
+        r.gated_usable = usable
+        r.rejection_reason = reason
+
+    # Group by scenario + run_kind + concurrency + think_mode
+    groups: Dict[Tuple[str, str, int, str], List[RunResult]] = {}
+    for r in results:
+        key = (r.scenario, r.run_kind, r.concurrency, r.effective_think_mode)
+        groups.setdefault(key, []).append(r)
+
+    for (_, _, _, _), group in groups.items():
+        ok_usable = [r for r in group if r.ok and r.gated_usable]
+        if not ok_usable:
+            for r in group:
+                r.scenario_rank_score = 0.0
+            continue
+
+        best_wall = min(r.wall_time_s for r in ok_usable if r.wall_time_s is not None)
+        best_prompt = max((r.prompt_tps or 0.0) for r in ok_usable)
+        best_gen = max((r.gen_tps or 0.0) for r in ok_usable)
+        best_quality = max((r.quality_score or 0.0) for r in ok_usable)
+
+        for r in group:
+            if not r.ok or not r.gated_usable:
+                r.scenario_rank_score = 0.0
+                continue
+
+            wall_norm = normalize_score_lower_better(r.wall_time_s, best_wall)
+            prompt_norm = normalize_score_higher_better(r.prompt_tps, best_prompt)
+            gen_norm = normalize_score_higher_better(r.gen_tps, best_gen)
+            quality_norm = normalize_score_higher_better(r.quality_score, best_quality)
+
+            if r.expectation == "json_agent":
+                # Structured tasks: quality first, speed second
+                score = (
+                    0.70 * quality_norm +
+                    0.20 * wall_norm +
+                    0.10 * gen_norm
+                ) * 100.0
+            else:
+                # Text tasks: blended score
+                score = (
+                    0.35 * quality_norm +
+                    0.30 * wall_norm +
+                    0.20 * gen_norm +
+                    0.15 * prompt_norm
+                ) * 100.0
+
+            r.scenario_rank_score = round(score, 2)
 
 
 def measure_one(
@@ -455,13 +646,28 @@ def measure_one(
     resolved_model: str,
     prompt: str,
     scenario: str,
+    expectation: str,
     concurrency: int,
     run_kind: str,
     timeout_s: int,
+    requested_think_mode: str,
 ) -> RunResult:
     start = time.perf_counter()
+
+    if requested_think_mode not in THINK_MODES:
+        raise ValueError(f"Invalid think mode: {requested_think_mode}")
+
+    effective_think_mode = requested_think_mode
+    think_mode_source = "explicit" if requested_think_mode != "provider_default" else "provider_default"
+
     try:
-        data = ollama_generate(base_url, resolved_model, prompt, timeout_s)
+        data = ollama_generate(
+            base_url=base_url,
+            model=resolved_model,
+            prompt=prompt,
+            timeout_s=timeout_s,
+            think_mode=requested_think_mode,
+        )
         end = time.perf_counter()
 
         total_duration_ns = data.get("total_duration")
@@ -473,19 +679,27 @@ def measure_one(
         response_text = data.get("response", "")
 
         json_valid = None
-        json_quality_score = None
-        quality_notes = None
-        if scenario == "json_agent":
-            json_valid, json_quality_score, quality_notes = score_json_quality(response_text)
+        schema_score = None
+        usefulness_score = None
+        quality_score = None
+
+        if expectation == "json_agent":
+            json_valid, schema_score, usefulness_score, quality_score, _notes = score_json_agent_output(response_text)
+        else:
+            schema_score, usefulness_score, quality_score, _notes = score_text_output(response_text)
 
         return RunResult(
             model_requested=requested_model,
             model_resolved=resolved_model,
             scenario=scenario,
+            expectation=expectation,
             concurrency=concurrency,
             run_kind=run_kind,
             ok=True,
             error=None,
+            requested_think_mode=requested_think_mode,
+            effective_think_mode=effective_think_mode,
+            think_mode_source=think_mode_source,
             total_duration_ns=total_duration_ns,
             load_duration_ns=load_duration_ns,
             prompt_eval_count=prompt_eval_count,
@@ -496,9 +710,14 @@ def measure_one(
             prompt_tps=compute_prompt_tps(prompt_eval_count, prompt_eval_duration_ns),
             gen_tps=compute_gen_tps(eval_count, eval_duration_ns),
             response_chars=len(response_text),
+            response_text=response_text,
             json_valid=json_valid,
-            json_quality_score=json_quality_score,
-            quality_notes=quality_notes,
+            schema_score=schema_score,
+            usefulness_score=usefulness_score,
+            quality_score=quality_score,
+            gated_usable=None,
+            scenario_rank_score=None,
+            rejection_reason=None,
         )
     except urllib.error.HTTPError as e:
         end = time.perf_counter()
@@ -506,10 +725,14 @@ def measure_one(
             model_requested=requested_model,
             model_resolved=resolved_model,
             scenario=scenario,
+            expectation=expectation,
             concurrency=concurrency,
             run_kind=run_kind,
             ok=False,
             error=f"HTTPError {e.code}: {e.reason}",
+            requested_think_mode=requested_think_mode,
+            effective_think_mode=effective_think_mode,
+            think_mode_source=think_mode_source,
             total_duration_ns=None,
             load_duration_ns=None,
             prompt_eval_count=None,
@@ -520,9 +743,14 @@ def measure_one(
             prompt_tps=None,
             gen_tps=None,
             response_chars=None,
+            response_text=None,
             json_valid=None,
-            json_quality_score=None,
-            quality_notes=None,
+            schema_score=None,
+            usefulness_score=None,
+            quality_score=None,
+            gated_usable=None,
+            scenario_rank_score=None,
+            rejection_reason=None,
         )
     except Exception as e:
         end = time.perf_counter()
@@ -530,10 +758,14 @@ def measure_one(
             model_requested=requested_model,
             model_resolved=resolved_model,
             scenario=scenario,
+            expectation=expectation,
             concurrency=concurrency,
             run_kind=run_kind,
             ok=False,
             error=str(e),
+            requested_think_mode=requested_think_mode,
+            effective_think_mode=effective_think_mode,
+            think_mode_source=think_mode_source,
             total_duration_ns=None,
             load_duration_ns=None,
             prompt_eval_count=None,
@@ -544,9 +776,14 @@ def measure_one(
             prompt_tps=None,
             gen_tps=None,
             response_chars=None,
+            response_text=None,
             json_valid=None,
-            json_quality_score=None,
-            quality_notes=None,
+            schema_score=None,
+            usefulness_score=None,
+            quality_score=None,
+            gated_usable=None,
+            scenario_rank_score=None,
+            rejection_reason=None,
         )
 
 
@@ -565,7 +802,7 @@ def get_system_info() -> Dict[str, Any]:
     }
 
 
-def write_output(path: str, results: List[RunResult], meta: Dict[str, Any]) -> None:
+def write_json_output(path: str, results: List[RunResult], meta: Dict[str, Any]) -> None:
     payload = {
         "generated_at_unix": int(time.time()),
         "meta": meta,
@@ -573,105 +810,152 @@ def write_output(path: str, results: List[RunResult], meta: Dict[str, Any]) -> N
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    print_section("Raw results written")
-    print(path)
+
+
+def write_csv_output(path: str, results: List[RunResult]) -> None:
+    if not results:
+        return
+    fieldnames = list(asdict(results[0]).keys())
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in results:
+            writer.writerow(asdict(r))
 
 
 def print_summary(results: List[RunResult]) -> None:
-    print_section("Summary by resolved model + scenario + run_kind")
+    print_section("Summary by resolved model + think_mode + scenario + run_kind")
 
     groups: Dict[str, List[RunResult]] = {}
     for r in results:
-        key = f"{r.model_resolved}|{r.scenario}|{r.run_kind}|c{r.concurrency}"
+        key = f"{r.model_resolved}|{r.effective_think_mode}|{r.scenario}|{r.run_kind}|c{r.concurrency}"
         groups.setdefault(key, []).append(r)
 
     rows = [[
-        "resolved_model", "scenario", "run_kind", "conc", "ok",
-        "wall_mean_s", "load_mean_s", "prompt_tps_mean", "gen_tps_mean", "json_q_mean"
+        "resolved_model", "think_mode", "scenario", "run_kind", "conc", "ok",
+        "usable", "wall_mean_s", "prompt_tps_mean", "gen_tps_mean",
+        "quality_mean", "rank_score_mean"
     ]]
 
     for key, group in sorted(groups.items()):
+        model, think_mode, scenario, run_kind, conc = key.split("|")
         ok_group = [r for r in group if r.ok]
-        model, scenario, run_kind, conc = key.split("|")
-
-        wall_mean = summarize_numeric([r.wall_time_s for r in ok_group])["mean"]
-        load_mean = summarize_numeric([ns_to_s(r.load_duration_ns) for r in ok_group])["mean"]
-        prompt_mean = summarize_numeric([r.prompt_tps for r in ok_group])["mean"]
-        gen_mean = summarize_numeric([r.gen_tps for r in ok_group])["mean"]
-        quality_mean = summarize_numeric([r.json_quality_score for r in ok_group])["mean"]
+        usable_group = [r for r in group if r.gated_usable]
 
         rows.append([
             model,
+            think_mode,
             scenario,
             run_kind,
             conc.replace("c", ""),
             f"{len(ok_group)}/{len(group)}",
-            fmt(wall_mean),
-            fmt(load_mean),
-            fmt(prompt_mean),
-            fmt(gen_mean),
-            fmt(quality_mean),
+            f"{len(usable_group)}/{len(group)}",
+            fmt(summarize_numeric([r.wall_time_s for r in ok_group])["mean"]),
+            fmt(summarize_numeric([r.prompt_tps for r in ok_group])["mean"]),
+            fmt(summarize_numeric([r.gen_tps for r in ok_group])["mean"]),
+            fmt(summarize_numeric([r.quality_score for r in ok_group])["mean"]),
+            fmt(summarize_numeric([r.scenario_rank_score for r in usable_group])["mean"]),
         ])
 
     table(rows)
 
-    print_section("Leaderboard: warm json_agent")
-    leaderboard_rows = [[
-        "model", "wall_mean_s", "prompt_tps_mean", "gen_tps_mean", "json_quality_mean", "combined_score"
+
+def print_json_leaderboards(results: List[RunResult]) -> None:
+    print_section("Usable leaderboard: warm json_agent")
+
+    usable_rows = [[
+        "rank", "model", "think_mode", "wall_mean_s", "gen_tps_mean",
+        "quality_mean", "rank_score_mean"
     ]]
 
-    leaderboard: List[Tuple[str, float, Optional[float], Optional[float], Optional[float], float]] = []
-    for model in sorted(set(r.model_resolved for r in results)):
+    aggregates = []
+    pairs = sorted(set(
+        (r.model_resolved, r.effective_think_mode)
+        for r in results
+        if r.scenario == "json_agent" and r.run_kind == "warm" and r.concurrency == 1
+    ))
+
+    for model, think_mode in pairs:
         subset = [
             r for r in results
-            if r.model_resolved == model and r.scenario == "json_agent" and r.run_kind == "warm" and r.ok
+            if r.model_resolved == model
+            and r.effective_think_mode == think_mode
+            and r.scenario == "json_agent"
+            and r.run_kind == "warm"
+            and r.concurrency == 1
+            and r.gated_usable
         ]
         if not subset:
             continue
 
-        wall_mean = summarize_numeric([r.wall_time_s for r in subset])["mean"]
-        prompt_mean = summarize_numeric([r.prompt_tps for r in subset])["mean"]
-        gen_mean = summarize_numeric([r.gen_tps for r in subset])["mean"]
-        quality_mean = summarize_numeric([r.json_quality_score for r in subset])["mean"]
+        aggregates.append({
+            "model": model,
+            "think_mode": think_mode,
+            "wall_mean": summarize_numeric([r.wall_time_s for r in subset])["mean"],
+            "gen_mean": summarize_numeric([r.gen_tps for r in subset])["mean"],
+            "quality_mean": summarize_numeric([r.quality_score for r in subset])["mean"],
+            "rank_mean": summarize_numeric([r.scenario_rank_score for r in subset])["mean"],
+        })
 
-        # heuristic combined score: quality is positive, latency negative
-        combined = 0.0
-        if quality_mean is not None:
-            combined += quality_mean * 10.0
-        if gen_mean is not None:
-            combined += gen_mean
-        if prompt_mean is not None:
-            combined += prompt_mean * 0.25
-        if wall_mean is not None:
-            combined -= wall_mean * 5.0
+    aggregates.sort(key=lambda x: x["rank_mean"] if x["rank_mean"] is not None else -1, reverse=True)
 
-        leaderboard.append((model, wall_mean or math.inf, prompt_mean, gen_mean, quality_mean, combined))
-
-    leaderboard.sort(key=lambda x: x[5], reverse=True)
-
-    for model, wall_mean, prompt_mean, gen_mean, quality_mean, combined in leaderboard:
-        leaderboard_rows.append([
-            model,
-            fmt(wall_mean),
-            fmt(prompt_mean),
-            fmt(gen_mean),
-            fmt(quality_mean),
-            fmt(combined),
+    for idx, item in enumerate(aggregates, start=1):
+        usable_rows.append([
+            str(idx),
+            item["model"],
+            item["think_mode"],
+            fmt(item["wall_mean"]),
+            fmt(item["gen_mean"]),
+            fmt(item["quality_mean"]),
+            fmt(item["rank_mean"]),
         ])
 
-    table(leaderboard_rows)
+    if len(usable_rows) == 1:
+        usable_rows.append(["-", "-", "-", "-", "-", "-", "-"])
+
+    table(usable_rows)
+
+    print_section("Rejected leaderboard: warm json_agent")
+
+    rejected_rows = [[
+        "model", "think_mode", "reason", "quality_mean", "wall_mean_s"
+    ]]
+
+    for model, think_mode in pairs:
+        subset = [
+            r for r in results
+            if r.model_resolved == model
+            and r.effective_think_mode == think_mode
+            and r.scenario == "json_agent"
+            and r.run_kind == "warm"
+            and r.concurrency == 1
+            and not r.gated_usable
+        ]
+        if not subset:
+            continue
+
+        reason_counts: Dict[str, int] = {}
+        for r in subset:
+            reason = r.rejection_reason or "unknown"
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+        main_reason = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[0][0]
+
+        rejected_rows.append([
+            model,
+            think_mode,
+            main_reason,
+            fmt(summarize_numeric([r.quality_score for r in subset])["mean"]),
+            fmt(summarize_numeric([r.wall_time_s for r in subset])["mean"]),
+        ])
+
+    if len(rejected_rows) == 1:
+        rejected_rows.append(["-", "-", "-", "-", "-"])
+
+    table(rejected_rows)
 
 
 async def run_benchmarks(args: argparse.Namespace) -> int:
-    scenarios = [
-        ("short", SHORT_PROMPT),
-        ("medium", MEDIUM_PROMPT),
-        ("long", LONG_PROMPT),
-        ("json_agent", JSON_AGENT_PROMPT),
-    ]
-
-    all_results: List[RunResult] = []
-
     print_section("System info")
     print(json.dumps(get_system_info(), indent=2))
 
@@ -684,7 +968,14 @@ async def run_benchmarks(args: argparse.Namespace) -> int:
         print(f"Could not list installed models: {e}")
         return 2
 
+    think_modes = [m.strip() for m in args.think_modes]
+    for tm in think_modes:
+        if tm not in THINK_MODES:
+            print(f"Invalid think mode: {tm}. Allowed: {sorted(THINK_MODES)}")
+            return 2
+
     resolved_models: List[Tuple[str, str]] = []
+
     print_section("Model resolution")
     for requested in args.models:
         try:
@@ -699,7 +990,7 @@ async def run_benchmarks(args: argparse.Namespace) -> int:
             for s in suggestions:
                 print(f"  note: {s}")
             if pulled:
-                print(f"  note: model was pulled")
+                print("  note: model was pulled")
             resolved_models.append((requested, resolved))
         except Exception as e:
             print(f"{requested} -> ERROR: {e}")
@@ -712,123 +1003,155 @@ async def run_benchmarks(args: argparse.Namespace) -> int:
         print("No models resolved successfully.")
         return 4
 
+    all_results: List[RunResult] = []
+
     print_section("Benchmark configuration")
-    print(f"Base URL:       {args.base_url}")
-    print(f"Warm runs:      {args.warm_runs}")
-    print(f"Concurrency:    {', '.join(str(c) for c in args.concurrency)}")
-    print(f"Timeout:        {args.timeout_seconds}s")
-    print(f"Output:         {args.output}")
+    print(f"Base URL:               {args.base_url}")
+    print(f"Warm runs:              {args.warm_runs}")
+    print(f"Concurrency:            {', '.join(str(c) for c in args.concurrency)}")
+    print(f"Think modes:            {', '.join(think_modes)}")
+    print(f"Timeout seconds:        {args.timeout_seconds}")
+    print(f"JSON quality threshold: {args.json_quality_threshold}")
+    print(f"JSON output:            {args.json_output}")
+    print(f"CSV output:             {args.csv_output}")
 
     for requested_model, resolved_model in resolved_models:
-        print_section(f"Model requested: {requested_model} | resolved: {resolved_model}")
-
-        if args.force_unload:
-            print("Attempting unload before cold runs...")
-            ollama_unload(args.base_url, resolved_model, args.timeout_seconds)
-
-        for scenario_name, prompt in scenarios:
-            print(f"\nScenario: {scenario_name}")
+        for think_mode in think_modes:
+            print_section(f"Model requested: {requested_model} | resolved: {resolved_model} | think_mode: {think_mode}")
 
             if args.force_unload:
+                print("Attempting unload before cold runs...")
                 ollama_unload(args.base_url, resolved_model, args.timeout_seconds)
 
-            cold = measure_one(
-                args.base_url,
-                requested_model,
-                resolved_model,
-                prompt,
-                scenario_name,
-                concurrency=1,
-                run_kind="cold",
-                timeout_s=args.timeout_seconds,
-            )
-            all_results.append(cold)
+            for scenario in SCENARIOS:
+                scenario_name = scenario["name"]
+                prompt = scenario["prompt"]
+                expectation = scenario["expectation"]
 
-            extra = ""
-            if scenario_name == "json_agent":
-                extra = f" json_valid={cold.json_valid} json_q={fmt(cold.json_quality_score)}"
-            print(
-                f"  cold: ok={cold.ok} wall={fmt(cold.wall_time_s)}s "
-                f"load={format_seconds_from_ns(cold.load_duration_ns)}s "
-                f"prompt_tps={fmt(cold.prompt_tps)} gen_tps={fmt(cold.gen_tps)}{extra}"
-            )
+                print(f"\nScenario: {scenario_name}")
 
-            for i in range(args.warm_runs):
-                warm = measure_one(
-                    args.base_url,
-                    requested_model,
-                    resolved_model,
-                    prompt,
-                    scenario_name,
+                if args.force_unload:
+                    ollama_unload(args.base_url, resolved_model, args.timeout_seconds)
+
+                cold = measure_one(
+                    base_url=args.base_url,
+                    requested_model=requested_model,
+                    resolved_model=resolved_model,
+                    prompt=prompt,
+                    scenario=scenario_name,
+                    expectation=expectation,
                     concurrency=1,
-                    run_kind="warm",
+                    run_kind="cold",
                     timeout_s=args.timeout_seconds,
+                    requested_think_mode=think_mode,
                 )
-                all_results.append(warm)
+                all_results.append(cold)
+
                 extra = ""
                 if scenario_name == "json_agent":
-                    extra = f" json_valid={warm.json_valid} json_q={fmt(warm.json_quality_score)}"
+                    extra = f" json_valid={cold.json_valid} quality={fmt(cold.quality_score)}"
                 print(
-                    f"  warm#{i+1}: ok={warm.ok} wall={fmt(warm.wall_time_s)}s "
-                    f"load={format_seconds_from_ns(warm.load_duration_ns)}s "
-                    f"prompt_tps={fmt(warm.prompt_tps)} gen_tps={fmt(warm.gen_tps)}{extra}"
+                    f"  cold: ok={cold.ok} wall={fmt(cold.wall_time_s)}s "
+                    f"load={format_seconds_from_ns(cold.load_duration_ns)}s "
+                    f"prompt_tps={fmt(cold.prompt_tps)} gen_tps={fmt(cold.gen_tps)}{extra}"
                 )
 
-            for concurrency in args.concurrency:
-                if concurrency <= 1:
-                    continue
-                tasks = [
-                    measure_one_async(
-                        args.base_url,
-                        requested_model,
-                        resolved_model,
-                        prompt,
-                        scenario_name,
-                        concurrency=concurrency,
-                        run_kind="concurrent",
+                for i in range(args.warm_runs):
+                    warm = measure_one(
+                        base_url=args.base_url,
+                        requested_model=requested_model,
+                        resolved_model=resolved_model,
+                        prompt=prompt,
+                        scenario=scenario_name,
+                        expectation=expectation,
+                        concurrency=1,
+                        run_kind="warm",
                         timeout_s=args.timeout_seconds,
+                        requested_think_mode=think_mode,
                     )
-                    for _ in range(concurrency)
-                ]
-                concurrent_results = await asyncio.gather(*tasks)
-                all_results.extend(concurrent_results)
+                    all_results.append(warm)
+                    extra = ""
+                    if scenario_name == "json_agent":
+                        extra = f" json_valid={warm.json_valid} quality={fmt(warm.quality_score)}"
+                    print(
+                        f"  warm#{i+1}: ok={warm.ok} wall={fmt(warm.wall_time_s)}s "
+                        f"load={format_seconds_from_ns(warm.load_duration_ns)}s "
+                        f"prompt_tps={fmt(warm.prompt_tps)} gen_tps={fmt(warm.gen_tps)}{extra}"
+                    )
 
-                ok_count = sum(1 for r in concurrent_results if r.ok)
-                wall_summary = summarize_numeric([r.wall_time_s for r in concurrent_results if r.ok])
-                prompt_summary = summarize_numeric([r.prompt_tps for r in concurrent_results if r.ok])
-                gen_summary = summarize_numeric([r.gen_tps for r in concurrent_results if r.ok])
-                quality_summary = summarize_numeric([r.json_quality_score for r in concurrent_results if r.ok])
+                for concurrency in args.concurrency:
+                    if concurrency <= 1:
+                        continue
 
-                extra = ""
-                if scenario_name == "json_agent":
-                    extra = f" json_q_mean={fmt(quality_summary['mean'])}"
-                print(
-                    f"  concurrent x{concurrency}: ok={ok_count}/{concurrency} "
-                    f"wall_mean={fmt(wall_summary['mean'])}s "
-                    f"prompt_tps_mean={fmt(prompt_summary['mean'])} "
-                    f"gen_tps_mean={fmt(gen_summary['mean'])}{extra}"
-                )
+                    tasks = [
+                        measure_one_async(
+                            base_url=args.base_url,
+                            requested_model=requested_model,
+                            resolved_model=resolved_model,
+                            prompt=prompt,
+                            scenario=scenario_name,
+                            expectation=expectation,
+                            concurrency=concurrency,
+                            run_kind="concurrent",
+                            timeout_s=args.timeout_seconds,
+                            requested_think_mode=think_mode,
+                        )
+                        for _ in range(concurrency)
+                    ]
+
+                    concurrent_results = await asyncio.gather(*tasks)
+                    all_results.extend(concurrent_results)
+
+                    ok_count = sum(1 for r in concurrent_results if r.ok)
+                    wall_summary = summarize_numeric([r.wall_time_s for r in concurrent_results if r.ok])
+                    prompt_summary = summarize_numeric([r.prompt_tps for r in concurrent_results if r.ok])
+                    gen_summary = summarize_numeric([r.gen_tps for r in concurrent_results if r.ok])
+                    quality_summary = summarize_numeric([r.quality_score for r in concurrent_results if r.ok])
+
+                    extra = ""
+                    if scenario_name == "json_agent":
+                        extra = f" quality_mean={fmt(quality_summary['mean'])}"
+                    print(
+                        f"  concurrent x{concurrency}: ok={ok_count}/{concurrency} "
+                        f"wall_mean={fmt(wall_summary['mean'])}s "
+                        f"prompt_tps_mean={fmt(prompt_summary['mean'])} "
+                        f"gen_tps_mean={fmt(gen_summary['mean'])}{extra}"
+                    )
+
+    assign_scenario_scores(all_results, args.json_quality_threshold)
 
     meta = {
         "system": get_system_info(),
         "base_url": args.base_url,
         "models_requested": args.models,
         "models_resolved": [{"requested": r, "resolved": m} for r, m in resolved_models],
+        "think_modes": think_modes,
         "warm_runs": args.warm_runs,
         "concurrency": args.concurrency,
         "timeout_seconds": args.timeout_seconds,
         "force_unload": args.force_unload,
         "auto_pull": args.auto_pull,
         "resolve_closest": args.resolve_closest,
+        "json_quality_threshold": args.json_quality_threshold,
     }
 
-    write_output(args.output, all_results, meta)
+    write_json_output(args.json_output, all_results, meta)
+    write_csv_output(args.csv_output, all_results)
+
     print_summary(all_results)
+    print_json_leaderboards(all_results)
+
+    print_section("Files written")
+    print(args.json_output)
+    print(args.csv_output)
+
     return 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark Ollama models with resolution, auto-pull, and quality checks.")
+    parser = argparse.ArgumentParser(
+        description="Benchmark Ollama models with think-mode awareness, quality gates, and scenario-specific scoring."
+    )
     parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
@@ -838,7 +1161,13 @@ def parse_args() -> argparse.Namespace:
         "--models",
         nargs="+",
         required=True,
-        help="Requested model tags, e.g. qwen2.5:7b-instruct qwen3:8b llama3.2:3b",
+        help="Requested model tags, e.g. qwen2.5:7b qwen3:4b llama3.2:3b",
+    )
+    parser.add_argument(
+        "--think-modes",
+        nargs="+",
+        default=["provider_default"],
+        help="One or more of: thinking nothinking provider_default",
     )
     parser.add_argument(
         "--warm-runs",
@@ -860,9 +1189,20 @@ def parse_args() -> argparse.Namespace:
         help="HTTP timeout per request in seconds",
     )
     parser.add_argument(
-        "--output",
-        default="ollama_bench_v2_results.json",
-        help="Output JSON file",
+        "--json-quality-threshold",
+        type=float,
+        default=6.0,
+        help="Minimum quality score required for json_agent usability",
+    )
+    parser.add_argument(
+        "--json-output",
+        default="ollama_bench_v3.json",
+        help="Path to JSON output file",
+    )
+    parser.add_argument(
+        "--csv-output",
+        default="ollama_bench_v3.csv",
+        help="Path to CSV output file",
     )
     parser.add_argument(
         "--force-unload",
@@ -877,7 +1217,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resolve-closest",
         action="store_true",
-        help="If requested model is not found, resolve to the closest installed/remote hint instead of failing",
+        help="Resolve to the closest installed/remote hint if requested model is not found",
     )
     parser.add_argument(
         "--skip-unresolved",
