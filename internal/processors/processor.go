@@ -36,6 +36,7 @@ type ProcessResult struct {
 	TokensUsed            int
 	DurationMS            int64
 	TimeoutUsed           time.Duration
+	ExecutionTrace        json.RawMessage
 }
 
 // Processor is the abstraction for all processing implementations.

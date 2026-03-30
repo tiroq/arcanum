@@ -138,5 +138,6 @@ func (p *LLMRoutingProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		TokensUsed:            genResp.TokensTotal,
 		DurationMS:            durationMS,
 		TimeoutUsed:           genResp.TimeoutUsed,
+		ExecutionTrace:        genResp.ExecutionTrace,
 	}, nil
 }
