@@ -1,0 +1,138 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: runeforge
+      POSTGRES_USER: runeforge
+      POSTGRES_PASSWORD: runeforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U runeforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api-gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api-gateway
+    environment:
+      - DATABASE_DSN=postgres://runeforge:runeforge@postgres:5432/runeforge?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=8080
+      - LOG_LEVEL=info
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-change-me}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  source-sync:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.source-sync
+    environment:
+      - DATABASE_DSN=postgres://runeforge:runeforge@postgres:5432/runeforge?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=8081
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  orchestrator:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.orchestrator
+    environment:
+      - DATABASE_DSN=postgres://runeforge:runeforge@postgres:5432/runeforge?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=8082
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      - DATABASE_DSN=postgres://runeforge:runeforge@postgres:5432/runeforge?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=8083
+      - LOG_LEVEL=info
+      - PROMPTS_PATH=/app/prompts
+    volumes:
+      - ../../prompts:/app/prompts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  writeback:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.writeback
+    environment:
+      - DATABASE_DSN=postgres://runeforge:runeforge@postgres:5432/runeforge?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=8084
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  notification:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.notification
+    environment:
+      - DATABASE_DSN=postgres://runeforge:runeforge@postgres:5432/runeforge?sslmode=disable
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=8085
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  admin-web:
+    build:
+      context: ../../web/admin
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+
+volumes:
+  postgres_data:

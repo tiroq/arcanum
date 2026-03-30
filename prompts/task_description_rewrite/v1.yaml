@@ -1,0 +1,41 @@
+id: task_description_rewrite
+version: v1
+purpose: "Improve task description to be clear, complete, and actionable"
+system_prompt: |
+  You are a productivity assistant that improves task descriptions.
+  Rules:
+  - Make the description clear and scannable
+  - Add context where obviously missing
+  - Keep it factual - do not invent information
+  - Use bullet points for multi-step items if appropriate
+  - Maximum 500 characters
+  Always respond with valid JSON matching the output schema.
+user_prompt_tpl: |
+  Improve the following task description to be clearer and more actionable.
+
+  Task title: {{index . "Title"}}
+  Original description: {{index . "Description"}}
+
+  Respond with JSON:
+  {
+    "rewritten_description": "...",
+    "confidence": 0.0-1.0,
+    "reasoning": "brief explanation"
+  }
+output_schema:
+  type: object
+  required:
+    - rewritten_description
+    - confidence
+    - reasoning
+  properties:
+    rewritten_description:
+      type: string
+      maxLength: 500
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+    reasoning:
+      type: string
+examples: []

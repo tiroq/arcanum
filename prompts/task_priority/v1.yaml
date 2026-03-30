@@ -1,0 +1,52 @@
+id: task_priority
+version: v1
+purpose: "Classify task priority based on urgency and importance signals"
+system_prompt: |
+  You are a productivity assistant that classifies task priority.
+  Priority levels: urgent, high, medium, low
+  Rules:
+  - urgent: has explicit deadline within 24 hours or blocking others
+  - high: important and time-sensitive within this week
+  - medium: important but not immediately time-sensitive
+  - low: nice to have, no deadline
+  Always respond with valid JSON matching the output schema.
+user_prompt_tpl: |
+  Classify the priority of this task.
+
+  Task title: {{index . "Title"}}
+  Task description: {{index . "Description"}}
+  Due date: {{index . "DueDate"}}
+
+  Respond with JSON:
+  {
+    "priority": "urgent|high|medium|low",
+    "confidence": 0.0-1.0,
+    "signals": ["list of signals that informed the decision"],
+    "reasoning": "brief explanation"
+  }
+output_schema:
+  type: object
+  required:
+    - priority
+    - confidence
+    - signals
+    - reasoning
+  properties:
+    priority:
+      type: string
+      enum:
+        - urgent
+        - high
+        - medium
+        - low
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+    signals:
+      type: array
+      items:
+        type: string
+    reasoning:
+      type: string
+examples: []
