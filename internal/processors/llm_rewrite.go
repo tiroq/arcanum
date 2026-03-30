@@ -9,8 +9,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tiroq/arcanum/internal/metrics"
-	"github.com/tiroq/arcanum/internal/providers"
 	"github.com/tiroq/arcanum/internal/prompts"
+	"github.com/tiroq/arcanum/internal/providers"
 )
 
 // LLMRewriteProcessor rewrites task titles/descriptions using an LLM.
