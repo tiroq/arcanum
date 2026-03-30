@@ -10,6 +10,12 @@ import (
 	nats "github.com/nats-io/nats.go"
 )
 
+// ProviderHealthChecker is implemented by LLM providers that support health checks.
+type ProviderHealthChecker interface {
+	Name() string
+	HealthCheck(ctx context.Context) error
+}
+
 type statusResponse struct {
 	Status string            `json:"status"`
 	Checks map[string]string `json:"checks,omitempty"`
@@ -25,11 +31,12 @@ func HealthHandler(w http.ResponseWriter, _ *http.Request) {
 
 // ReadinessChecker holds optional dependencies to check for readiness probes.
 type ReadinessChecker struct {
-	DB   *pgxpool.Pool
-	NATS *nats.Conn
+	DB        *pgxpool.Pool
+	NATS      *nats.Conn
+	Providers []ProviderHealthChecker
 }
 
-// ReadinessHandler checks DB and NATS connectivity before returning 200.
+// ReadinessHandler checks DB, NATS, and provider connectivity before returning 200.
 // Returns 503 if any dependency is unhealthy.
 func (rc *ReadinessChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -53,6 +60,15 @@ func (rc *ReadinessChecker) ReadinessHandler(w http.ResponseWriter, r *http.Requ
 			healthy = false
 		} else {
 			checks["nats"] = "ok"
+		}
+	}
+
+	for _, p := range rc.Providers {
+		if err := p.HealthCheck(ctx); err != nil {
+			checks["provider:"+p.Name()] = "unhealthy: " + err.Error()
+			// Provider failure is degraded, not fatal.
+		} else {
+			checks["provider:"+p.Name()] = "ok"
 		}
 	}
 
