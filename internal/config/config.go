@@ -10,15 +10,15 @@ import (
 
 // Config holds all configuration for the Runeforge platform.
 type Config struct {
-	Database     DatabaseConfig
-	NATS         NATSConfig
-	HTTP         HTTPConfig
-	Auth         AuthConfig
-	Logging      LoggingConfig
-	Providers    ProvidersConfig
-	Features     FeatureFlags
-	Retry        RetryConfig
-	GoogleTasks  GoogleTasksConfig
+	Database    DatabaseConfig
+	NATS        NATSConfig
+	HTTP        HTTPConfig
+	Auth        AuthConfig
+	Logging     LoggingConfig
+	Providers   ProvidersConfig
+	Features    FeatureFlags
+	Retry       RetryConfig
+	GoogleTasks GoogleTasksConfig
 }
 
 type DatabaseConfig struct {
@@ -54,31 +54,36 @@ type ProvidersConfig struct {
 }
 
 type OpenAIConfig struct {
-	APIKey         string        `envconfig:"OPENAI_API_KEY"`
-	BaseURL        string        `envconfig:"OPENAI_BASE_URL" default:"https://api.openai.com/v1"`
-	DefaultModel   string        `envconfig:"OPENAI_DEFAULT_MODEL" default:"gpt-4o-mini"`
-	TimeoutSeconds int           `envconfig:"OPENAI_TIMEOUT_SECONDS" default:"60"`
+	APIKey         string `envconfig:"OPENAI_API_KEY"`
+	BaseURL        string `envconfig:"OPENAI_BASE_URL" default:"https://api.openai.com/v1"`
+	DefaultModel   string `envconfig:"OPENAI_DEFAULT_MODEL" default:"gpt-4o-mini"`
+	TimeoutSeconds int    `envconfig:"OPENAI_TIMEOUT_SECONDS" default:"60"`
 	Timeout        time.Duration
 }
 
 type OpenRouterConfig struct {
-	APIKey         string        `envconfig:"OPENROUTER_API_KEY"`
-	BaseURL        string        `envconfig:"OPENROUTER_BASE_URL" default:"https://openrouter.ai/api/v1"`
-	DefaultModel   string        `envconfig:"OPENROUTER_DEFAULT_MODEL" default:"openai/gpt-4o-mini"`
-	TimeoutSeconds int           `envconfig:"OPENROUTER_TIMEOUT_SECONDS" default:"60"`
+	APIKey         string `envconfig:"OPENROUTER_API_KEY"`
+	BaseURL        string `envconfig:"OPENROUTER_BASE_URL" default:"https://openrouter.ai/api/v1"`
+	DefaultModel   string `envconfig:"OPENROUTER_DEFAULT_MODEL" default:"openai/gpt-4o-mini"`
+	TimeoutSeconds int    `envconfig:"OPENROUTER_TIMEOUT_SECONDS" default:"60"`
 	Timeout        time.Duration
 }
 
 type OllamaConfig struct {
-	BaseURL        string `envconfig:"OLLAMA_BASE_URL" default:"http://localhost:11434"`
-	DefaultModel   string `envconfig:"OLLAMA_DEFAULT_MODEL" default:"llama3.2"`
-	FastModel      string `envconfig:"OLLAMA_FAST_MODEL"`
-	PlannerModel   string `envconfig:"OLLAMA_PLANNER_MODEL"`
-	ReviewModel    string `envconfig:"OLLAMA_REVIEW_MODEL"`
+	BaseURL      string `envconfig:"OLLAMA_BASE_URL" default:"http://localhost:11434"`
+	DefaultModel string `envconfig:"OLLAMA_DEFAULT_MODEL" default:"llama3.2"`
+	FastModel    string `envconfig:"OLLAMA_FAST_MODEL"`
+	PlannerModel string `envconfig:"OLLAMA_PLANNER_MODEL"`
+	ReviewModel  string `envconfig:"OLLAMA_REVIEW_MODEL"`
 
 	TimeoutSeconds        int `envconfig:"OLLAMA_TIMEOUT_SECONDS" default:"120"`
 	FastTimeoutSeconds    int `envconfig:"OLLAMA_FAST_TIMEOUT_SECONDS"`
 	PlannerTimeoutSeconds int `envconfig:"OLLAMA_PLANNER_TIMEOUT_SECONDS"`
+
+	DefaultProfile string `envconfig:"OLLAMA_DEFAULT_PROFILE"`
+	FastProfile    string `envconfig:"OLLAMA_FAST_PROFILE"`
+	PlannerProfile string `envconfig:"OLLAMA_PLANNER_PROFILE"`
+	ReviewProfile  string `envconfig:"OLLAMA_REVIEW_PROFILE"`
 
 	// Computed duration fields (derived from *Seconds fields in Load).
 	Timeout        time.Duration

@@ -88,6 +88,10 @@ func TestOllamaMultiModelDefaults(t *testing.T) {
 	assert.Equal(t, 120, cfg.Providers.Ollama.TimeoutSeconds)
 	assert.Equal(t, 0, cfg.Providers.Ollama.FastTimeoutSeconds)
 	assert.Equal(t, 0, cfg.Providers.Ollama.PlannerTimeoutSeconds)
+	assert.Empty(t, cfg.Providers.Ollama.DefaultProfile)
+	assert.Empty(t, cfg.Providers.Ollama.FastProfile)
+	assert.Empty(t, cfg.Providers.Ollama.PlannerProfile)
+	assert.Empty(t, cfg.Providers.Ollama.ReviewProfile)
 }
 
 func TestOllamaMultiModelOverrides(t *testing.T) {
@@ -168,4 +172,19 @@ func TestOllamaResolveTimeout(t *testing.T) {
 	assert.Equal(t, 90*time.Second, ollamaCfg.ResolveTimeout("fast"))
 	assert.Equal(t, 240*time.Second, ollamaCfg.ResolveTimeout("planner"))
 	assert.Equal(t, 180*time.Second, ollamaCfg.ResolveTimeout("review"))
+}
+
+func TestOllamaProfileEnvVars(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_FAST_PROFILE", "model-a?think=thinking&timeout=120|model-b?timeout=60")
+	t.Setenv("OLLAMA_PLANNER_PROFILE", "planner-model?think=nothinking&timeout=300")
+	t.Setenv("OLLAMA_REVIEW_PROFILE", "review-a|review-b?json=true")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "model-a?think=thinking&timeout=120|model-b?timeout=60", cfg.Providers.Ollama.FastProfile)
+	assert.Equal(t, "planner-model?think=nothinking&timeout=300", cfg.Providers.Ollama.PlannerProfile)
+	assert.Equal(t, "review-a|review-b?json=true", cfg.Providers.Ollama.ReviewProfile)
+	assert.Empty(t, cfg.Providers.Ollama.DefaultProfile)
 }
