@@ -62,6 +62,24 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 		errMsgPtr = &errMsg
 	}
 
+	// Build result payload with model role and resolved model info for audit.
+	runResultPayload := result.OutputPayload
+	if result.ModelProvider != "" || result.ModelRole != "" {
+		meta := map[string]interface{}{
+			"provider":       result.ModelProvider,
+			"model_role":     result.ModelRole.String(),
+			"model_name":     result.ModelName,
+			"tokens_used":    result.TokensUsed,
+			"timeout_used_s": result.TimeoutUsed.Seconds(),
+		}
+		if result.OutputPayload != nil {
+			meta["output"] = json.RawMessage(result.OutputPayload)
+		}
+		if enriched, mErr := json.Marshal(meta); mErr == nil {
+			runResultPayload = enriched
+		}
+	}
+
 	// Persist ProcessingRun.
 	const insertRun = `
 		INSERT INTO processing_runs (id, job_id, attempt_number, outcome, started_at, finished_at, duration_ms, error_message, result_payload, worker_id)
@@ -69,7 +87,7 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 	if _, dbErr := w.db.Exec(ctx, insertRun,
 		runID, job.ID, job.AttemptCount+1, outcome,
 		startedAt, finishedAt, durationMS,
-		errMsgPtr, result.OutputPayload, w.workerID,
+		errMsgPtr, runResultPayload, w.workerID,
 	); dbErr != nil {
 		w.logger.Error("persist processing run failed", zap.Error(dbErr))
 	}
@@ -116,6 +134,9 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 	w.logger.Info("job completed",
 		zap.String("job_id", job.ID.String()),
 		zap.String("outcome", outcome),
+		zap.String("model_provider", result.ModelProvider),
+		zap.String("model_role", result.ModelRole.String()),
+		zap.String("model_name", result.ModelName),
 		zap.Int64("duration_ms", durationMS),
 	)
 	return nil
