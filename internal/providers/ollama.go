@@ -47,6 +47,7 @@ type ollamaChatRequest struct {
 	Model    string          `json:"model"`
 	Messages []ollamaMessage `json:"messages"`
 	Stream   bool            `json:"stream"`
+	Think    *bool           `json:"think,omitempty"`
 }
 
 type ollamaChatResponse struct {
@@ -83,6 +84,9 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 	}
 
 	timeout := p.ResolveTimeout(role)
+	if req.Timeout > 0 {
+		timeout = req.Timeout
+	}
 
 	p.logger.Debug("ollama role resolution",
 		zap.String("provider", p.name),
@@ -102,6 +106,15 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 		Model:    model,
 		Messages: messages,
 		Stream:   false,
+	}
+
+	switch req.ThinkMode {
+	case "thinking", "think":
+		think := true
+		body.Think = &think
+	case "nothinking", "nothink":
+		think := false
+		body.Think = &think
 	}
 
 	data, err := json.Marshal(body)

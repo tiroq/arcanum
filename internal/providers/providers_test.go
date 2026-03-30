@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -229,5 +230,34 @@ func TestModelRoleIsValid(t *testing.T) {
 	}
 	if ModelRole("unknown").IsValid() {
 		t.Error("expected 'unknown' role to be invalid")
+	}
+}
+
+func TestOllamaChatRequest_ThinkModeSerialization(t *testing.T) {
+	marshal := func(v interface{}) map[string]interface{} {
+		data, _ := json.Marshal(v)
+		var m map[string]interface{}
+		json.Unmarshal(data, &m)
+		return m
+	}
+
+	req1 := ollamaChatRequest{Model: "test", Stream: false}
+	m1 := marshal(req1)
+	if _, has := m1["think"]; has {
+		t.Error("expected 'think' to be absent when nil")
+	}
+
+	thinkTrue := true
+	req2 := ollamaChatRequest{Model: "test", Stream: false, Think: &thinkTrue}
+	m2 := marshal(req2)
+	if m2["think"] != true {
+		t.Errorf("expected think=true, got %v", m2["think"])
+	}
+
+	thinkFalse := false
+	req3 := ollamaChatRequest{Model: "test", Stream: false, Think: &thinkFalse}
+	m3 := marshal(req3)
+	if m3["think"] != false {
+		t.Errorf("expected think=false, got %v", m3["think"])
 	}
 }

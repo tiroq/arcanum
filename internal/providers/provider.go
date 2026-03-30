@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ type GenerateRequest struct {
 	PromptTemplateID      string
 	PromptTemplateVersion string
 	InputVariables        map[string]string
+	ThinkMode             string
 }
 
 // GenerateResponse holds the LLM output.
@@ -34,6 +36,8 @@ type GenerateResponse struct {
 	TokensTotal      int
 	DurationMS       int64
 	TimeoutUsed      time.Duration
+	ThinkingContent  string
+	ExecutionTrace   json.RawMessage
 }
 
 // Provider is the LLM provider interface.
