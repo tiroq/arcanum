@@ -83,6 +83,16 @@ func run() error {
 
 	// --- Worker dependencies ---
 
+	// Ensure JetStream RUNEFORGE stream exists (idempotent — safe to call on every startup).
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("get jetstream context: %w", err)
+	}
+	if err := messaging.SetupStreams(js); err != nil {
+		return fmt.Errorf("setup streams: %w", err)
+	}
+	logger.Info("jetstream streams configured")
+
 	queue := jobs.NewQueue(pool, logger)
 
 	publisher, err := messaging.NewPublisher(nc, logger)

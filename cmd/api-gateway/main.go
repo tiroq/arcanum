@@ -11,10 +11,11 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/db"
 	"github.com/tiroq/arcanum/internal/health"
+	"github.com/tiroq/arcanum/internal/jobs"
 	"github.com/tiroq/arcanum/internal/logging"
 	"github.com/tiroq/arcanum/internal/metrics"
 	"go.uber.org/zap"
@@ -50,8 +51,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init metrics: %w", err)
 	}
-	_ = m
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -75,14 +74,13 @@ func run() error {
 
 	readiness := &health.ReadinessChecker{DB: pool, NATS: nc}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", health.HealthHandler)
-	mux.HandleFunc("/readyz", readiness.ReadinessHandler)
-	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	queue := jobs.NewQueue(pool, logger)
+	handlers := api.NewHandlers(pool, queue, m, logger)
+	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.HTTP.Port),
-		Handler:      mux,
+		Handler:      router,
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}
