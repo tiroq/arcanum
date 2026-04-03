@@ -54,9 +54,9 @@ type rewriteInput struct {
 }
 
 type rewriteOutput struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Reasoning   string `json:"reasoning"`
+	RewrittenTitle string  `json:"rewritten_title"`
+	Confidence     float64 `json:"confidence"`
+	Reasoning      string  `json:"reasoning"`
 }
 
 // Process loads a prompt template and calls the LLM provider to rewrite content.
@@ -118,7 +118,13 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 	var out rewriteOutput
 	if err := json.Unmarshal([]byte(genResp.Content), &out); err != nil {
 		p.logger.Warn("failed to parse LLM JSON output", zap.String("content", genResp.Content), zap.Error(err))
-		out = rewriteOutput{Title: input.Title, Description: input.Description}
+		out = rewriteOutput{RewrittenTitle: input.Title, Confidence: 0.0, Reasoning: "parse error: " + err.Error()}
+	}
+
+	if out.RewrittenTitle == "" {
+		p.logger.Warn("LLM returned empty rewritten_title, falling back to original",
+			zap.String("raw_content", genResp.Content))
+		out.RewrittenTitle = input.Title
 	}
 
 	outPayload, _ := json.Marshal(out)

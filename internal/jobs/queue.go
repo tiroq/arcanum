@@ -178,6 +178,34 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg strin
 	return nil
 }
 
+// ReclaimExpiredLeases moves jobs whose lease has expired back to queued status.
+func (q *Queue) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE processing_jobs
+		SET status = 'queued', leased_at = NULL, lease_expiry = NULL, updated_at = $1
+		WHERE status = 'leased' AND lease_expiry < $1`
+	tag, err := q.db.Exec(ctx, query, now)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim expired leases: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// RequeueScheduledRetries moves retry_scheduled jobs whose scheduled_at has passed back to queued.
+func (q *Queue) RequeueScheduledRetries(ctx context.Context) (int64, error) {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE processing_jobs
+		SET status = 'queued', updated_at = $1
+		WHERE status = 'retry_scheduled' AND scheduled_at <= $1`
+	tag, err := q.db.Exec(ctx, query, now)
+	if err != nil {
+		return 0, fmt.Errorf("requeue scheduled retries: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // GetJob retrieves a job by ID.
 func (q *Queue) GetJob(ctx context.Context, jobID uuid.UUID) (*models.ProcessingJob, error) {
 	const query = `

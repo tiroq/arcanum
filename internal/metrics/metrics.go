@@ -12,6 +12,7 @@ type Metrics struct {
 	JobsSucceeded      prometheus.Counter
 	JobsFailed         prometheus.Counter
 	JobsRetried        prometheus.Counter
+	JobsReclaimed      prometheus.Counter
 	ProposalApprovals  prometheus.Counter
 	ProposalRejections prometheus.Counter
 	WritebackSuccess   prometheus.Counter
@@ -62,6 +63,11 @@ func NewMetrics(registry *prometheus.Registry) (*Metrics, error) {
 			Namespace: "runeforge",
 			Name:      "jobs_retried_total",
 			Help:      "Total number of processing job retries.",
+		}),
+		JobsReclaimed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "runeforge",
+			Name:      "jobs_reclaimed_total",
+			Help:      "Total number of expired-lease jobs reclaimed.",
 		}),
 		ProposalApprovals: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "runeforge",
@@ -139,6 +145,7 @@ func NewMetrics(registry *prometheus.Registry) (*Metrics, error) {
 		m.JobsSucceeded,
 		m.JobsFailed,
 		m.JobsRetried,
+		m.JobsReclaimed,
 		m.ProposalApprovals,
 		m.ProposalRejections,
 		m.WritebackSuccess,
