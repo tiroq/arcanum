@@ -18,6 +18,7 @@ type Config struct {
 	Providers   ProvidersConfig
 	Features    FeatureFlags
 	Retry       RetryConfig
+	Telegram    TelegramConfig
 	GoogleTasks GoogleTasksConfig
 }
 
@@ -102,6 +103,11 @@ type RetryConfig struct {
 	InitialIntervalSeconds int     `envconfig:"RETRY_INITIAL_INTERVAL_SECONDS" default:"5"`
 }
 
+type TelegramConfig struct {
+	BotToken    string `envconfig:"TELEGRAM_BOT_TOKEN"`
+	OwnerChatID int64  `envconfig:"TELEGRAM_OWNER_CHAT_ID"`
+}
+
 type GoogleTasksConfig struct {
 	CredentialsPath     string `envconfig:"GOOGLE_TASKS_CREDENTIALS_PATH"`
 	PollIntervalSeconds int    `envconfig:"GOOGLE_TASKS_POLL_INTERVAL_SECONDS" default:"300"`
@@ -141,6 +147,9 @@ func Load() (*Config, error) {
 	}
 	if err := envconfig.Process("", &cfg.Retry); err != nil {
 		return nil, fmt.Errorf("retry config: %w", err)
+	}
+	if err := envconfig.Process("", &cfg.Telegram); err != nil {
+		return nil, fmt.Errorf("telegram config: %w", err)
 	}
 	if err := envconfig.Process("", &cfg.GoogleTasks); err != nil {
 		return nil, fmt.Errorf("google tasks config: %w", err)
