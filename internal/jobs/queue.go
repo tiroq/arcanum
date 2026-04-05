@@ -13,6 +13,17 @@ import (
 	"github.com/tiroq/arcanum/internal/db/models"
 )
 
+// Queuer is the interface the worker depends on for job lifecycle operations.
+// Declared here so consumers (worker, tests) can depend on the interface rather
+// than the concrete *Queue, enabling unit testing without a real database.
+type Queuer interface {
+	Lease(ctx context.Context, workerID string, jobTypes []string) (*models.ProcessingJob, error)
+	Complete(ctx context.Context, jobID uuid.UUID) error
+	Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg string) error
+	ReclaimExpiredLeases(ctx context.Context) (int64, error)
+	RequeueScheduledRetries(ctx context.Context) (int64, error)
+}
+
 // EnqueueParams holds parameters for creating a new job.
 type EnqueueParams struct {
 	SourceTaskID uuid.UUID
@@ -127,51 +138,71 @@ func (q *Queue) Lease(ctx context.Context, workerID string, jobTypes []string) (
 }
 
 // Complete marks a job as succeeded.
+// The update is guarded by AND status = 'leased' so a stale goroutine whose
+// lease was already reclaimed cannot overwrite a re-leased or already-finished job.
 func (q *Queue) Complete(ctx context.Context, jobID uuid.UUID) error {
 	const query = `
 		UPDATE processing_jobs
 		SET status = $1, updated_at = $2
-		WHERE id = $3`
-	if _, err := q.db.Exec(ctx, query, models.JobStatusSucceeded, time.Now().UTC(), jobID); err != nil {
+		WHERE id = $3 AND status = 'leased'`
+	tag, err := q.db.Exec(ctx, query, models.JobStatusSucceeded, time.Now().UTC(), jobID)
+	if err != nil {
 		return fmt.Errorf("complete job %s: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		q.logger.Warn("complete: job not in leased state, skipping (lease may have been reclaimed)",
+			zap.String("job_id", jobID.String()),
+		)
 	}
 	return nil
 }
 
 // Fail marks a job as failed and schedules a retry or dead-letters it.
+// The UPDATE is atomic — attempt_count is incremented and the new status is
+// computed in a single statement, eliminating the read-then-write TOCTOU race.
+// The AND status = 'leased' guard prevents a stale goroutine (expired lease)
+// from corrupting state after the lease was reclaimed by the maintenance loop.
 func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg string) error {
 	now := time.Now().UTC()
 
-	var attemptCount, maxAttempts int
-	const getJob = `SELECT attempt_count, max_attempts FROM processing_jobs WHERE id = $1`
-	if err := q.db.QueryRow(ctx, getJob, jobID).Scan(&attemptCount, &maxAttempts); err != nil {
-		return fmt.Errorf("get job for fail %s: %w", jobID, err)
-	}
-
-	newAttemptCount := attemptCount + 1
-	var newStatus string
-	var scheduledAt *time.Time
-
-	if newAttemptCount >= maxAttempts {
-		newStatus = models.JobStatusDeadLetter
-	} else {
-		newStatus = models.JobStatusRetryScheduled
-		retryAt := now.Add(time.Duration(newAttemptCount*newAttemptCount) * 30 * time.Second)
-		scheduledAt = &retryAt
-	}
-
-	const update = `
+	const query = `
 		UPDATE processing_jobs
-		SET status = $1, attempt_count = $2, scheduled_at = $3, updated_at = $4,
-		    error_code = $6, error_message = $7
-		WHERE id = $5`
-	if _, err := q.db.Exec(ctx, update, newStatus, newAttemptCount, scheduledAt, now, jobID, errCode, errMsg); err != nil {
+		SET
+		    status        = CASE
+		                        WHEN attempt_count + 1 >= max_attempts THEN 'dead_letter'
+		                        ELSE 'retry_scheduled'
+		                    END,
+		    attempt_count = attempt_count + 1,
+		    scheduled_at  = CASE
+		                        WHEN attempt_count + 1 >= max_attempts THEN NULL
+		                        ELSE $1 + (((attempt_count + 1) * (attempt_count + 1) * 30) * interval '1 second')
+		                    END,
+		    updated_at    = $1,
+		    error_code    = $2,
+		    error_message = $3
+		WHERE id = $4 AND status = 'leased'
+		RETURNING status, attempt_count`
+
+	var newStatus string
+	var newAttemptCount int
+	err := q.db.QueryRow(ctx, query, now, errCode, errMsg, jobID).Scan(&newStatus, &newAttemptCount)
+	if err == pgx.ErrNoRows {
+		// Lease was reclaimed by the maintenance loop or the job's status
+		// was already changed by a concurrent transition. Log and exit cleanly.
+		q.logger.Warn("fail: job not in leased state, skipping (lease may have been reclaimed)",
+			zap.String("job_id", jobID.String()),
+			zap.String("error_code", errCode),
+		)
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("fail job %s: %w", jobID, err)
 	}
 
 	q.logger.Info("job failed",
 		zap.String("job_id", jobID.String()),
 		zap.String("new_status", newStatus),
+		zap.Int("attempt_count", newAttemptCount),
 		zap.String("error_code", errCode),
 		zap.String("error_msg", errMsg),
 	)
