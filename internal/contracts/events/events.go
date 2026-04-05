@@ -208,3 +208,35 @@ func NewNotifyRequestedEvent(notificationType, recipient, payloadJSON string) No
 		PayloadJSON:      payloadJSON,
 	}
 }
+
+// TaskResyncCommandEvent is a command published by the API to trigger re-processing
+// of a source task. The orchestrator subscribes and calls queue.Enqueue.
+type TaskResyncCommandEvent struct {
+	Version      string `json:"version"`
+	SourceTaskID string `json:"source_task_id"`
+	JobType      string `json:"job_type"`
+	Priority     int    `json:"priority"`
+}
+
+func NewTaskResyncCommandEvent(sourceTaskID, jobType string, priority int) TaskResyncCommandEvent {
+	return TaskResyncCommandEvent{
+		Version:      "v1",
+		SourceTaskID: sourceTaskID,
+		JobType:      jobType,
+		Priority:     priority,
+	}
+}
+
+// JobRetryCommandEvent is a command published by the API to retry a failed or
+// dead-lettered job. The orchestrator subscribes and calls queue.Retry.
+type JobRetryCommandEvent struct {
+	Version string `json:"version"`
+	JobID   string `json:"job_id"`
+}
+
+func NewJobRetryCommandEvent(jobID string) JobRetryCommandEvent {
+	return JobRetryCommandEvent{
+		Version: "v1",
+		JobID:   jobID,
+	}
+}

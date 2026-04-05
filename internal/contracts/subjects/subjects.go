@@ -18,6 +18,10 @@ const (
 	SubjectWritebackCompleted = "runeforge.writeback.completed"
 	SubjectWritebackFailed    = "runeforge.writeback.failed"
 	SubjectNotifyRequested    = "runeforge.notify.requested"
+
+	// Command subjects — API publishes; orchestrator subscribes and executes.
+	SubjectCommandTaskResync = "runeforge.commands.task.resync"
+	SubjectCommandJobRetry   = "runeforge.commands.job.retry"
 )
 
 // AllSubjects lists every defined NATS subject. Used in enforcement tests.
@@ -33,4 +37,6 @@ var AllSubjects = []string{
 	SubjectWritebackCompleted,
 	SubjectWritebackFailed,
 	SubjectNotifyRequested,
+	SubjectCommandTaskResync,
+	SubjectCommandJobRetry,
 }

@@ -15,8 +15,8 @@ import (
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/db"
 	"github.com/tiroq/arcanum/internal/health"
-	"github.com/tiroq/arcanum/internal/jobs"
 	"github.com/tiroq/arcanum/internal/logging"
+	"github.com/tiroq/arcanum/internal/messaging"
 	"github.com/tiroq/arcanum/internal/metrics"
 	"go.uber.org/zap"
 )
@@ -74,8 +74,11 @@ func run() error {
 
 	readiness := &health.ReadinessChecker{DB: pool, NATS: nc}
 
-	queue := jobs.NewQueue(pool, logger)
-	handlers := api.NewHandlers(pool, queue, m, logger)
+	publisher, err := messaging.NewPublisher(nc, logger)
+	if err != nil {
+		return fmt.Errorf("create publisher: %w", err)
+	}
+	handlers := api.NewHandlers(pool, publisher, m, logger)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{

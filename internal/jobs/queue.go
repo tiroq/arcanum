@@ -403,3 +403,30 @@ func (q *Queue) GetJob(ctx context.Context, jobID uuid.UUID) (*models.Processing
 	}
 	return &job, nil
 }
+
+// Retry moves a failed or dead-lettered job back to queued status so it can be
+// picked up by a worker again. Returns pgx.ErrNoRows if the job does not exist
+// or is not in a retryable state.
+func (q *Queue) Retry(ctx context.Context, jobID uuid.UUID) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE processing_jobs
+		SET status = 'queued', scheduled_at = NULL, updated_at = $1
+		WHERE id = $2
+		  AND status IN ('failed', 'dead_letter')`
+	tag, err := q.db.Exec(ctx, query, now, jobID)
+	if err != nil {
+		return fmt.Errorf("retry job %s: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("retry job %s: %w", jobID, pgx.ErrNoRows)
+	}
+
+	q.logger.Info("job retried", zap.String("job_id", jobID.String()))
+
+	q.record(ctx, "job", jobID, "job.retried", "system", "queue", map[string]any{
+		"job_id": jobID.String(),
+	})
+
+	return nil
+}

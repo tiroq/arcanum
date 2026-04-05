@@ -56,9 +56,9 @@ func New(
 	}
 }
 
-// Start subscribes to job events and begins processing.
+// Start subscribes to job events and command subjects, then begins processing.
 func (o *Orchestrator) Start(ctx context.Context) error {
-	return o.subscriber.Subscribe(subjects.SubjectJobCreated, "orchestrator-job-created", func(msg *nats.Msg) {
+	if err := o.subscriber.Subscribe(subjects.SubjectJobCreated, "orchestrator-job-created", func(msg *nats.Msg) {
 		o.wg.Add(1)
 		go func() {
 			defer o.wg.Done()
@@ -101,6 +101,100 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 			o.logger.Info("job routed to worker",
 				zap.String("job_id", job.ID.String()),
 				zap.String("job_type", job.JobType),
+			)
+		}()
+	}); err != nil {
+		return err
+	}
+
+	if err := o.subscriber.Subscribe(subjects.SubjectCommandTaskResync, "orchestrator-cmd-task-resync", func(msg *nats.Msg) {
+		o.wg.Add(1)
+		go func() {
+			defer o.wg.Done()
+			defer msg.Ack() //nolint:errcheck
+
+			var cmd events.TaskResyncCommandEvent
+			if err := json.Unmarshal(msg.Data, &cmd); err != nil {
+				o.logger.Error("unmarshal task resync command", zap.Error(err))
+				return
+			}
+
+			sourceTaskID, err := uuid.Parse(cmd.SourceTaskID)
+			if err != nil {
+				o.logger.Error("parse source_task_id in resync command", zap.Error(err))
+				return
+			}
+
+			job, err := o.queue.Enqueue(ctx, jobs.EnqueueParams{
+				SourceTaskID: sourceTaskID,
+				JobType:      cmd.JobType,
+				Priority:     cmd.Priority,
+				MaxAttempts:  3,
+			})
+			if err != nil {
+				o.logger.Error("enqueue resync job", zap.String("source_task_id", cmd.SourceTaskID), zap.Error(err))
+				return
+			}
+			if job == nil {
+				// Deduplicated — a non-terminal job already exists.
+				o.logger.Info("resync deduplicated", zap.String("source_task_id", cmd.SourceTaskID))
+				return
+			}
+
+			evt := events.NewJobCreatedEvent(job.ID.String(), cmd.SourceTaskID, cmd.JobType, cmd.Priority, "")
+			if err := o.publisher.Publish(ctx, subjects.SubjectJobCreated, evt); err != nil {
+				o.logger.Error("publish job created after resync", zap.String("job_id", job.ID.String()), zap.Error(err))
+			}
+
+			o.logger.Info("resync job enqueued",
+				zap.String("job_id", job.ID.String()),
+				zap.String("source_task_id", cmd.SourceTaskID),
+			)
+		}()
+	}); err != nil {
+		return err
+	}
+
+	return o.subscriber.Subscribe(subjects.SubjectCommandJobRetry, "orchestrator-cmd-job-retry", func(msg *nats.Msg) {
+		o.wg.Add(1)
+		go func() {
+			defer o.wg.Done()
+			defer msg.Ack() //nolint:errcheck
+
+			var cmd events.JobRetryCommandEvent
+			if err := json.Unmarshal(msg.Data, &cmd); err != nil {
+				o.logger.Error("unmarshal job retry command", zap.Error(err))
+				return
+			}
+
+			jobID, err := uuid.Parse(cmd.JobID)
+			if err != nil {
+				o.logger.Error("parse job_id in retry command", zap.Error(err))
+				return
+			}
+
+			if err := o.queue.Retry(ctx, jobID); err != nil {
+				o.logger.Error("retry job", zap.String("job_id", cmd.JobID), zap.Error(err))
+				return
+			}
+
+			job, err := o.queue.GetJob(ctx, jobID)
+			if err != nil {
+				o.logger.Error("get job after retry", zap.String("job_id", cmd.JobID), zap.Error(err))
+				return
+			}
+
+			dedupeKey := ""
+			if job.DedupeKey != nil {
+				dedupeKey = *job.DedupeKey
+			}
+			evt := events.NewJobCreatedEvent(job.ID.String(), job.SourceTaskID.String(), job.JobType, job.Priority, dedupeKey)
+			if err := o.publisher.Publish(ctx, subjects.SubjectJobCreated, evt); err != nil {
+				o.logger.Error("publish job created after retry", zap.String("job_id", cmd.JobID), zap.Error(err))
+			}
+
+			o.logger.Info("job retry enqueued",
+				zap.String("job_id", cmd.JobID),
 			)
 		}()
 	})

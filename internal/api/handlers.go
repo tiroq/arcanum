@@ -13,22 +13,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/contracts/events"
+	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
-	"github.com/tiroq/arcanum/internal/jobs"
+	"github.com/tiroq/arcanum/internal/messaging"
 	"github.com/tiroq/arcanum/internal/metrics"
 )
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	db      *pgxpool.Pool
-	queue   *jobs.Queue
-	metrics *metrics.Metrics
-	logger  *zap.Logger
+	db        *pgxpool.Pool
+	publisher *messaging.Publisher
+	metrics   *metrics.Metrics
+	logger    *zap.Logger
 }
 
 // NewHandlers creates Handlers with required dependencies.
-func NewHandlers(db *pgxpool.Pool, queue *jobs.Queue, m *metrics.Metrics, logger *zap.Logger) *Handlers {
-	return &Handlers{db: db, queue: queue, metrics: m, logger: logger}
+func NewHandlers(db *pgxpool.Pool, publisher *messaging.Publisher, m *metrics.Metrics, logger *zap.Logger) *Handlers {
+	return &Handlers{db: db, publisher: publisher, metrics: m, logger: logger}
 }
 
 // --- JSON helpers ---
@@ -286,19 +288,13 @@ func (h *Handlers) resyncTask(w http.ResponseWriter, r *http.Request, id uuid.UU
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	dedupeKey := "resync:" + id.String() + ":" + strconv.FormatInt(time.Now().Unix(), 10)
-	_, err := h.queue.Enqueue(r.Context(), jobs.EnqueueParams{
-		SourceTaskID: id,
-		JobType:      "llm_rewrite",
-		Priority:     1,
-		DedupeKey:    &dedupeKey,
-		MaxAttempts:  3,
-	})
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "enqueue failed")
+	cmd := events.NewTaskResyncCommandEvent(id.String(), "llm_rewrite", 1)
+	if err := h.publisher.Publish(r.Context(), subjects.SubjectCommandTaskResync, cmd); err != nil {
+		h.logger.Error("publish resync command", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "publish failed")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "resyncing"})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 // --- Jobs ---
@@ -358,8 +354,13 @@ func (h *Handlers) JobRouter(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	job, err := h.queue.GetJob(r.Context(), id)
-	if err != nil {
+	const jobQuery = `SELECT id, source_task_id, job_type, status, priority, dedupe_key, attempt_count, max_attempts, payload, leased_at, lease_expiry, scheduled_at, created_at, updated_at FROM processing_jobs WHERE id = $1`
+	var job models.ProcessingJob
+	if err := h.db.QueryRow(r.Context(), jobQuery, id).Scan(
+		&job.ID, &job.SourceTaskID, &job.JobType, &job.Status, &job.Priority,
+		&job.DedupeKey, &job.AttemptCount, &job.MaxAttempts, &job.Payload,
+		&job.LeasedAt, &job.LeaseExpiry, &job.ScheduledAt, &job.CreatedAt, &job.UpdatedAt,
+	); err != nil {
 		writeError(w, r, http.StatusNotFound, "not found")
 		return
 	}
@@ -371,14 +372,13 @@ func (h *Handlers) retryJob(w http.ResponseWriter, r *http.Request, id uuid.UUID
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	// Re-queue the job by resetting status to queued.
-	const q = `UPDATE processing_jobs SET status='queued', scheduled_at=NULL, updated_at=$1 WHERE id=$2 AND status IN ('failed','dead_letter')`
-	tag, err := h.db.Exec(r.Context(), q, time.Now().UTC(), id)
-	if err != nil || tag.RowsAffected() == 0 {
-		writeError(w, r, http.StatusBadRequest, "job cannot be retried")
+	cmd := events.NewJobRetryCommandEvent(id.String())
+	if err := h.publisher.Publish(r.Context(), subjects.SubjectCommandJobRetry, cmd); err != nil {
+		h.logger.Error("publish retry command", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "publish failed")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 // --- Proposals ---
