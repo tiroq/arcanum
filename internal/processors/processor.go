@@ -33,7 +33,9 @@ type ProcessResult struct {
 	ModelProvider         string
 	ModelRole             providers.ModelRole
 	ModelName             string
-	TokensUsed            int
+	TokensPrompt          int
+	TokensCompletion      int
+	TokensUsed            int // total (prompt + completion)
 	DurationMS            int64
 	TimeoutUsed           time.Duration
 	ExecutionTrace        json.RawMessage

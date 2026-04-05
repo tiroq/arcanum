@@ -139,6 +139,8 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		ModelProvider:         p.defaultProvider,
 		ModelRole:             p.modelRole,
 		ModelName:             genResp.Model,
+		TokensPrompt:          genResp.TokensPrompt,
+		TokensCompletion:      genResp.TokensCompletion,
 		TokensUsed:            genResp.TokensTotal,
 		DurationMS:            durationMS,
 		TimeoutUsed:           genResp.TimeoutUsed,
