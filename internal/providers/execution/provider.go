@@ -115,6 +115,12 @@ func (p *ExecutingProvider) recordPassthrough(req providers.GenerateRequest, res
 		p.metrics.ExecutionOutcomeTotal.WithLabelValues(role, string(OutcomeExhausted)).Inc()
 	} else {
 		p.metrics.ExecutionOutcomeTotal.WithLabelValues(role, string(OutcomeSuccess)).Inc()
+		// Record token usage for the passthrough call.
+		if resp.TokensTotal > 0 {
+			p.metrics.TokensPromptTotal.WithLabelValues(p.inner.Name(), resp.Model, role).Add(float64(resp.TokensPrompt))
+			p.metrics.TokensCompletionTotal.WithLabelValues(p.inner.Name(), resp.Model, role).Add(float64(resp.TokensCompletion))
+			p.metrics.TokensGrandTotal.WithLabelValues(p.inner.Name(), resp.Model, role).Add(float64(resp.TokensTotal))
+		}
 	}
 	p.metrics.ExecutionCandidatesTried.WithLabelValues(role).Add(1)
 }
@@ -135,6 +141,13 @@ func (p *ExecutingProvider) recordMetrics(req providers.GenerateRequest, result 
 		}
 		if attempt.FailureClass == FailureValidation {
 			p.metrics.ExecutionValidationFailures.WithLabelValues(role, "chain").Inc()
+		}
+		// Increment token metrics per-attempt so per-model accounting is accurate
+		// even across fallback chains (different models may be tried).
+		if attempt.TokensTotal > 0 {
+			p.metrics.TokensPromptTotal.WithLabelValues(p.inner.Name(), attempt.ModelName, role).Add(float64(attempt.TokensPrompt))
+			p.metrics.TokensCompletionTotal.WithLabelValues(p.inner.Name(), attempt.ModelName, role).Add(float64(attempt.TokensCompletion))
+			p.metrics.TokensGrandTotal.WithLabelValues(p.inner.Name(), attempt.ModelName, role).Add(float64(attempt.TokensTotal))
 		}
 	}
 }

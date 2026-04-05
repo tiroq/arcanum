@@ -162,12 +162,18 @@ func (e *ExecutionEngine) tryCandidate(
 		fc := FailureValidation
 		action := validation.FailAction
 		attempt.CompleteWithError(valErr, fc, action, finishedAt)
+		// Capture tokens even though content failed validation — the provider
+		// did work and tokens should count toward accumulated usage.
+		attempt.TokensPrompt = resp.TokensPrompt
+		attempt.TokensCompletion = resp.TokensCompletion
+		attempt.TokensTotal = resp.TokensTotal
 		trace.RecordAttempt(attempt)
 		return providers.GenerateResponse{}, valErr
 	}
 
 	attempt.Complete("success", finishedAt)
 	attempt.TokensPrompt = resp.TokensPrompt
+	attempt.TokensCompletion = resp.TokensCompletion
 	attempt.TokensTotal = resp.TokensTotal
 	trace.RecordAttempt(attempt)
 
