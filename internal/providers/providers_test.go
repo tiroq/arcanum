@@ -1,7 +1,10 @@
 package providers
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -260,4 +263,73 @@ func TestOllamaChatRequest_ThinkModeSerialization(t *testing.T) {
 	if m3["think"] != false {
 		t.Errorf("expected think=false, got %v", m3["think"])
 	}
+}
+
+func TestOllamaTokenExtraction(t *testing.T) {
+	startFakeOllama := func(t *testing.T, body string, status int) string {
+		t.Helper()
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			w.Write([]byte(body)) //nolint:errcheck
+		})
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+
+	t.Run("extracts prompt and completion tokens", func(t *testing.T) {
+		payload := `{
+			"model": "qwen2.5:7b-instruct",
+			"message": {"role": "assistant", "content": "hello world"},
+			"done": true,
+			"prompt_eval_count": 42,
+			"eval_count": 17
+		}`
+		url := startFakeOllama(t, payload, http.StatusOK)
+
+		cfg := config.OllamaConfig{
+			BaseURL:      url,
+			DefaultModel: "qwen2.5:7b-instruct",
+			Timeout:      5 * time.Second,
+		}
+		p := NewOllamaProvider("ollama", cfg, zap.NewNop())
+		resp, err := p.Generate(context.Background(), GenerateRequest{UserPrompt: "hi"})
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if resp.TokensPrompt != 42 {
+			t.Errorf("TokensPrompt: want 42, got %d", resp.TokensPrompt)
+		}
+		if resp.TokensCompletion != 17 {
+			t.Errorf("TokensCompletion: want 17, got %d", resp.TokensCompletion)
+		}
+		if resp.TokensTotal != 59 {
+			t.Errorf("TokensTotal: want 59, got %d", resp.TokensTotal)
+		}
+	})
+
+	t.Run("zero tokens when ollama omits counts", func(t *testing.T) {
+		payload := `{
+			"model": "qwen2.5:7b-instruct",
+			"message": {"role": "assistant", "content": "hi"},
+			"done": true
+		}`
+		url := startFakeOllama(t, payload, http.StatusOK)
+
+		cfg := config.OllamaConfig{
+			BaseURL:      url,
+			DefaultModel: "qwen2.5:7b-instruct",
+			Timeout:      5 * time.Second,
+		}
+		p := NewOllamaProvider("ollama", cfg, zap.NewNop())
+		resp, err := p.Generate(context.Background(), GenerateRequest{UserPrompt: "hi"})
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if resp.TokensTotal != 0 {
+			t.Errorf("expected 0 tokens when omitted, got %d", resp.TokensTotal)
+		}
+	})
 }

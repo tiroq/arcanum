@@ -51,9 +51,11 @@ type ollamaChatRequest struct {
 }
 
 type ollamaChatResponse struct {
-	Model   string        `json:"model"`
-	Message ollamaMessage `json:"message"`
-	Done    bool          `json:"done"`
+	Model           string        `json:"model"`
+	Message         ollamaMessage `json:"message"`
+	Done            bool          `json:"done"`
+	PromptEvalCount int           `json:"prompt_eval_count"`
+	EvalCount       int           `json:"eval_count"`
 }
 
 // ResolveModel returns the model name for a given role, falling back to DefaultModel.
@@ -154,20 +156,28 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 		return GenerateResponse{}, fmt.Errorf("%s: decode response: %w", p.name, err)
 	}
 
+	tokensPrompt := resp.PromptEvalCount
+	tokensCompletion := resp.EvalCount
+
 	p.logger.Debug("ollama call complete",
 		zap.String("provider", p.name),
 		zap.String("model_role", role.String()),
 		zap.String("model", model),
 		zap.Int64("duration_ms", durationMS),
+		zap.Int("tokens_prompt", tokensPrompt),
+		zap.Int("tokens_completion", tokensCompletion),
 	)
 
 	return GenerateResponse{
-		Content:     resp.Message.Content,
-		Model:       resp.Model,
-		ModelRole:   role.String(),
-		Provider:    p.name,
-		DurationMS:  durationMS,
-		TimeoutUsed: timeout,
+		Content:          resp.Message.Content,
+		Model:            resp.Model,
+		ModelRole:        role.String(),
+		Provider:         p.name,
+		TokensPrompt:     tokensPrompt,
+		TokensCompletion: tokensCompletion,
+		TokensTotal:      tokensPrompt + tokensCompletion,
+		DurationMS:       durationMS,
+		TimeoutUsed:      timeout,
 	}, nil
 }
 

@@ -56,11 +56,14 @@ func (p *AuditedProvider) Generate(ctx context.Context, req GenerateRequest) (Ge
 
 	outcome := "success"
 	payload := map[string]any{
-		"provider":    p.inner.Name(),
-		"model":       resp.Model,
-		"role":        role,
-		"duration_ms": resp.DurationMS,
-		"outcome":     outcome,
+		"provider":          p.inner.Name(),
+		"model":             resp.Model,
+		"role":              role,
+		"duration_ms":       resp.DurationMS,
+		"tokens_prompt":     resp.TokensPrompt,
+		"tokens_completion": resp.TokensCompletion,
+		"tokens_total":      resp.TokensTotal,
+		"outcome":           outcome,
 	}
 	if err != nil {
 		payload["outcome"] = "failure"
