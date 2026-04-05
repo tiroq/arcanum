@@ -156,8 +156,8 @@ func TestLiveScenarioA_CompleteAfterReclaimNoRelease(t *testing.T) {
 		t.Fatalf("expected status=queued after reclaim, got %s", statusAfterReclaim)
 	}
 
-	// G1 goroutine finishes (after reclaim) and calls Complete.
-	if err := q.Complete(ctx, jobID); err != nil {
+	// G1 goroutine finishes (after reclaim) and calls Complete — reclaim cleared ownership.
+	if err := q.Complete(ctx, jobID, "worker-g1"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
