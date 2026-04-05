@@ -93,14 +93,13 @@ func run() error {
 	}
 	logger.Info("jetstream streams configured")
 
-	queue := jobs.NewQueue(pool, logger)
-
 	publisher, err := messaging.NewPublisher(nc, logger)
 	if err != nil {
 		return fmt.Errorf("create publisher: %w", err)
 	}
 
 	auditor := audit.NewPostgresAuditRecorder(pool)
+	queue := jobs.NewQueue(pool, logger).WithAudit(auditor)
 	templateLoader := prompts.NewTemplateLoader("prompts")
 
 	// --- Provider setup with execution profiles ---
@@ -125,7 +124,7 @@ func run() error {
 	execProvider := execution.NewExecutingProvider(ollamaBase, profiles, m, logger)
 
 	providerReg := providers.NewProviderRegistry()
-	providerReg.Register("ollama", execProvider)
+	providerReg.Register("ollama", providers.NewAuditedProvider(execProvider, auditor, logger))
 	logger.Info("registered ollama provider with execution profiles")
 
 	// --- Processor registry ---

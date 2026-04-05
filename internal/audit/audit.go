@@ -10,6 +10,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// contextKeyType is an unexported type for audit context keys to prevent collisions.
+type contextKeyType struct{}
+
+// JobIDKey is the context key used to store the current job's UUID during execution.
+// Set this before calling proc.Process so the AuditedProvider can correlate LLM
+// calls with the job that triggered them.
+var JobIDKey = contextKeyType{}
+
 // AuditRecorder defines the interface for recording audit events.
 type AuditRecorder interface {
 	RecordEvent(ctx context.Context, entityType string, entityID uuid.UUID, eventType, actorType, actorID string, payload any) error

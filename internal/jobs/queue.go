@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/db/models"
 )
 
@@ -49,11 +50,33 @@ type EnqueueParams struct {
 type Queue struct {
 	db     *pgxpool.Pool
 	logger *zap.Logger
+	audit  audit.AuditRecorder
 }
 
 // NewQueue creates a new Queue.
 func NewQueue(db *pgxpool.Pool, logger *zap.Logger) *Queue {
 	return &Queue{db: db, logger: logger}
+}
+
+// WithAudit attaches an audit recorder. Errors in audit recording never fail
+// the main DB operation — they are logged at WARN level and discarded.
+func (q *Queue) WithAudit(a audit.AuditRecorder) *Queue {
+	q.audit = a
+	return q
+}
+
+// record is a fire-and-forget audit helper. Errors are logged, never propagated.
+func (q *Queue) record(ctx context.Context, entityType string, entityID uuid.UUID, eventType, actorType, actorID string, payload any) {
+	if q.audit == nil {
+		return
+	}
+	if err := q.audit.RecordEvent(ctx, entityType, entityID, eventType, actorType, actorID, payload); err != nil {
+		q.logger.Warn("audit record failed",
+			zap.String("event_type", eventType),
+			zap.String("entity_id", entityID.String()),
+			zap.Error(err),
+		)
+	}
 }
 
 // Enqueue creates a new job unless a dedupe_key with an active (non-terminal) status already exists.
@@ -110,6 +133,13 @@ func (q *Queue) Enqueue(ctx context.Context, params EnqueueParams) (*models.Proc
 		zap.String("job_id", job.ID.String()),
 		zap.String("job_type", job.JobType),
 	)
+
+	q.record(ctx, "job", job.ID, "job.created", "system", "queue", map[string]any{
+		"job_type":       job.JobType,
+		"source_task_id": job.SourceTaskID.String(),
+		"priority":       job.Priority,
+	})
+
 	return job, nil
 }
 
@@ -148,6 +178,12 @@ func (q *Queue) Lease(ctx context.Context, workerID string, jobTypes []string) (
 	if err != nil {
 		return nil, fmt.Errorf("lease job: %w", err)
 	}
+
+	q.record(ctx, "job", job.ID, "job.leased", "worker", workerID, map[string]any{
+		"worker_id":     workerID,
+		"attempt_count": job.AttemptCount,
+	})
+
 	return &job, nil
 }
 
@@ -168,7 +204,11 @@ func (q *Queue) Complete(ctx context.Context, jobID uuid.UUID, workerID string) 
 			zap.String("job_id", jobID.String()),
 			zap.String("worker_id", workerID),
 		)
+		return nil
 	}
+	q.record(ctx, "job", jobID, "job.completed", "worker", workerID, map[string]any{
+		"worker_id": workerID,
+	})
 	return nil
 }
 
@@ -224,6 +264,23 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, er
 		zap.String("error_code", errCode),
 		zap.String("error_msg", errMsg),
 	)
+
+	q.record(ctx, "job", jobID, "job.failed", "worker", workerID, map[string]any{
+		"worker_id":     workerID,
+		"attempt_count": newAttemptCount,
+		"error_code":    errCode,
+		"error":         errMsg,
+	})
+
+	disposition := "job.retry_scheduled"
+	if newStatus == models.JobStatusDeadLetter {
+		disposition = "job.dead_letter"
+	}
+	q.record(ctx, "job", jobID, disposition, "worker", workerID, map[string]any{
+		"worker_id":     workerID,
+		"attempt_count": newAttemptCount,
+	})
+
 	return nil
 }
 
@@ -255,24 +312,62 @@ func (q *Queue) RenewLease(ctx context.Context, jobID uuid.UUID, workerID string
 		zap.String("worker_id", workerID),
 		zap.Time("new_expiry", newExpiry),
 	)
+
+	q.record(ctx, "job", jobID, "job.lease_renewed", "worker", workerID, map[string]any{
+		"worker_id": workerID,
+	})
+
 	return true, nil
 }
 
 // ReclaimExpiredLeases moves jobs whose lease has expired back to queued status.
 // leased_by_worker_id is cleared so the next worker starts with a clean ownership
 // record and the previous worker's Complete/Fail calls are properly rejected.
+// The CTE captures the old leased_by_worker_id before clearing it so we can
+// record a per-job audit event identifying which worker lost the lease.
 func (q *Queue) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	const query = `
+		WITH expired AS (
+			SELECT id, leased_by_worker_id AS prev_owner
+			FROM processing_jobs
+			WHERE status = 'leased' AND lease_expiry < $1
+			FOR UPDATE
+		)
 		UPDATE processing_jobs
 		SET status = 'queued', leased_at = NULL, lease_expiry = NULL,
 		    leased_by_worker_id = NULL, updated_at = $1
-		WHERE status = 'leased' AND lease_expiry < $1`
-	tag, err := q.db.Exec(ctx, query, now)
+		FROM expired
+		WHERE processing_jobs.id = expired.id
+		RETURNING processing_jobs.id, expired.prev_owner`
+
+	rows, err := q.db.Query(ctx, query, now)
 	if err != nil {
 		return 0, fmt.Errorf("reclaim expired leases: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	defer rows.Close()
+
+	var count int64
+	for rows.Next() {
+		var id uuid.UUID
+		var prevOwner *string
+		if scanErr := rows.Scan(&id, &prevOwner); scanErr != nil {
+			q.logger.Warn("reclaim: scan row failed", zap.Error(scanErr))
+			continue
+		}
+		count++
+		prev := ""
+		if prevOwner != nil {
+			prev = *prevOwner
+		}
+		q.record(ctx, "job", id, "job.reclaimed", "system", "maintenance", map[string]any{
+			"prev_owner": prev,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return count, fmt.Errorf("reclaim expired leases: iterate rows: %w", err)
+	}
+	return count, nil
 }
 
 // RequeueScheduledRetries moves retry_scheduled jobs whose scheduled_at has passed back to queued.

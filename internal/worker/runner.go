@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -48,8 +49,10 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 
 	// jobCtx is the context passed to the processor. Cancelling it signals the
 	// processor to abort — it is cancelled by the heartbeat if ownership is lost.
+	// audit.JobIDKey is embedded so the AuditedProvider can correlate LLM calls.
 	jobCtx, cancelJob := context.WithCancel(ctx)
 	defer cancelJob()
+	jobCtx = context.WithValue(jobCtx, audit.JobIDKey, job.ID)
 
 	// hbCtx scopes the heartbeat goroutine's lifetime to this RunJob call.
 	hbCtx, cancelHB := context.WithCancel(ctx)
@@ -85,6 +88,13 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 					)
 					if w.metrics != nil {
 						w.metrics.LeaseRenewalLost.Inc()
+					}
+					if w.audit != nil {
+						//nolint:errcheck
+						w.audit.RecordEvent(hbCtx, "job", job.ID, "job.lease_lost", "worker", w.workerID, map[string]any{
+							"worker_id": w.workerID,
+							"reason":    "lease_expired_and_reclaimed",
+						})
 					}
 					cancelJob()
 					return
@@ -183,6 +193,15 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 			)
 			if pubErr := w.publisher.Publish(ctx, subjects.SubjectProposalCreated, evt); pubErr != nil {
 				w.logger.Warn("publish proposal created failed", zap.Error(pubErr))
+			}
+			if w.audit != nil {
+				//nolint:errcheck
+				w.audit.RecordEvent(ctx, "proposal", proposalID, "proposal.created", "worker", w.workerID, map[string]any{
+					"proposal_id":    proposalID.String(),
+					"source_task_id": job.SourceTaskID.String(),
+					"proposal_type":  result.ProposalType,
+					"job_id":         job.ID.String(),
+				})
 			}
 		}
 	}
