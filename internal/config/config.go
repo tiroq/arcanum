@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -97,10 +98,10 @@ type OllamaConfig struct {
 	FastTimeoutSeconds    int `envconfig:"OLLAMA_FAST_TIMEOUT_SECONDS"`
 	PlannerTimeoutSeconds int `envconfig:"OLLAMA_PLANNER_TIMEOUT_SECONDS"`
 
-	DefaultProfile string `envconfig:"OLLAMA_DEFAULT_PROFILE"`
-	FastProfile    string `envconfig:"OLLAMA_FAST_PROFILE"`
-	PlannerProfile string `envconfig:"OLLAMA_PLANNER_PROFILE"`
-	ReviewProfile  string `envconfig:"OLLAMA_REVIEW_PROFILE"`
+	DefaultProfile string `envconfig:"MODEL_DEFAULT_PROFILE"`
+	FastProfile    string `envconfig:"MODEL_FAST_PROFILE"`
+	PlannerProfile string `envconfig:"MODEL_PLANNER_PROFILE"`
+	ReviewProfile  string `envconfig:"MODEL_REVIEW_PROFILE"`
 
 	// Computed duration fields (derived from *Seconds fields in Load).
 	Timeout        time.Duration
@@ -150,7 +151,7 @@ type GoogleTasksConfig struct {
 // Per-role escalation levels control how far a role may escalate through provider tiers:
 // local (cheapest/fastest) → cloud → OpenRouter (most capable/costly).
 //
-// Explicit DSL profile overrides (OLLAMA_*_PROFILE env vars) always take precedence over policy.
+// Explicit DSL profile overrides (MODEL_*_PROFILE env vars) always take precedence over policy.
 type RoutingPolicyConfig struct {
 	// Per-role escalation levels.
 	// Valid values: local_only, local_cloud, local_cloud_openrouter, local_openrouter.
@@ -168,6 +169,33 @@ type RoutingPolicyConfig struct {
 	// Must resolve to a non-empty value if any role permits OpenRouter escalation
 	// and OPENROUTER_ENABLED=true.
 	OpenRouterModel string `envconfig:"ROUTING_OPENROUTER_MODEL"`
+}
+
+// applyProfileBackcompat copies deprecated OLLAMA_*_PROFILE env vars into the
+// new MODEL_*_PROFILE fields when the latter are unset. It returns one warning
+// string per deprecated var consumed so the caller can surface them.
+func applyProfileBackcompat(cfg *OllamaConfig) []string {
+	type mapping struct {
+		oldKey  string
+		newKey  string
+		current *string
+	}
+	pairs := []mapping{
+		{"OLLAMA_DEFAULT_PROFILE", "MODEL_DEFAULT_PROFILE", &cfg.DefaultProfile},
+		{"OLLAMA_FAST_PROFILE", "MODEL_FAST_PROFILE", &cfg.FastProfile},
+		{"OLLAMA_PLANNER_PROFILE", "MODEL_PLANNER_PROFILE", &cfg.PlannerProfile},
+		{"OLLAMA_REVIEW_PROFILE", "MODEL_REVIEW_PROFILE", &cfg.ReviewProfile},
+	}
+	var warnings []string
+	for _, p := range pairs {
+		if *p.current == "" {
+			if v := os.Getenv(p.oldKey); v != "" {
+				*p.current = v
+				warnings = append(warnings, fmt.Sprintf("%s is deprecated; rename to %s", p.oldKey, p.newKey))
+			}
+		}
+	}
+	return warnings
 }
 
 // Load reads configuration from environment variables using envconfig.
@@ -198,6 +226,9 @@ func Load() (*Config, error) {
 	}
 	if err := envconfig.Process("", &cfg.Providers.Ollama); err != nil {
 		return nil, fmt.Errorf("ollama config: %w", err)
+	}
+	for _, w := range applyProfileBackcompat(&cfg.Providers.Ollama) {
+		fmt.Fprintf(os.Stderr, "[config] DEPRECATED: %s\n", w)
 	}
 	if err := envconfig.Process("", &cfg.Providers.OllamaCloud); err != nil {
 		return nil, fmt.Errorf("ollama cloud config: %w", err)

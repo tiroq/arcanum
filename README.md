@@ -14,7 +14,7 @@ Execution profiles extend role-based model selection with **candidate chains**, 
 
 For each role, the resolution order is:
 
-1. `OLLAMA_<ROLE>_PROFILE` — full DSL with candidate chains and parameters
+1. `MODEL_<ROLE>_PROFILE` — full DSL with candidate chains and parameters
 2. `OLLAMA_<ROLE>_MODEL` — single model name (legacy, still works)
 3. `OLLAMA_DEFAULT_MODEL` — base fallback
 
@@ -50,16 +50,16 @@ OLLAMA_PLANNER_MODEL=qwen2.5:14b
 
 ```bash
 # Fast role: try small model first, fall back to tiny model with thinking disabled
-OLLAMA_FAST_PROFILE=llama3.2:3b?think=off&timeout=30|llama3.2:1b?think=off&timeout=15
+MODEL_FAST_PROFILE=llama3.2:3b?think=off&timeout=30|llama3.2:1b?think=off&timeout=15
 
 # Planner role: large model with thinking, fall back to medium model
-OLLAMA_PLANNER_PROFILE=qwen2.5:14b?think=on&timeout=300|qwen2.5:7b?think=on&timeout=120
+MODEL_PLANNER_PROFILE=qwen2.5:14b?think=on&timeout=300|qwen2.5:7b?think=on&timeout=120
 
 # Review role: require JSON output, two candidates
-OLLAMA_REVIEW_PROFILE=qwen2.5:7b?json=true&timeout=120|llama3.2:3b?json=true&timeout=60
+MODEL_REVIEW_PROFILE=qwen2.5:7b?json=true&timeout=120|llama3.2:3b?json=true&timeout=60
 ```
 
-When `OLLAMA_FAST_PROFILE` is set, `OLLAMA_FAST_MODEL` is ignored for that role. Unset roles fall back to `OLLAMA_DEFAULT_MODEL` as a single candidate.
+When `MODEL_FAST_PROFILE` is set, `OLLAMA_FAST_MODEL` is ignored for that role. Unset roles fall back to `OLLAMA_DEFAULT_MODEL` as a single candidate.
 
 ## Quick Start
 

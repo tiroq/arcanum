@@ -176,9 +176,9 @@ func TestOllamaResolveTimeout(t *testing.T) {
 
 func TestOllamaProfileEnvVars(t *testing.T) {
 	setRequiredEnv(t)
-	t.Setenv("OLLAMA_FAST_PROFILE", "model-a?think=thinking&timeout=120|model-b?timeout=60")
-	t.Setenv("OLLAMA_PLANNER_PROFILE", "planner-model?think=nothinking&timeout=300")
-	t.Setenv("OLLAMA_REVIEW_PROFILE", "review-a|review-b?json=true")
+	t.Setenv("MODEL_FAST_PROFILE", "model-a?think=thinking&timeout=120|model-b?timeout=60")
+	t.Setenv("MODEL_PLANNER_PROFILE", "planner-model?think=nothinking&timeout=300")
+	t.Setenv("MODEL_REVIEW_PROFILE", "review-a|review-b?json=true")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -187,6 +187,35 @@ func TestOllamaProfileEnvVars(t *testing.T) {
 	assert.Equal(t, "planner-model?think=nothinking&timeout=300", cfg.Providers.Ollama.PlannerProfile)
 	assert.Equal(t, "review-a|review-b?json=true", cfg.Providers.Ollama.ReviewProfile)
 	assert.Empty(t, cfg.Providers.Ollama.DefaultProfile)
+}
+
+func TestOllamaProfileBackcompat(t *testing.T) {
+	setRequiredEnv(t)
+	// Set only the deprecated OLLAMA_*_PROFILE vars — MODEL_*_PROFILE are unset.
+	t.Setenv("OLLAMA_DEFAULT_PROFILE", "compat-default?think=off&timeout=90")
+	t.Setenv("OLLAMA_FAST_PROFILE", "compat-fast?timeout=30")
+	t.Setenv("OLLAMA_PLANNER_PROFILE", "compat-planner?think=on&timeout=240")
+	t.Setenv("OLLAMA_REVIEW_PROFILE", "compat-review?json=true")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "compat-default?think=off&timeout=90", cfg.Providers.Ollama.DefaultProfile)
+	assert.Equal(t, "compat-fast?timeout=30", cfg.Providers.Ollama.FastProfile)
+	assert.Equal(t, "compat-planner?think=on&timeout=240", cfg.Providers.Ollama.PlannerProfile)
+	assert.Equal(t, "compat-review?json=true", cfg.Providers.Ollama.ReviewProfile)
+}
+
+func TestOllamaProfileNewTakesPrecedenceOverOld(t *testing.T) {
+	setRequiredEnv(t)
+	// New MODEL_*_PROFILE must win over deprecated OLLAMA_*_PROFILE.
+	t.Setenv("MODEL_FAST_PROFILE", "new-fast?timeout=60")
+	t.Setenv("OLLAMA_FAST_PROFILE", "old-fast?timeout=30")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "new-fast?timeout=60", cfg.Providers.Ollama.FastProfile)
 }
 
 func TestOllamaCloudDefaults(t *testing.T) {
