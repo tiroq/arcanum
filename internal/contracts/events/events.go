@@ -240,3 +240,71 @@ func NewJobRetryCommandEvent(jobID string) JobRetryCommandEvent {
 		JobID:   jobID,
 	}
 }
+
+// --- Control-layer alert and result events ---
+
+// LeaseExpiredAlertEvent is published by the control loop when expired leases are reclaimed.
+type LeaseExpiredAlertEvent struct {
+	Version    string    `json:"version"`
+	Count      int64     `json:"count"`
+	DetectedAt time.Time `json:"detected_at"`
+}
+
+func NewLeaseExpiredAlertEvent(count int64) LeaseExpiredAlertEvent {
+	return LeaseExpiredAlertEvent{Version: "v1", Count: count, DetectedAt: time.Now().UTC()}
+}
+
+// RetryOverdueAlertEvent is published by the control loop when retry_scheduled jobs are requeued.
+type RetryOverdueAlertEvent struct {
+	Version    string    `json:"version"`
+	Count      int64     `json:"count"`
+	DetectedAt time.Time `json:"detected_at"`
+}
+
+func NewRetryOverdueAlertEvent(count int64) RetryOverdueAlertEvent {
+	return RetryOverdueAlertEvent{Version: "v1", Count: count, DetectedAt: time.Now().UTC()}
+}
+
+// QueueBacklogAlertEvent is published by the control loop when queued job count exceeds threshold.
+type QueueBacklogAlertEvent struct {
+	Version    string    `json:"version"`
+	Count      int64     `json:"count"`
+	Threshold  int64     `json:"threshold"`
+	DetectedAt time.Time `json:"detected_at"`
+}
+
+func NewQueueBacklogAlertEvent(count, threshold int64) QueueBacklogAlertEvent {
+	return QueueBacklogAlertEvent{Version: "v1", Count: count, Threshold: threshold, DetectedAt: time.Now().UTC()}
+}
+
+// LeaseLostAlertEvent is published by a worker's heartbeat when lease ownership is lost mid-execution.
+type LeaseLostAlertEvent struct {
+	Version    string    `json:"version"`
+	JobID      string    `json:"job_id"`
+	WorkerID   string    `json:"worker_id"`
+	DetectedAt time.Time `json:"detected_at"`
+}
+
+func NewLeaseLostAlertEvent(jobID, workerID string) LeaseLostAlertEvent {
+	return LeaseLostAlertEvent{Version: "v1", JobID: jobID, WorkerID: workerID, DetectedAt: time.Now().UTC()}
+}
+
+// ReclaimCompletedEvent is published by the control loop after reclaiming expired leases.
+type ReclaimCompletedEvent struct {
+	Version   string `json:"version"`
+	Reclaimed int64  `json:"reclaimed"`
+}
+
+func NewReclaimCompletedEvent(reclaimed int64) ReclaimCompletedEvent {
+	return ReclaimCompletedEvent{Version: "v1", Reclaimed: reclaimed}
+}
+
+// RetryRequeueCompletedEvent is published by the control loop after requeuing overdue retries.
+type RetryRequeueCompletedEvent struct {
+	Version  string `json:"version"`
+	Requeued int64  `json:"requeued"`
+}
+
+func NewRetryRequeueCompletedEvent(requeued int64) RetryRequeueCompletedEvent {
+	return RetryRequeueCompletedEvent{Version: "v1", Requeued: requeued}
+}

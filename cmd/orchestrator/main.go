@@ -14,7 +14,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
+	"github.com/tiroq/arcanum/internal/control"
 	"github.com/tiroq/arcanum/internal/db"
 	"github.com/tiroq/arcanum/internal/health"
 	"github.com/tiroq/arcanum/internal/jobs"
@@ -55,7 +57,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init metrics: %w", err)
 	}
-	_ = m
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -66,6 +67,8 @@ func run() error {
 	}
 	defer pool.Close()
 	logger.Info("database connected")
+
+	auditor := audit.NewPostgresAuditRecorder(pool)
 
 	nc, err := natsgo.Connect(cfg.NATS.URL,
 		natsgo.Name(serviceName),
@@ -105,6 +108,7 @@ func run() error {
 	procRegistry := processors.NewRegistry()
 
 	orch := orchestrator.New(queue, publisher, subscriber, procRegistry, pool, m, logger)
+	ctrlLoop := control.New(queue, publisher, auditor, m, logger)
 
 	orchCtx, orchCancel := context.WithCancel(context.Background())
 	defer orchCancel()
@@ -113,6 +117,9 @@ func run() error {
 		return fmt.Errorf("start orchestrator: %w", err)
 	}
 	logger.Info("orchestrator started")
+
+	ctrlLoop.Start(orchCtx)
+	logger.Info("control loop started")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health.HealthHandler)
@@ -140,6 +147,7 @@ func run() error {
 
 	logger.Info("shutting down orchestrator")
 	orchCancel()
+	ctrlLoop.Stop()
 	orch.Stop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)

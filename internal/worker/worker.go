@@ -16,7 +16,6 @@ import (
 )
 
 const pollInterval = 2 * time.Second
-const maintenanceInterval = 30 * time.Second
 
 // maxConcurrentJobs is the maximum number of job goroutines that may run in
 // parallel within a single worker process. This bound prevents a burst of
@@ -88,26 +87,6 @@ func (w *Worker) Start(ctx context.Context) error {
 		}
 	}()
 
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
-		ticker := time.NewTicker(maintenanceInterval)
-		defer ticker.Stop()
-
-		// Run once immediately on startup.
-		w.maintenance(ctx)
-
-		for {
-			select {
-			case <-w.stopCh:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				w.maintenance(ctx)
-			}
-		}
-	}()
 	return nil
 }
 
@@ -160,27 +139,4 @@ func (w *Worker) poll(ctx context.Context) {
 			)
 		}
 	}()
-}
-
-// maintenance reclaims expired leases and requeues scheduled retries.
-func (w *Worker) maintenance(ctx context.Context) {
-	reclaimed, err := w.queue.ReclaimExpiredLeases(ctx)
-	if err != nil {
-		w.logger.Error("reclaim expired leases failed", zap.Error(err))
-	} else if reclaimed > 0 {
-		w.logger.Info("reclaimed expired leases", zap.Int64("count", reclaimed))
-		if w.metrics != nil {
-			w.metrics.JobsReclaimed.Add(float64(reclaimed))
-		}
-	}
-
-	requeued, err := w.queue.RequeueScheduledRetries(ctx)
-	if err != nil {
-		w.logger.Error("requeue scheduled retries failed", zap.Error(err))
-	} else if requeued > 0 {
-		w.logger.Info("requeued scheduled retries", zap.Int64("count", requeued))
-		if w.metrics != nil {
-			w.metrics.JobsRetried.Add(float64(requeued))
-		}
-	}
 }

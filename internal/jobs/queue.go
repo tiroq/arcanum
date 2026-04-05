@@ -22,6 +22,8 @@ const leaseDuration = 5 * time.Minute
 // Queuer is the interface the worker depends on for job lifecycle operations.
 // Declared here so consumers (worker, tests) can depend on the interface rather
 // than the concrete *Queue, enabling unit testing without a real database.
+// Maintenance operations (reclaim, requeue, stats) are NOT part of this interface;
+// they are owned by the control loop which uses *Queue directly.
 type Queuer interface {
 	Lease(ctx context.Context, workerID string, jobTypes []string) (*models.ProcessingJob, error)
 	// Complete and Fail require the callerʼs workerID so the ownership guard
@@ -33,8 +35,6 @@ type Queuer interface {
 	// Returns (true, nil) on success, (false, nil) when ownership was lost,
 	// and (false, err) on transient DB errors.
 	RenewLease(ctx context.Context, jobID uuid.UUID, workerID string) (bool, error)
-	ReclaimExpiredLeases(ctx context.Context) (int64, error)
-	RequeueScheduledRetries(ctx context.Context) (int64, error)
 }
 
 // EnqueueParams holds parameters for creating a new job.
@@ -429,4 +429,38 @@ func (q *Queue) Retry(ctx context.Context, jobID uuid.UUID) error {
 	})
 
 	return nil
+}
+
+// QueueStats returns a count of jobs in each active status.
+// Used by the control loop to monitor queue health. The returned map contains
+// keys for: "queued", "leased", "retry_scheduled", "failed", "dead_letter".
+func (q *Queue) QueueStats(ctx context.Context) (map[string]int64, error) {
+	const query = `
+		SELECT status, COUNT(*) AS cnt
+		FROM processing_jobs
+		WHERE status IN ('queued', 'leased', 'retry_scheduled', 'failed', 'dead_letter')
+		GROUP BY status`
+
+	rows, err := q.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("queue stats: %w", err)
+	}
+	defer rows.Close()
+
+	stats := map[string]int64{
+		"queued":          0,
+		"leased":          0,
+		"retry_scheduled": 0,
+		"failed":          0,
+		"dead_letter":     0,
+	}
+	for rows.Next() {
+		var status string
+		var cnt int64
+		if err := rows.Scan(&status, &cnt); err != nil {
+			return nil, fmt.Errorf("queue stats scan: %w", err)
+		}
+		stats[status] = cnt
+	}
+	return stats, rows.Err()
 }

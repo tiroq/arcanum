@@ -38,6 +38,16 @@ type Metrics struct {
 	// Lease heartbeat metrics.
 	LeaseRenewals    prometheus.Counter
 	LeaseRenewalLost prometheus.Counter
+
+	// Control-loop action counters.
+	ControlReclaims prometheus.Counter
+	ControlRequeues prometheus.Counter
+	ControlAlerts   *prometheus.CounterVec // label: type
+
+	// Queue depth gauges — updated by the control loop on each scan.
+	QueueDepthQueued prometheus.Gauge
+	QueueDepthLeased prometheus.Gauge
+	QueueDepthRetry  prometheus.Gauge
 }
 
 // NewMetrics creates and registers all Prometheus metrics with the given registry.
@@ -170,6 +180,36 @@ func NewMetrics(registry *prometheus.Registry) (*Metrics, error) {
 			Name:      "lease_renewal_lost_total",
 			Help:      "Total number of times a heartbeat detected lease ownership was lost.",
 		}),
+		ControlReclaims: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "runeforge",
+			Name:      "control_reclaims_total",
+			Help:      "Total number of jobs reclaimed by the control loop.",
+		}),
+		ControlRequeues: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "runeforge",
+			Name:      "control_requeues_total",
+			Help:      "Total number of retry_scheduled jobs requeued by the control loop.",
+		}),
+		ControlAlerts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "runeforge",
+			Name:      "control_alerts_total",
+			Help:      "Total control alerts emitted by type.",
+		}, []string{"type"}),
+		QueueDepthQueued: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "runeforge",
+			Name:      "queue_depth_queued",
+			Help:      "Current number of jobs in queued status.",
+		}),
+		QueueDepthLeased: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "runeforge",
+			Name:      "queue_depth_leased",
+			Help:      "Current number of jobs in leased status.",
+		}),
+		QueueDepthRetry: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "runeforge",
+			Name:      "queue_depth_retry_scheduled",
+			Help:      "Current number of jobs in retry_scheduled status.",
+		}),
 	}
 
 	collectors := []prometheus.Collector{
@@ -198,6 +238,12 @@ func NewMetrics(registry *prometheus.Registry) (*Metrics, error) {
 		m.ExecutionValidationFailures,
 		m.LeaseRenewals,
 		m.LeaseRenewalLost,
+		m.ControlReclaims,
+		m.ControlRequeues,
+		m.ControlAlerts,
+		m.QueueDepthQueued,
+		m.QueueDepthLeased,
+		m.QueueDepthRetry,
 	}
 
 	for _, c := range collectors {

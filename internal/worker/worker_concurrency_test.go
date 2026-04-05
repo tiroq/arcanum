@@ -65,8 +65,6 @@ func (q *stubQueue) Fail(_ context.Context, _ uuid.UUID, _, _, _ string) error {
 	return nil
 }
 
-func (q *stubQueue) ReclaimExpiredLeases(_ context.Context) (int64, error)    { return 0, nil }
-func (q *stubQueue) RequeueScheduledRetries(_ context.Context) (int64, error) { return 0, nil }
 func (q *stubQueue) RenewLease(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
 	return true, nil
 }

@@ -96,6 +96,12 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 							"reason":    "lease_expired_and_reclaimed",
 						})
 					}
+					// Emit a bus-visible control alert so the event log captures lease losses
+					// even when auditing is unavailable.
+					lostEvt := events.NewLeaseLostAlertEvent(job.ID.String(), w.workerID)
+					if pubErr := w.publisher.Publish(hbCtx, subjects.SubjectControlAlertLeaseLost, lostEvt); pubErr != nil {
+						w.logger.Warn("control: publish lease_lost alert failed", zap.Error(pubErr))
+					}
 					cancelJob()
 					return
 				}
