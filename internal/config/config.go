@@ -20,6 +20,7 @@ type Config struct {
 	Retry       RetryConfig
 	Telegram    TelegramConfig
 	GoogleTasks GoogleTasksConfig
+	Routing     RoutingPolicyConfig
 }
 
 type DatabaseConfig struct {
@@ -145,6 +146,30 @@ type GoogleTasksConfig struct {
 	PollIntervalSeconds int    `envconfig:"GOOGLE_TASKS_POLL_INTERVAL_SECONDS" default:"300"`
 }
 
+// RoutingPolicyConfig holds the explicit routing policy for model/provider selection.
+// Per-role escalation levels control how far a role may escalate through provider tiers:
+// local (cheapest/fastest) → cloud → OpenRouter (most capable/costly).
+//
+// Explicit DSL profile overrides (OLLAMA_*_PROFILE env vars) always take precedence over policy.
+type RoutingPolicyConfig struct {
+	// Per-role escalation levels.
+	// Valid values: local_only, local_cloud, local_cloud_openrouter, local_openrouter.
+	FastEscalation    string `envconfig:"ROUTING_FAST_ESCALATION" default:"local_only"`
+	DefaultEscalation string `envconfig:"ROUTING_DEFAULT_ESCALATION" default:"local_only"`
+	PlannerEscalation string `envconfig:"ROUTING_PLANNER_ESCALATION" default:"local_cloud"`
+	ReviewEscalation  string `envconfig:"ROUTING_REVIEW_ESCALATION" default:"local_cloud"`
+
+	// CloudModel is the model name to request from Ollama Cloud when escalating.
+	// If empty, the resolver uses the role's local model (same model family, cloud tier).
+	CloudModel string `envconfig:"ROUTING_CLOUD_MODEL"`
+
+	// OpenRouterModel is the model name to request from OpenRouter when escalating.
+	// If empty, falls back to OPENROUTER_DEFAULT_MODEL.
+	// Must resolve to a non-empty value if any role permits OpenRouter escalation
+	// and OPENROUTER_ENABLED=true.
+	OpenRouterModel string `envconfig:"ROUTING_OPENROUTER_MODEL"`
+}
+
 // Load reads configuration from environment variables using envconfig.
 // It fails fast on invalid required fields.
 func Load() (*Config, error) {
@@ -188,6 +213,9 @@ func Load() (*Config, error) {
 	}
 	if err := envconfig.Process("", &cfg.GoogleTasks); err != nil {
 		return nil, fmt.Errorf("google tasks config: %w", err)
+	}
+	if err := envconfig.Process("", &cfg.Routing); err != nil {
+		return nil, fmt.Errorf("routing policy config: %w", err)
 	}
 
 	// Derive computed fields
@@ -256,6 +284,27 @@ func (c *Config) validate() error {
 	validFormats := map[string]bool{"json": true, "console": true}
 	if !validFormats[strings.ToLower(c.Logging.Format)] {
 		errs = append(errs, fmt.Sprintf("LOG_FORMAT must be one of: json, console; got %q", c.Logging.Format))
+	}
+
+	// Validate routing escalation levels at startup so misconfiguration fails fast.
+	validEscLevels := map[string]bool{
+		"local_only": true, "local": true,
+		"local_cloud":            true,
+		"local_cloud_openrouter": true, "full": true,
+		"local_openrouter": true,
+	}
+	for envName, level := range map[string]string{
+		"ROUTING_FAST_ESCALATION":    c.Routing.FastEscalation,
+		"ROUTING_DEFAULT_ESCALATION": c.Routing.DefaultEscalation,
+		"ROUTING_PLANNER_ESCALATION": c.Routing.PlannerEscalation,
+		"ROUTING_REVIEW_ESCALATION":  c.Routing.ReviewEscalation,
+	} {
+		if !validEscLevels[strings.ToLower(strings.TrimSpace(level))] {
+			errs = append(errs, fmt.Sprintf(
+				"%s must be one of local_only, local_cloud, local_cloud_openrouter, local_openrouter; got %q",
+				envName, level,
+			))
+		}
 	}
 
 	if len(errs) > 0 {
