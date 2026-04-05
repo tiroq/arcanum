@@ -390,25 +390,64 @@ WHERE p.id = $1`, proposalID).Scan(&title, &payloadBytes); err != nil {
 }
 
 // handleCallbackQuery processes inline keyboard button presses.
-func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
-	if query.From == nil || query.From.ID != b.ownerChatID {
-		b.logger.Warn("ignoring callback from unauthorized user")
+func (b *Bot) handleCallbackQuery(cq *tgbotapi.CallbackQuery) {
+	// Security: only the configured owner.
+	if cq.From == nil || cq.From.ID != b.ownerChatID {
+		b.logger.Warn("ignoring callback from unauthorized user",
+			zap.String("callback_id", cq.ID),
+		)
+		b.answerCallback(cq.ID, "Unauthorized.")
 		return
 	}
 
-	var reply string
-	switch {
-	case strings.HasPrefix(query.Data, "approve:"):
-		reply = b.handleApprove(strings.TrimPrefix(query.Data, "approve:"))
-	case strings.HasPrefix(query.Data, "reject:"):
-		reply = b.handleReject(strings.TrimPrefix(query.Data, "reject:"))
+	parts := strings.SplitN(cq.Data, ":", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		b.logger.Warn("invalid callback data", zap.String("data", cq.Data))
+		b.answerCallback(cq.ID, "Invalid action data.")
+		return
+	}
+	action, proposalID := parts[0], parts[1]
+
+	if !isValidUUID(proposalID) {
+		b.logger.Warn("invalid UUID in callback", zap.String("proposal_id", proposalID))
+		b.answerCallback(cq.ID, "Invalid proposal ID.")
+		return
 	}
 
-	// Acknowledge the callback so Telegram removes the loading indicator.
-	cb := tgbotapi.NewCallback(query.ID, reply)
-	if _, err := b.api.Request(cb); err != nil {
-		b.logger.Warn("failed to answer callback query", zap.Error(err))
+	var result string
+	switch action {
+	case "approve":
+		result = b.handleApprove(proposalID)
+	case "reject":
+		result = b.handleReject(proposalID)
+	default:
+		b.answerCallback(cq.ID, "Unknown action.")
+		return
 	}
+
+	// Acknowledge the button press with a brief toast notification.
+	b.answerCallback(cq.ID, result)
+
+	// Edit the original message to remove the buttons and record the outcome.
+	if cq.Message != nil {
+		editMsg := tgbotapi.NewEditMessageText(b.ownerChatID, cq.Message.MessageID,
+			cq.Message.Text+"\n\n"+result)
+		editMsg.ParseMode = tgbotapi.ModeHTML
+		if _, err := b.api.Send(editMsg); err != nil {
+			b.logger.Warn("failed to edit proposal message after action", zap.Error(err))
+		}
+	}
+}
+
+func (b *Bot) answerCallback(callbackID, text string) {
+	cb := tgbotapi.NewCallback(callbackID, text)
+	if _, err := b.api.Request(cb); err != nil {
+		b.logger.Error("failed to answer callback query", zap.Error(err))
+	}
+}
+
+func isValidUUID(s string) bool {
+	return uuidRegex.MatchString(s)
 }
 
 // formatProposalText returns the HTML body for a proposal notification (no action buttons).
