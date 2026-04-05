@@ -20,7 +20,7 @@ const thresholdMinSampleSize int64 = 5
 
 // Failure rate thresholds.
 const (
-	thresholdRemoveFailureRate  = 0.50 // ≥50 % failures → remove provider
+	thresholdRemoveFailureRate   = 0.50 // ≥50 % failures → remove provider
 	thresholdEscalateFailureRate = 0.20 // ≥20 % failures → increase escalation
 )
 
@@ -150,7 +150,8 @@ func (o *Optimizer) AnalyzeAndRecommend(ctx context.Context) ([]RoutingRecommend
 
 // recommend derives a single deterministic recommendation from observed metrics.
 // Priority order (highest first): remove → escalate_failure → escalate_low_accept
-//   → reduce_latency → keep.
+//
+//	→ reduce_latency → keep.
 func (o *Optimizer) recommend(m RunMetrics) RoutingRecommendation {
 	policy := o.policyFor(m.ModelRole)
 
