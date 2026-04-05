@@ -112,8 +112,7 @@ func run() error {
 			msg.Nak() //nolint:errcheck
 			return
 		}
-		text := telegram.FormatProposalCreated(evt.ProposalID, evt.SourceTaskID, evt.ProposalType, evt.HumanReviewRequired)
-		if err := bot.SendMessage(text); err != nil {
+		if err := bot.SendProposalMessage(evt.ProposalID, evt.SourceTaskID, evt.ProposalType); err != nil {
 			logger.Error("send proposal notification", zap.Error(err))
 		}
 		msg.Ack() //nolint:errcheck

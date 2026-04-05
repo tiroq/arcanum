@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
+
+var uuidRegex = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Bot wraps the Telegram Bot API for owner communication.
 type Bot struct {
@@ -100,6 +103,11 @@ func (b *Bot) Stop() {
 }
 
 func (b *Bot) handleUpdate(update tgbotapi.Update) {
+	if update.CallbackQuery != nil {
+		b.handleCallbackQuery(update.CallbackQuery)
+		return
+	}
+
 	if update.Message == nil {
 		return
 	}
@@ -126,7 +134,7 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	case "status":
 		reply = b.handleStatus()
 	case "queue":
-		reply = b.handleQueue()
+		b.handleQueue()
 	case "models":
 		reply = b.handleModels()
 	default:
@@ -151,13 +159,13 @@ func (b *Bot) handleHelp() string {
 	return `<b>Arcanum Commands</b>
 
 /status — System state: services, queue depth, recent errors
-/queue — Pending jobs and proposals
+/queue — Pending proposals (with Approve/Reject buttons)
 /models — Ollama model status
 /help — This message
 
 <b>Proposal Actions</b>
-/approve_ID — Approve a proposal
-/reject_ID — Reject a proposal`
+Use the <b>✅ Approve</b> / <b>❌ Reject</b> buttons on proposal notifications.
+Manual (debug): /approve_&lt;uuid&gt; or /reject_&lt;uuid&gt;`
 }
 
 func (b *Bot) handleStatus() string {
@@ -210,7 +218,7 @@ SELECT COUNT(*) FROM suggestion_proposals WHERE approval_status = 'pending'`).Sc
 	)
 }
 
-func (b *Bot) handleQueue() string {
+func (b *Bot) handleQueue() {
 	ctx := context.Background()
 
 	rows, err := b.pool.Query(ctx, `
@@ -221,24 +229,44 @@ WHERE p.approval_status = 'pending'
 ORDER BY p.created_at DESC
 LIMIT 10`)
 	if err != nil {
-		return fmt.Sprintf("Error querying proposals: %v", err)
+		b.logger.Error("failed to query pending proposals", zap.Error(err))
+		b.SendMessage("Error querying proposals.") //nolint:errcheck
+		return
 	}
 	defer rows.Close()
 
-	var lines []string
+	type proposal struct{ id, pType, title string }
+	var proposals []proposal
 	for rows.Next() {
-		var id, pType, title string
-		if err := rows.Scan(&id, &pType, &title); err != nil {
+		var p proposal
+		if err := rows.Scan(&p.id, &p.pType, &p.title); err != nil {
 			continue
 		}
-		short := id[:8]
-		lines = append(lines, fmt.Sprintf("• <b>%s</b> [%s] %s\n  /approve_%s  /reject_%s", short, pType, title, id, id))
+		proposals = append(proposals, p)
 	}
 
-	if len(lines) == 0 {
-		return "No pending proposals."
+	if len(proposals) == 0 {
+		b.SendMessage("No pending proposals.") //nolint:errcheck
+		return
 	}
-	return "<b>Pending Proposals</b>\n\n" + strings.Join(lines, "\n\n")
+
+	var lines []string
+	var kbRows [][]tgbotapi.InlineKeyboardButton
+	for _, p := range proposals {
+		short := shortID(p.id)
+		lines = append(lines, fmt.Sprintf("• <b>%s</b> [%s] %s", short, p.pType, p.title))
+		kbRows = append(kbRows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ "+short, "approve:"+p.id),
+			tgbotapi.NewInlineKeyboardButtonData("❌ "+short, "reject:"+p.id),
+		))
+	}
+
+	msg := tgbotapi.NewMessage(b.ownerChatID, "<b>Pending Proposals</b>\n\n"+strings.Join(lines, "\n"))
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(kbRows...)
+	if _, err := b.api.Send(msg); err != nil {
+		b.logger.Error("failed to send queue message", zap.Error(err))
+	}
 }
 
 func (b *Bot) handleModels() string {
@@ -260,12 +288,17 @@ UPDATE suggestion_proposals
 SET approval_status = 'approved', approved_by = 'telegram_owner', auto_approved = false, reviewed_at = NOW(), updated_at = NOW()
 WHERE id = $1 AND approval_status = 'pending'`, proposalID)
 	if err != nil {
-		return fmt.Sprintf("Error approving proposal: %v", err)
+		b.logger.Error("db error approving proposal",
+			zap.String("proposal_id", proposalID),
+			zap.Error(err),
+		)
+		return "DB error: could not approve proposal."
 	}
+	short := shortID(proposalID)
 	if tag.RowsAffected() == 0 {
-		return fmt.Sprintf("Proposal %s not found or already reviewed.", proposalID[:8])
+		return fmt.Sprintf("Proposal %s not found or already reviewed.", short)
 	}
-	return fmt.Sprintf("Proposal %s approved.", proposalID[:8])
+	return fmt.Sprintf("✅ Proposal %s approved.", short)
 }
 
 func (b *Bot) handleReject(proposalID string) string {
@@ -276,27 +309,126 @@ UPDATE suggestion_proposals
 SET approval_status = 'rejected', approved_by = 'telegram_owner', reviewed_at = NOW(), updated_at = NOW()
 WHERE id = $1 AND approval_status = 'pending'`, proposalID)
 	if err != nil {
-		return fmt.Sprintf("Error rejecting proposal: %v", err)
+		b.logger.Error("db error rejecting proposal",
+			zap.String("proposal_id", proposalID),
+			zap.Error(err),
+		)
+		return "DB error: could not reject proposal."
 	}
+	short := shortID(proposalID)
 	if tag.RowsAffected() == 0 {
-		return fmt.Sprintf("Proposal %s not found or already reviewed.", proposalID[:8])
+		return fmt.Sprintf("Proposal %s not found or already reviewed.", short)
 	}
-	return fmt.Sprintf("Proposal %s rejected.", proposalID[:8])
+	return fmt.Sprintf("❌ Proposal %s rejected.", short)
 }
 
-// FormatProposalCreated formats a ProposalCreatedEvent for Telegram delivery.
-func FormatProposalCreated(proposalID, sourceTaskID, proposalType string, humanReview bool) string {
+func shortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// SendProposalMessage queries the DB for proposal details and sends a rich
+// notification with Approve / Reject inline keyboard buttons.
+func (b *Bot) SendProposalMessage(proposalID, sourceTaskID, proposalType string) error {
+	ctx := context.Background()
+
+	var title string
+	var payloadBytes []byte
+	if err := b.pool.QueryRow(ctx, `
+SELECT COALESCE(t.title, ''), p.proposal_payload
+FROM suggestion_proposals p
+LEFT JOIN source_tasks t ON p.source_task_id = t.id
+WHERE p.id = $1`, proposalID).Scan(&title, &payloadBytes); err != nil {
+		b.logger.Warn("SendProposalMessage: db lookup failed",
+			zap.String("proposal_id", proposalID),
+			zap.Error(err),
+		)
+	}
+
+	var payload map[string]interface{}
+	_ = json.Unmarshal(payloadBytes, &payload)
+
+	details := ProposalDetails{
+		ProposalID:   proposalID,
+		TaskTitle:    title,
+		ProposalType: proposalType,
+	}
+	if payload != nil {
+		// rewrite produces rewritten_title; routing produces suggested_list.
+		if v, ok := payload["rewritten_title"].(string); ok {
+			details.Suggestion = v
+		} else if v, ok := payload["suggested_list"].(string); ok {
+			details.Suggestion = v
+		}
+		if v, ok := payload["confidence"].(float64); ok {
+			details.Confidence = v
+		}
+		if v, ok := payload["reasoning"].(string); ok {
+			details.Reason = v
+		}
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Approve", "approve:"+proposalID),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Reject", "reject:"+proposalID),
+		),
+	)
+
+	msg := tgbotapi.NewMessage(b.ownerChatID, FormatProposal(details))
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.DisableWebPagePreview = true
+	msg.ReplyMarkup = keyboard
+
+	if _, err := b.api.Send(msg); err != nil {
+		b.logger.Error("failed to send proposal message", zap.Error(err))
+		return fmt.Errorf("send proposal message: %w", err)
+	}
+	return nil
+}
+
+// handleCallbackQuery processes inline keyboard button presses.
+func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
+	if query.From == nil || query.From.ID != b.ownerChatID {
+		b.logger.Warn("ignoring callback from unauthorized user")
+		return
+	}
+
+	var reply string
+	switch {
+	case strings.HasPrefix(query.Data, "approve:"):
+		reply = b.handleApprove(strings.TrimPrefix(query.Data, "approve:"))
+	case strings.HasPrefix(query.Data, "reject:"):
+		reply = b.handleReject(strings.TrimPrefix(query.Data, "reject:"))
+	}
+
+	// Acknowledge the callback so Telegram removes the loading indicator.
+	cb := tgbotapi.NewCallback(query.ID, reply)
+	if _, err := b.api.Request(cb); err != nil {
+		b.logger.Warn("failed to answer callback query", zap.Error(err))
+	}
+}
+
+// formatProposalText returns the HTML body for a proposal notification (no action buttons).
+func formatProposalText(proposalID, sourceTaskID, proposalType string, humanReview bool) string {
 	review := ""
 	if humanReview {
-		review = "\nRequires review."
+		review = "\n⚠️ Requires human review."
 	}
+	taskShort := shortID(sourceTaskID)
 	return fmt.Sprintf(`<b>New Proposal</b>
 
 Type: %s
-Task: <code>%s</code>%s
+Task: <code>%s</code>
+ID: <code>%s</code>%s`, proposalType, taskShort, proposalID, review)
+}
 
-/approve_%s
-/reject_%s`, proposalType, sourceTaskID[:8], review, proposalID, proposalID)
+// FormatProposalCreated formats a ProposalCreatedEvent for Telegram delivery.
+// Deprecated: use Bot.SendProposalMessage to include inline action buttons.
+func FormatProposalCreated(proposalID, sourceTaskID, proposalType string, humanReview bool) string {
+	return formatProposalText(proposalID, sourceTaskID, proposalType, humanReview)
 }
 
 // FormatJobDead formats a JobDeadEvent for Telegram delivery.
