@@ -421,3 +421,167 @@ func TestLiveScenarioF_StaleCallsOnSucceededJob(t *testing.T) {
 			statusFinal, attemptFinal)
 	}
 }
+
+// --- ScenarioG: RenewLease keeps ownership alive ---------------------------
+//
+// A worker holds the lease and renews it before expiry.
+// RenewLease() must return (true, nil) and extend lease_expiry.
+// The job must not be reclaimed while heartbeats are flowing.
+func TestLiveScenarioG_RenewLeaseKeepsOwnership(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	jobID := createTestJob(t, pool, "rules_classify", 3)
+
+	leased, err := q.Lease(ctx, "worker-g", []string{"rules_classify"})
+	if err != nil || leased == nil {
+		t.Fatalf("lease: %v / %v", err, leased)
+	}
+
+	// Capture the initial lease_expiry.
+	var initialExpiry time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT lease_expiry FROM processing_jobs WHERE id = $1`, jobID,
+	).Scan(&initialExpiry); err != nil {
+		t.Fatalf("read initial expiry: %v", err)
+	}
+
+	// Renew before expiry.
+	renewed, err := q.RenewLease(ctx, jobID, "worker-g")
+	if err != nil {
+		t.Fatalf("RenewLease returned error: %v", err)
+	}
+	if !renewed {
+		t.Fatal("SCENARIO G FAIL: RenewLease returned false (ownership lost unexpectedly)")
+	}
+
+	var newExpiry time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT lease_expiry FROM processing_jobs WHERE id = $1`, jobID,
+	).Scan(&newExpiry); err != nil {
+		t.Fatalf("read new expiry: %v", err)
+	}
+	if !newExpiry.After(initialExpiry) {
+		t.Errorf("SCENARIO G FAIL: lease_expiry not extended (initial=%v new=%v)", initialExpiry, newExpiry)
+	} else {
+		t.Logf("SCENARIO G PASS: RenewLease extended expiry from %v to %v", initialExpiry.Format(time.RFC3339), newExpiry.Format(time.RFC3339))
+	}
+
+	// Reclaim should NOT fire (lease is not expired).
+	reclaimed, err := q.ReclaimExpiredLeases(ctx)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed > 0 {
+		t.Errorf("SCENARIO G FAIL: reclaim grabbed %d job(s) that still have valid leases", reclaimed)
+	} else {
+		t.Logf("SCENARIO G PASS: reclaim correctly skipped the active lease")
+	}
+}
+
+// --- ScenarioH: RenewLease returns false when ownership is lost ------------
+//
+// After reclaim, a worker's RenewLease() call must return (false, nil).
+func TestLiveScenarioH_RenewLeaseReturnsFalseAfterReclaim(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	jobID := createTestJob(t, pool, "rules_classify", 3)
+
+	leased, err := q.Lease(ctx, "worker-h", []string{"rules_classify"})
+	if err != nil || leased == nil {
+		t.Fatalf("lease: %v / %v", err, leased)
+	}
+
+	// Expire the lease and reclaim.
+	expireLease(t, pool, jobID)
+	if _, err := q.ReclaimExpiredLeases(ctx); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+
+	// Worker tries to renew — ownership was lost.
+	renewed, err := q.RenewLease(ctx, jobID, "worker-h")
+	if err != nil {
+		t.Fatalf("RenewLease returned unexpected error: %v", err)
+	}
+	if renewed {
+		t.Errorf("SCENARIO H FAIL: RenewLease returned true after reclaim (should be false)")
+	} else {
+		t.Logf("SCENARIO H PASS: RenewLease correctly returned false after reclaim")
+	}
+}
+
+// --- ScenarioI: RenewLease from wrong worker is rejected -------------------
+//
+// A wrong worker ID calling RenewLease on a job owned by another worker
+// must return (false, nil) — not an error.
+func TestLiveScenarioI_RenewLeaseWrongWorkerRejected(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	jobID := createTestJob(t, pool, "rules_classify", 3)
+
+	leased, err := q.Lease(ctx, "worker-i-owner", []string{"rules_classify"})
+	if err != nil || leased == nil {
+		t.Fatalf("lease: %v / %v", err, leased)
+	}
+
+	// Wrong worker tries to renew.
+	renewed, err := q.RenewLease(ctx, jobID, "worker-i-interloper")
+	if err != nil {
+		t.Fatalf("RenewLease returned unexpected error: %v", err)
+	}
+	if renewed {
+		t.Errorf("SCENARIO I FAIL: wrong worker was allowed to renew lease")
+	} else {
+		t.Logf("SCENARIO I PASS: wrong worker's RenewLease correctly rejected")
+	}
+
+	// Owner's ownership must be intact.
+	if o := jobOwner(t, pool, jobID); o != "worker-i-owner" {
+		t.Errorf("SCENARIO I FAIL: owner changed after wrong-worker RenewLease; got %q", o)
+	}
+}
+
+// --- ScenarioJ: ReclaimExpiredLeases clears leased_by_worker_id ------------
+//
+// After reclaim, leased_by_worker_id must be NULL and status must be 'queued'.
+func TestLiveScenarioJ_ReclaimClearsOwnership(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	jobID := createTestJob(t, pool, "rules_classify", 3)
+
+	leased, err := q.Lease(ctx, "worker-j", []string{"rules_classify"})
+	if err != nil || leased == nil {
+		t.Fatalf("lease: %v / %v", err, leased)
+	}
+	if o := jobOwner(t, pool, jobID); o != "worker-j" {
+		t.Fatalf("expected owner=worker-j after lease, got %q", o)
+	}
+
+	expireLease(t, pool, jobID)
+	reclaimed, err := q.ReclaimExpiredLeases(ctx)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if reclaimed == 0 {
+		t.Fatal("expected 1 reclaimed job")
+	}
+
+	status, _ := jobRow(t, pool, jobID)
+	owner := jobOwner(t, pool, jobID)
+	if status != "queued" {
+		t.Errorf("SCENARIO J FAIL: expected status=queued after reclaim, got %s", status)
+	}
+	if owner != "" {
+		t.Errorf("SCENARIO J FAIL: expected leased_by_worker_id=NULL after reclaim, got %q", owner)
+	}
+	if status == "queued" && owner == "" {
+		t.Logf("SCENARIO J PASS: reclaim set status=queued and cleared leased_by_worker_id")
+	}
+}
