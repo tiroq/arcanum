@@ -13,13 +13,25 @@ import (
 	"github.com/tiroq/arcanum/internal/db/models"
 )
 
+// leaseDuration is the initial validity window of every newly issued lease.
+// RenewLease extends by the same duration, so a heartbeat firing once before
+// expiry keeps the lease alive indefinitely.
+const leaseDuration = 5 * time.Minute
+
 // Queuer is the interface the worker depends on for job lifecycle operations.
 // Declared here so consumers (worker, tests) can depend on the interface rather
 // than the concrete *Queue, enabling unit testing without a real database.
 type Queuer interface {
 	Lease(ctx context.Context, workerID string, jobTypes []string) (*models.ProcessingJob, error)
-	Complete(ctx context.Context, jobID uuid.UUID) error
-	Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg string) error
+	// Complete and Fail require the callerʼs workerID so the ownership guard
+	// in the SQL WHERE clause ensures only the current lease-holder may apply
+	// the terminal transition.
+	Complete(ctx context.Context, jobID uuid.UUID, workerID string) error
+	Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, errMsg string) error
+	// RenewLease extends lease_expiry for jobs still owned by workerID.
+	// Returns (true, nil) on success, (false, nil) when ownership was lost,
+	// and (false, err) on transient DB errors.
+	RenewLease(ctx context.Context, jobID uuid.UUID, workerID string) (bool, error)
 	ReclaimExpiredLeases(ctx context.Context) (int64, error)
 	RequeueScheduledRetries(ctx context.Context) (int64, error)
 }
@@ -102,13 +114,15 @@ func (q *Queue) Enqueue(ctx context.Context, params EnqueueParams) (*models.Proc
 }
 
 // Lease atomically leases the next available job for a worker using SKIP LOCKED.
+// The leased_by_worker_id column is set to workerID so that Complete, Fail, and
+// RenewLease can enforce that only the current lease-holder may act on the job.
 func (q *Queue) Lease(ctx context.Context, workerID string, jobTypes []string) (*models.ProcessingJob, error) {
 	now := time.Now().UTC()
-	expiry := now.Add(5 * time.Minute)
+	expiry := now.Add(leaseDuration)
 
 	const query = `
 		UPDATE processing_jobs
-		SET status = $1, leased_at = $2, lease_expiry = $3, updated_at = $2
+		SET status = $1, leased_at = $2, lease_expiry = $3, leased_by_worker_id = $5, updated_at = $2
 		WHERE id = (
 			SELECT id FROM processing_jobs
 			WHERE status = 'queued'
@@ -118,13 +132,13 @@ func (q *Queue) Lease(ctx context.Context, workerID string, jobTypes []string) (
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING id, source_task_id, job_type, status, priority, dedupe_key, attempt_count, max_attempts, payload, leased_at, lease_expiry, scheduled_at, created_at, updated_at`
+		RETURNING id, source_task_id, job_type, status, priority, dedupe_key, attempt_count, max_attempts, payload, leased_at, lease_expiry, leased_by_worker_id, scheduled_at, created_at, updated_at`
 
 	var job models.ProcessingJob
-	err := q.db.QueryRow(ctx, query, models.JobStatusLeased, now, expiry, jobTypes).Scan(
+	err := q.db.QueryRow(ctx, query, models.JobStatusLeased, now, expiry, jobTypes, workerID).Scan(
 		&job.ID, &job.SourceTaskID, &job.JobType, &job.Status,
 		&job.Priority, &job.DedupeKey, &job.AttemptCount, &job.MaxAttempts,
-		&job.Payload, &job.LeasedAt, &job.LeaseExpiry, &job.ScheduledAt,
+		&job.Payload, &job.LeasedAt, &job.LeaseExpiry, &job.LeasedByWorkerID, &job.ScheduledAt,
 		&job.CreatedAt, &job.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -138,20 +152,21 @@ func (q *Queue) Lease(ctx context.Context, workerID string, jobTypes []string) (
 }
 
 // Complete marks a job as succeeded.
-// The update is guarded by AND status = 'leased' so a stale goroutine whose
-// lease was already reclaimed cannot overwrite a re-leased or already-finished job.
-func (q *Queue) Complete(ctx context.Context, jobID uuid.UUID) error {
+// The workerID ownership guard ensures a stale goroutine cannot mark a job as
+// succeeded after its lease was reclaimed and re-issued to a different worker.
+func (q *Queue) Complete(ctx context.Context, jobID uuid.UUID, workerID string) error {
 	const query = `
 		UPDATE processing_jobs
-		SET status = $1, updated_at = $2
-		WHERE id = $3 AND status = 'leased'`
-	tag, err := q.db.Exec(ctx, query, models.JobStatusSucceeded, time.Now().UTC(), jobID)
+		SET status = $1, leased_by_worker_id = NULL, updated_at = $2
+		WHERE id = $3 AND status = 'leased' AND leased_by_worker_id = $4`
+	tag, err := q.db.Exec(ctx, query, models.JobStatusSucceeded, time.Now().UTC(), jobID, workerID)
 	if err != nil {
 		return fmt.Errorf("complete job %s: %w", jobID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		q.logger.Warn("complete: job not in leased state, skipping (lease may have been reclaimed)",
+		q.logger.Warn("complete: ownership guard rejected — lease no longer owned by this worker",
 			zap.String("job_id", jobID.String()),
+			zap.String("worker_id", workerID),
 		)
 	}
 	return nil
@@ -160,37 +175,39 @@ func (q *Queue) Complete(ctx context.Context, jobID uuid.UUID) error {
 // Fail marks a job as failed and schedules a retry or dead-letters it.
 // The UPDATE is atomic — attempt_count is incremented and the new status is
 // computed in a single statement, eliminating the read-then-write TOCTOU race.
-// The AND status = 'leased' guard prevents a stale goroutine (expired lease)
-// from corrupting state after the lease was reclaimed by the maintenance loop.
-func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg string) error {
+// The workerID ownership guard ensures only the current lease-holder can fail
+// the job, preventing stale goroutines from corrupting a re-leased job.
+func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, errMsg string) error {
 	now := time.Now().UTC()
 
 	const query = `
 		UPDATE processing_jobs
 		SET
-		    status        = CASE
-		                        WHEN attempt_count + 1 >= max_attempts THEN 'dead_letter'
-		                        ELSE 'retry_scheduled'
-		                    END,
-		    attempt_count = attempt_count + 1,
-		    scheduled_at  = CASE
-		                        WHEN attempt_count + 1 >= max_attempts THEN NULL
-		                        ELSE $1::timestamptz + make_interval(secs => ((attempt_count + 1)::float8 * (attempt_count + 1)::float8 * 30.0))
-		                    END,
-		    updated_at    = $1,
-		    error_code    = $2,
-		    error_message = $3
-		WHERE id = $4 AND status = 'leased'
+		    status               = CASE
+		                               WHEN attempt_count + 1 >= max_attempts THEN 'dead_letter'
+		                               ELSE 'retry_scheduled'
+		                           END,
+		    attempt_count        = attempt_count + 1,
+		    leased_by_worker_id  = NULL,
+		    scheduled_at         = CASE
+		                               WHEN attempt_count + 1 >= max_attempts THEN NULL
+		                               ELSE $1::timestamptz + make_interval(secs => ((attempt_count + 1)::float8 * (attempt_count + 1)::float8 * 30.0))
+		                           END,
+		    updated_at           = $1,
+		    error_code           = $2,
+		    error_message        = $3
+		WHERE id = $4 AND status = 'leased' AND leased_by_worker_id = $5
 		RETURNING status, attempt_count`
 
 	var newStatus string
 	var newAttemptCount int
-	err := q.db.QueryRow(ctx, query, now, errCode, errMsg, jobID).Scan(&newStatus, &newAttemptCount)
+	err := q.db.QueryRow(ctx, query, now, errCode, errMsg, jobID, workerID).Scan(&newStatus, &newAttemptCount)
 	if err == pgx.ErrNoRows {
-		// Lease was reclaimed by the maintenance loop or the job's status
-		// was already changed by a concurrent transition. Log and exit cleanly.
-		q.logger.Warn("fail: job not in leased state, skipping (lease may have been reclaimed)",
+		// Ownership guard rejected — either the lease was reclaimed by maintenance
+		// and this worker no longer owns the job, or another worker re-leased it.
+		q.logger.Warn("fail: ownership guard rejected — lease no longer owned by this worker",
 			zap.String("job_id", jobID.String()),
+			zap.String("worker_id", workerID),
 			zap.String("error_code", errCode),
 		)
 		return nil
@@ -203,18 +220,53 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg strin
 		zap.String("job_id", jobID.String()),
 		zap.String("new_status", newStatus),
 		zap.Int("attempt_count", newAttemptCount),
+		zap.String("worker_id", workerID),
 		zap.String("error_code", errCode),
 		zap.String("error_msg", errMsg),
 	)
 	return nil
 }
 
+// RenewLease extends the lease_expiry for a job that workerID still owns.
+// Returns (true, nil) on successful renewal.
+// Returns (false, nil) when the job is no longer owned by workerID — this
+// signals the caller that it should abort execution (ownership was lost).
+// Returns (false, err) on transient database errors.
+func (q *Queue) RenewLease(ctx context.Context, jobID uuid.UUID, workerID string) (bool, error) {
+	now := time.Now().UTC()
+	newExpiry := now.Add(leaseDuration)
+	const query = `
+		UPDATE processing_jobs
+		SET lease_expiry = $1, updated_at = $2
+		WHERE id = $3 AND status = 'leased' AND leased_by_worker_id = $4`
+	tag, err := q.db.Exec(ctx, query, newExpiry, now, jobID, workerID)
+	if err != nil {
+		return false, fmt.Errorf("renew lease for job %s: %w", jobID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		q.logger.Warn("renew lease: ownership lost — job is no longer leased by this worker",
+			zap.String("job_id", jobID.String()),
+			zap.String("worker_id", workerID),
+		)
+		return false, nil
+	}
+	q.logger.Debug("lease renewed",
+		zap.String("job_id", jobID.String()),
+		zap.String("worker_id", workerID),
+		zap.Time("new_expiry", newExpiry),
+	)
+	return true, nil
+}
+
 // ReclaimExpiredLeases moves jobs whose lease has expired back to queued status.
+// leased_by_worker_id is cleared so the next worker starts with a clean ownership
+// record and the previous worker's Complete/Fail calls are properly rejected.
 func (q *Queue) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	const query = `
 		UPDATE processing_jobs
-		SET status = 'queued', leased_at = NULL, lease_expiry = NULL, updated_at = $1
+		SET status = 'queued', leased_at = NULL, lease_expiry = NULL,
+		    leased_by_worker_id = NULL, updated_at = $1
 		WHERE status = 'leased' AND lease_expiry < $1`
 	tag, err := q.db.Exec(ctx, query, now)
 	if err != nil {
