@@ -29,6 +29,10 @@ type Metrics struct {
 	ExecutionOutcomeTotal       *prometheus.CounterVec
 	ExecutionDuration           *prometheus.HistogramVec
 	ExecutionValidationFailures *prometheus.CounterVec
+
+	// Lease heartbeat metrics.
+	LeaseRenewals    prometheus.Counter
+	LeaseRenewalLost prometheus.Counter
 }
 
 // NewMetrics creates and registers all Prometheus metrics with the given registry.
@@ -136,6 +140,16 @@ func NewMetrics(registry *prometheus.Registry) (*Metrics, error) {
 			Name:      "execution_validation_failures_total",
 			Help:      "Total validation failures during execution.",
 		}, []string{"role", "validator"}),
+		LeaseRenewals: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "runeforge",
+			Name:      "lease_renewals_total",
+			Help:      "Total number of successful lease renewals by the heartbeat.",
+		}),
+		LeaseRenewalLost: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "runeforge",
+			Name:      "lease_renewal_lost_total",
+			Help:      "Total number of times a heartbeat detected lease ownership was lost.",
+		}),
 	}
 
 	collectors := []prometheus.Collector{
@@ -159,6 +173,8 @@ func NewMetrics(registry *prometheus.Registry) (*Metrics, error) {
 		m.ExecutionOutcomeTotal,
 		m.ExecutionDuration,
 		m.ExecutionValidationFailures,
+		m.LeaseRenewals,
+		m.LeaseRenewalLost,
 	}
 
 	for _, c := range collectors {
