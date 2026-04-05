@@ -175,7 +175,7 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, errCode, errMsg strin
 		    attempt_count = attempt_count + 1,
 		    scheduled_at  = CASE
 		                        WHEN attempt_count + 1 >= max_attempts THEN NULL
-		                        ELSE $1 + (((attempt_count + 1) * (attempt_count + 1) * 30) * interval '1 second')
+		                        ELSE $1::timestamptz + make_interval(secs => ((attempt_count + 1)::float8 * (attempt_count + 1)::float8 * 30.0))
 		                    END,
 		    updated_at    = $1,
 		    error_code    = $2,
