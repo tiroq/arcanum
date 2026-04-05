@@ -309,6 +309,30 @@ func FormatJobFailed(jobID, reason string, attempt int) string {
 	return fmt.Sprintf("<b>Job Failed</b>\n\nJob: <code>%s</code>\nAttempt: %d\nReason: %s", jobID[:8], attempt, reason)
 }
 
+// FormatControlAlertLeaseExpired formats a lease-expiry reclaim alert.
+func FormatControlAlertLeaseExpired(count int64) string {
+	return fmt.Sprintf("<b>Control alert: expired leases reclaimed</b>\n\nCount: %d", count)
+}
+
+// FormatControlAlertRetryOverdue formats a retry-overdue requeue alert.
+func FormatControlAlertRetryOverdue(count int64) string {
+	return fmt.Sprintf("<b>Control alert: overdue retries requeued</b>\n\nCount: %d", count)
+}
+
+// FormatControlAlertQueueBacklog formats a queue-backlog alert.
+func FormatControlAlertQueueBacklog(count, threshold int64) string {
+	return fmt.Sprintf("<b>Control alert: queue backlog</b>\n\nQueued: %d (threshold: %d)", count, threshold)
+}
+
+// FormatControlAlertLeaseLost formats a mid-execution lease-loss alert.
+func FormatControlAlertLeaseLost(jobID, workerID string) string {
+	short := jobID
+	if len(jobID) > 8 {
+		short = jobID[:8]
+	}
+	return fmt.Sprintf("<b>Control alert: lease lost during execution</b>\n\nJob: <code>%s</code>\nWorker: <code>%s</code>", short, workerID)
+}
+
 // ParseEventJSON is a helper to unmarshal NATS message data into a map.
 func ParseEventJSON(data []byte) (map[string]interface{}, error) {
 	var m map[string]interface{}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -159,6 +160,98 @@ func run() error {
 		msg.Ack() //nolint:errcheck
 	}); err != nil {
 		return fmt.Errorf("subscribe job.retry: %w", err)
+	}
+
+	// Control alert: lease expired (reclaimed)
+	if err := sub.Subscribe(subjects.SubjectControlAlertLeaseExpired, "notification-control-lease-expired", func(msg *natsgo.Msg) {
+		var evt struct {
+			Count int64 `json:"count"`
+		}
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			logger.Error("unmarshal lease_expired alert", zap.Error(err))
+			msg.Nak() //nolint:errcheck
+			return
+		}
+		text := telegram.FormatControlAlertLeaseExpired(evt.Count)
+		if err := bot.SendMessage(text); err != nil {
+			logger.Error("send lease_expired notification", zap.Error(err))
+		}
+		msg.Ack() //nolint:errcheck
+	}); err != nil {
+		return fmt.Errorf("subscribe control.alert.lease_expired: %w", err)
+	}
+
+	// Control alert: retry overdue (requeued)
+	if err := sub.Subscribe(subjects.SubjectControlAlertRetryOverdue, "notification-control-retry-overdue", func(msg *natsgo.Msg) {
+		var evt struct {
+			Count int64 `json:"count"`
+		}
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			logger.Error("unmarshal retry_overdue alert", zap.Error(err))
+			msg.Nak() //nolint:errcheck
+			return
+		}
+		text := telegram.FormatControlAlertRetryOverdue(evt.Count)
+		if err := bot.SendMessage(text); err != nil {
+			logger.Error("send retry_overdue notification", zap.Error(err))
+		}
+		msg.Ack() //nolint:errcheck
+	}); err != nil {
+		return fmt.Errorf("subscribe control.alert.retry_overdue: %w", err)
+	}
+
+	// Control alert: queue backlog — deduplicated: suppress repeats with same count within 5 minutes
+	var (
+		backlogMu         sync.Mutex
+		lastBacklogCount  int64
+		lastBacklogNotify time.Time
+	)
+	if err := sub.Subscribe(subjects.SubjectControlAlertQueueBacklog, "notification-control-queue-backlog", func(msg *natsgo.Msg) {
+		var evt struct {
+			Count     int64 `json:"count"`
+			Threshold int64 `json:"threshold"`
+		}
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			logger.Error("unmarshal queue_backlog alert", zap.Error(err))
+			msg.Nak() //nolint:errcheck
+			return
+		}
+		backlogMu.Lock()
+		suppressed := evt.Count == lastBacklogCount && time.Since(lastBacklogNotify) < 5*time.Minute
+		if !suppressed {
+			lastBacklogCount = evt.Count
+			lastBacklogNotify = time.Now()
+		}
+		backlogMu.Unlock()
+		if !suppressed {
+			text := telegram.FormatControlAlertQueueBacklog(evt.Count, evt.Threshold)
+			if err := bot.SendMessage(text); err != nil {
+				logger.Error("send queue_backlog notification", zap.Error(err))
+			}
+		}
+		msg.Ack() //nolint:errcheck
+	}); err != nil {
+		return fmt.Errorf("subscribe control.alert.queue_backlog: %w", err)
+	}
+
+	// Control alert: lease lost mid-execution
+	if err := sub.Subscribe(subjects.SubjectControlAlertLeaseLost, "notification-control-lease-lost", func(msg *natsgo.Msg) {
+		var evt struct {
+			JobID    string `json:"job_id"`
+			WorkerID string `json:"worker_id"`
+		}
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			logger.Error("unmarshal lease_lost alert", zap.Error(err))
+			msg.Nak() //nolint:errcheck
+			return
+		}
+		text := telegram.FormatControlAlertLeaseLost(evt.JobID, evt.WorkerID)
+		if err := bot.SendMessage(text); err != nil {
+			logger.Error("send lease_lost notification", zap.Error(err))
+		}
+		msg.Ack() //nolint:errcheck
+	}); err != nil {
+		return fmt.Errorf("subscribe control.alert.lease_lost: %w", err)
 	}
 
 	// Start Telegram polling for incoming commands
