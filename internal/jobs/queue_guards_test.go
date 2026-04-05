@@ -6,8 +6,8 @@ package jobs
 // prevent duplicate-processing side-effects:
 //
 //  1. Fail() uses a single atomic UPDATE (no separate SELECT first).
-//  2. Complete() guards with AND status = 'leased'.
-//  3. Fail() guards with AND status = 'leased'.
+//  2. Complete() and Fail() guard on status = 'leased'.
+//  3. Complete() and Fail() guard on leased_by_worker_id (ownership).
 //
 // Because these tests do not require a real database they verify the SQL
 // query strings directly. This is intentional: the fix is entirely in the
@@ -23,26 +23,27 @@ import (
 const failQuery = `
 		UPDATE processing_jobs
 		SET
-		    status        = CASE
-		                        WHEN attempt_count + 1 >= max_attempts THEN 'dead_letter'
-		                        ELSE 'retry_scheduled'
-		                    END,
-		    attempt_count = attempt_count + 1,
-		    scheduled_at  = CASE
-		                        WHEN attempt_count + 1 >= max_attempts THEN NULL
-		                        ELSE $1::timestamptz + make_interval(secs => ((attempt_count + 1)::float8 * (attempt_count + 1)::float8 * 30.0))
-		                    END,
-		    updated_at    = $1,
-		    error_code    = $2,
-		    error_message = $3
-		WHERE id = $4 AND status = 'leased'
+		    status               = CASE
+		                               WHEN attempt_count + 1 >= max_attempts THEN 'dead_letter'
+		                               ELSE 'retry_scheduled'
+		                           END,
+		    attempt_count        = attempt_count + 1,
+		    leased_by_worker_id  = NULL,
+		    scheduled_at         = CASE
+		                               WHEN attempt_count + 1 >= max_attempts THEN NULL
+		                               ELSE $1::timestamptz + make_interval(secs => ((attempt_count + 1)::float8 * (attempt_count + 1)::float8 * 30.0))
+		                           END,
+		    updated_at           = $1,
+		    error_code           = $2,
+		    error_message        = $3
+		WHERE id = $4 AND status = 'leased' AND leased_by_worker_id = $5
 		RETURNING status, attempt_count`
 
 // completeQuery is the exact UPDATE statement that Complete() uses.
 const completeQuery = `
 		UPDATE processing_jobs
-		SET status = $1, updated_at = $2
-		WHERE id = $3 AND status = 'leased'`
+		SET status = $1, leased_by_worker_id = NULL, updated_at = $2
+		WHERE id = $3 AND status = 'leased' AND leased_by_worker_id = $4`
 
 // TestFailQueryIsAtomic verifies that Fail() does NOT contain a separate SELECT
 // statement. A separate SELECT followed by UPDATE is a TOCTOU race; all logic
@@ -71,35 +72,72 @@ func TestFailQueryIncrementsAttemptCountInline(t *testing.T) {
 }
 
 // TestFailQueryGuardsOnLeasedStatus verifies that Fail() only updates jobs
-// that are still in 'leased' status. Without this guard, a goroutine whose
-// lease was reclaimed can corrupt the state of the re-leased job.
+// that are still in 'leased' status.
 func TestFailQueryGuardsOnLeasedStatus(t *testing.T) {
 	normalized := strings.ToUpper(strings.Join(strings.Fields(failQuery), " "))
 
 	if !strings.Contains(normalized, "AND STATUS = 'LEASED'") {
-		t.Error("Fail() WHERE clause must include AND status = 'leased' to prevent stale goroutine writes")
+		t.Error("Fail() WHERE clause must include AND status = 'leased'")
+	}
+}
+
+// TestFailQueryGuardsOnOwnership verifies that Fail() includes the
+// leased_by_worker_id ownership guard so stale workers cannot fail a
+// job now owned by a different worker.
+func TestFailQueryGuardsOnOwnership(t *testing.T) {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(failQuery), " "))
+
+	if !strings.Contains(normalized, "AND LEASED_BY_WORKER_ID") {
+		t.Error("Fail() WHERE clause must include AND leased_by_worker_id = $workerID")
+	}
+}
+
+// TestFailQueryClearsOwnership verifies that Fail() sets leased_by_worker_id = NULL
+// in the SET clause so a reclaimed and re-retried job starts with clean ownership.
+func TestFailQueryClearsOwnership(t *testing.T) {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(failQuery), " "))
+
+	if !strings.Contains(normalized, "LEASED_BY_WORKER_ID = NULL") {
+		t.Error("Fail() must clear leased_by_worker_id = NULL in the SET clause")
 	}
 }
 
 // TestCompleteQueryGuardsOnLeasedStatus verifies that Complete() only updates
-// jobs that are still in 'leased' status. Without this guard, a stale goroutine
-// (whose lease was reclaimed and the job re-leased by another goroutine) can
-// mark a running job as 'succeeded' prematurely.
+// jobs that are still in 'leased' status.
 func TestCompleteQueryGuardsOnLeasedStatus(t *testing.T) {
 	normalized := strings.ToUpper(strings.Join(strings.Fields(completeQuery), " "))
 
 	if !strings.Contains(normalized, "AND STATUS = 'LEASED'") {
-		t.Error("Complete() WHERE clause must include AND status = 'leased' to prevent stale goroutine writes")
+		t.Error("Complete() WHERE clause must include AND status = 'leased'")
+	}
+}
+
+// TestCompleteQueryGuardsOnOwnership verifies that Complete() includes the
+// leased_by_worker_id ownership guard.
+func TestCompleteQueryGuardsOnOwnership(t *testing.T) {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(completeQuery), " "))
+
+	if !strings.Contains(normalized, "AND LEASED_BY_WORKER_ID") {
+		t.Error("Complete() WHERE clause must include AND leased_by_worker_id = $workerID")
+	}
+}
+
+// TestCompleteQueryClearsOwnership verifies that Complete() clears
+// leased_by_worker_id in the SET clause.
+func TestCompleteQueryClearsOwnership(t *testing.T) {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(completeQuery), " "))
+
+	if !strings.Contains(normalized, "LEASED_BY_WORKER_ID = NULL") {
+		t.Error("Complete() must clear leased_by_worker_id = NULL in the SET clause")
 	}
 }
 
 // TestFailQueryReturnsNewState verifies that Fail() uses RETURNING so the
-// caller can determine whether the update was applied (rows > 0) and log the
-// resulting state, without a second round-trip to the database.
+// caller can detect 0-rows (lease lost) without a second round-trip.
 func TestFailQueryReturnsNewState(t *testing.T) {
 	normalized := strings.ToUpper(strings.Join(strings.Fields(failQuery), " "))
 
 	if !strings.Contains(normalized, "RETURNING") {
-		t.Error("Fail() must use RETURNING to detect whether the update was applied (0 rows = lease was reclaimed)")
+		t.Error("Fail() must use RETURNING to detect whether the update was applied (0 rows = ownership rejected)")
 	}
 }
