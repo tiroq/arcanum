@@ -129,6 +129,19 @@ func run() error {
 	rawProviders := providers.NewProviderRegistry()
 	rawProviders.Register("ollama", ollamaBase)
 
+	// Register Ollama Cloud if explicitly enabled. When disabled, candidates
+	// with provider=ollama-cloud fall back to primary with a logged warning.
+	if cloudCfg := cfg.Providers.OllamaCloud; cloudCfg.Enabled {
+		ollamaCloud := providers.NewOllamaCloudProvider("ollama-cloud", cloudCfg, logger)
+		rawProviders.Register("ollama-cloud", ollamaCloud)
+		logger.Info("registered ollama-cloud provider",
+			zap.String("base_url", cloudCfg.BaseURL),
+			zap.Bool("has_api_key", cloudCfg.APIKey != ""),
+		)
+	} else {
+		logger.Debug("ollama-cloud provider disabled (set OLLAMA_CLOUD_ENABLED=true to enable)")
+	}
+
 	execProvider := execution.NewExecutingProviderWithRegistry(ollamaBase, rawProviders, profiles, m, logger)
 
 	providerReg := providers.NewProviderRegistry()

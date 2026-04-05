@@ -49,9 +49,10 @@ type LoggingConfig struct {
 }
 
 type ProvidersConfig struct {
-	OpenAI     OpenAIConfig
-	OpenRouter OpenRouterConfig
-	Ollama     OllamaConfig
+	OpenAI      OpenAIConfig
+	OpenRouter  OpenRouterConfig
+	Ollama      OllamaConfig
+	OllamaCloud OllamaCloudConfig
 }
 
 type OpenAIConfig struct {
@@ -90,6 +91,23 @@ type OllamaConfig struct {
 	Timeout        time.Duration
 	FastTimeout    time.Duration
 	PlannerTimeout time.Duration
+}
+
+// OllamaCloudConfig holds configuration for the Ollama Cloud backend.
+// When Enabled is false, no cloud provider is instantiated and
+// profile candidates with provider=ollama-cloud fall back to the primary
+// provider with a warning.
+type OllamaCloudConfig struct {
+	// Enabled gates the cloud provider. Default false — safe for local-only setups.
+	Enabled bool `envconfig:"OLLAMA_CLOUD_ENABLED" default:"false"`
+	// BaseURL is the Ollama Cloud API endpoint, e.g. "https://cloud.ollama.ai".
+	BaseURL string `envconfig:"OLLAMA_CLOUD_BASE_URL"`
+	// APIKey is the Bearer token for Ollama Cloud authentication.
+	APIKey string `envconfig:"OLLAMA_CLOUD_API_KEY"`
+	// TimeoutSeconds is the default per-request timeout for cloud calls.
+	TimeoutSeconds int `envconfig:"OLLAMA_CLOUD_TIMEOUT_SECONDS" default:"120"`
+	// Computed.
+	Timeout time.Duration
 }
 
 type FeatureFlags struct {
@@ -142,6 +160,9 @@ func Load() (*Config, error) {
 	if err := envconfig.Process("", &cfg.Providers.Ollama); err != nil {
 		return nil, fmt.Errorf("ollama config: %w", err)
 	}
+	if err := envconfig.Process("", &cfg.Providers.OllamaCloud); err != nil {
+		return nil, fmt.Errorf("ollama cloud config: %w", err)
+	}
 	if err := envconfig.Process("", &cfg.Features); err != nil {
 		return nil, fmt.Errorf("features config: %w", err)
 	}
@@ -169,6 +190,7 @@ func Load() (*Config, error) {
 	} else {
 		cfg.Providers.Ollama.PlannerTimeout = cfg.Providers.Ollama.Timeout
 	}
+	cfg.Providers.OllamaCloud.Timeout = time.Duration(cfg.Providers.OllamaCloud.TimeoutSeconds) * time.Second
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
@@ -198,6 +220,12 @@ func (c *Config) validate() error {
 	}
 	if c.Providers.Ollama.PlannerTimeoutSeconds < 0 {
 		errs = append(errs, "OLLAMA_PLANNER_TIMEOUT_SECONDS must be non-negative")
+	}
+	if c.Providers.OllamaCloud.Enabled && c.Providers.OllamaCloud.BaseURL == "" {
+		errs = append(errs, "OLLAMA_CLOUD_BASE_URL is required when OLLAMA_CLOUD_ENABLED is true")
+	}
+	if c.Providers.OllamaCloud.TimeoutSeconds <= 0 {
+		errs = append(errs, "OLLAMA_CLOUD_TIMEOUT_SECONDS must be greater than 0")
 	}
 
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}

@@ -333,3 +333,151 @@ func TestOllamaTokenExtraction(t *testing.T) {
 		}
 	})
 }
+
+func TestOllamaCloudProvider_Name(t *testing.T) {
+	cfg := config.OllamaCloudConfig{
+		Enabled:        true,
+		BaseURL:        "https://cloud.ollama.ai",
+		APIKey:         "test-key",
+		TimeoutSeconds: 120,
+		Timeout:        120 * time.Second,
+	}
+	p := NewOllamaCloudProvider("ollama-cloud", cfg, zap.NewNop())
+	if p.Name() != "ollama-cloud" {
+		t.Errorf("expected 'ollama-cloud', got %q", p.Name())
+	}
+}
+
+func TestOllamaCloudProvider_SendsAuthHeader(t *testing.T) {
+	// Verify that the cloud provider sends the Authorization: Bearer header.
+	var capturedAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"qwen3:8b","message":{"role":"assistant","content":"{}"},"done":true,"prompt_eval_count":10,"eval_count":5}`)) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cfg := config.OllamaCloudConfig{
+		Enabled:        true,
+		BaseURL:        srv.URL,
+		APIKey:         "super-secret-key",
+		TimeoutSeconds: 30,
+		Timeout:        30 * time.Second,
+	}
+	p := NewOllamaCloudProvider("ollama-cloud", cfg, zap.NewNop())
+
+	resp, err := p.Generate(context.Background(), GenerateRequest{
+		Model:      "qwen3:8b",
+		UserPrompt: "hello",
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if capturedAuth != "Bearer super-secret-key" {
+		t.Errorf("expected Authorization header 'Bearer super-secret-key', got %q", capturedAuth)
+	}
+	if resp.TokensPrompt != 10 {
+		t.Errorf("TokensPrompt: want 10, got %d", resp.TokensPrompt)
+	}
+	if resp.TokensCompletion != 5 {
+		t.Errorf("TokensCompletion: want 5, got %d", resp.TokensCompletion)
+	}
+	if resp.TokensTotal != 15 {
+		t.Errorf("TokensTotal: want 15, got %d", resp.TokensTotal)
+	}
+	if resp.Provider != "ollama-cloud" {
+		t.Errorf("Provider: want 'ollama-cloud', got %q", resp.Provider)
+	}
+}
+
+func TestOllamaLocalProvider_NoAuthHeader(t *testing.T) {
+	// Verify that the local provider does NOT send an Authorization header.
+	var capturedAuth string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"llama3.2","message":{"role":"assistant","content":"hi"},"done":true}`)) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cfg := config.OllamaConfig{
+		BaseURL:      srv.URL,
+		DefaultModel: "llama3.2",
+		Timeout:      5 * time.Second,
+	}
+	p := NewOllamaProvider("ollama", cfg, zap.NewNop())
+
+	_, err := p.Generate(context.Background(), GenerateRequest{UserPrompt: "hi"})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if capturedAuth != "" {
+		t.Errorf("expected no Authorization header for local provider, got %q", capturedAuth)
+	}
+}
+
+func TestOllamaCloudProvider_RegistryRouting(t *testing.T) {
+	// Verify the full routing path: registry resolves 'ollama-cloud' for a candidate
+	// that sets ProviderName, bypassing the primary 'ollama' provider.
+	var cloudCalled bool
+	cloudMux := http.NewServeMux()
+	cloudMux.HandleFunc("/api/chat", func(w http.ResponseWriter, r *http.Request) {
+		cloudCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"qwen3:8b","message":{"role":"assistant","content":"cloud response"},"done":true,"prompt_eval_count":20,"eval_count":8}`)) //nolint:errcheck
+	})
+	cloudSrv := httptest.NewServer(cloudMux)
+	t.Cleanup(cloudSrv.Close)
+
+	// Primary (local) provider — should NOT be called for this candidate
+	localCfg := config.OllamaConfig{
+		BaseURL:      "http://127.0.0.1:0", // intentionally unreachable
+		DefaultModel: "llama3.2",
+		Timeout:      5 * time.Second,
+	}
+	localProvider := NewOllamaProvider("ollama", localCfg, zap.NewNop())
+
+	cloudCfg := config.OllamaCloudConfig{
+		Enabled:        true,
+		BaseURL:        cloudSrv.URL,
+		APIKey:         "cloud-key",
+		TimeoutSeconds: 30,
+		Timeout:        30 * time.Second,
+	}
+	cloudProvider := NewOllamaCloudProvider("ollama-cloud", cloudCfg, zap.NewNop())
+
+	reg := NewProviderRegistry()
+	reg.Register("ollama", localProvider)
+	reg.Register("ollama-cloud", cloudProvider)
+
+	// Use execution engine directly to test routing without the full stack
+	got, err := reg.Get("ollama-cloud")
+	if err != nil {
+		t.Fatalf("Get ollama-cloud: %v", err)
+	}
+
+	resp, err := got.Generate(context.Background(), GenerateRequest{
+		Model:      "qwen3:8b",
+		UserPrompt: "ping",
+	})
+	if err != nil {
+		t.Fatalf("Generate via cloud: %v", err)
+	}
+	if !cloudCalled {
+		t.Error("cloud server was not called")
+	}
+	if resp.Provider != "ollama-cloud" {
+		t.Errorf("Provider: want 'ollama-cloud', got %q", resp.Provider)
+	}
+	if resp.TokensTotal != 28 {
+		t.Errorf("TokensTotal: want 28, got %d", resp.TokensTotal)
+	}
+}

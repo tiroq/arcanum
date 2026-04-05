@@ -18,6 +18,7 @@ import (
 type OllamaProvider struct {
 	name   string
 	cfg    config.OllamaConfig
+	apiKey string // optional; non-empty → sets Authorization: Bearer header on every request
 	client *http.Client
 	logger *zap.Logger
 }
@@ -27,6 +28,26 @@ func NewOllamaProvider(name string, cfg config.OllamaConfig, logger *zap.Logger)
 	return &OllamaProvider{
 		name:   name,
 		cfg:    cfg,
+		client: &http.Client{Timeout: cfg.Timeout},
+		logger: logger,
+	}
+}
+
+// NewOllamaCloudProvider creates an OllamaProvider configured for Ollama Cloud.
+// The cloud provider uses Bearer token authentication and a flat timeout (no
+// role-based model resolution — models are specified directly in profile DSL
+// candidates via "model?provider=ollama-cloud&timeout=N").
+func NewOllamaCloudProvider(name string, cfg config.OllamaCloudConfig, logger *zap.Logger) *OllamaProvider {
+	ollamaCfg := config.OllamaConfig{
+		BaseURL:        cfg.BaseURL,
+		DefaultModel:   "", // not used; models are always specified per-candidate in profiles
+		TimeoutSeconds: cfg.TimeoutSeconds,
+		Timeout:        cfg.Timeout,
+	}
+	return &OllamaProvider{
+		name:   name,
+		cfg:    ollamaCfg,
+		apiKey: cfg.APIKey,
 		client: &http.Client{Timeout: cfg.Timeout},
 		logger: logger,
 	}
@@ -133,6 +154,9 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 		return GenerateResponse{}, fmt.Errorf("%s: create request: %w", p.name, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -186,6 +210,9 @@ func (p *OllamaProvider) HealthCheck(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.BaseURL+"/api/tags", nil)
 	if err != nil {
 		return fmt.Errorf("%s: health check: %w", p.name, err)
+	}
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
 	resp, err := p.client.Do(req)

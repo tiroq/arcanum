@@ -188,3 +188,63 @@ func TestOllamaProfileEnvVars(t *testing.T) {
 	assert.Equal(t, "review-a|review-b?json=true", cfg.Providers.Ollama.ReviewProfile)
 	assert.Empty(t, cfg.Providers.Ollama.DefaultProfile)
 }
+
+func TestOllamaCloudDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Providers.OllamaCloud.Enabled, "cloud must be disabled by default")
+	assert.Empty(t, cfg.Providers.OllamaCloud.BaseURL)
+	assert.Empty(t, cfg.Providers.OllamaCloud.APIKey)
+	assert.Equal(t, 120, cfg.Providers.OllamaCloud.TimeoutSeconds)
+	assert.Equal(t, 120*time.Second, cfg.Providers.OllamaCloud.Timeout)
+}
+
+func TestOllamaCloudTimeoutDerivation(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_CLOUD_ENABLED", "true")
+	t.Setenv("OLLAMA_CLOUD_BASE_URL", "https://cloud.ollama.ai")
+	t.Setenv("OLLAMA_CLOUD_TIMEOUT_SECONDS", "240")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, 240*time.Second, cfg.Providers.OllamaCloud.Timeout)
+}
+
+func TestOllamaCloudValidation_EnabledWithoutURL(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_CLOUD_ENABLED", "true")
+	// BaseURL intentionally left empty
+
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OLLAMA_CLOUD_BASE_URL")
+}
+
+func TestOllamaCloudValidation_DisabledNoURLNeeded(t *testing.T) {
+	setRequiredEnv(t)
+	// Enabled=false (default) — empty URL must not cause a validation error
+
+	_, err := config.Load()
+	require.NoError(t, err)
+}
+
+func TestOllamaCloudFullConfig(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OLLAMA_CLOUD_ENABLED", "true")
+	t.Setenv("OLLAMA_CLOUD_BASE_URL", "https://cloud.ollama.ai")
+	t.Setenv("OLLAMA_CLOUD_API_KEY", "test-secret-key")
+	t.Setenv("OLLAMA_CLOUD_TIMEOUT_SECONDS", "180")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Providers.OllamaCloud.Enabled)
+	assert.Equal(t, "https://cloud.ollama.ai", cfg.Providers.OllamaCloud.BaseURL)
+	assert.Equal(t, "test-secret-key", cfg.Providers.OllamaCloud.APIKey)
+	assert.Equal(t, 180, cfg.Providers.OllamaCloud.TimeoutSeconds)
+	assert.Equal(t, 180*time.Second, cfg.Providers.OllamaCloud.Timeout)
+}
