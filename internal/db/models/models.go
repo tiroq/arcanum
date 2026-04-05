@@ -81,23 +81,23 @@ type SourceTaskSnapshot struct {
 
 // ProcessingJob represents a unit of work to be executed by the worker service.
 type ProcessingJob struct {
-	ID                uuid.UUID       `db:"id"`
-	SourceTaskID      uuid.UUID       `db:"source_task_id"`
-	JobType           string          `db:"job_type"`
-	Status            string          `db:"status"`
-	Priority          int             `db:"priority"`
-	DedupeKey         *string         `db:"dedupe_key"`
-	AttemptCount      int             `db:"attempt_count"`
-	MaxAttempts       int             `db:"max_attempts"`
-	Payload           json.RawMessage `db:"payload"`
-	ErrorCode         *string         `db:"error_code"`
-	ErrorMessage      *string         `db:"error_message"`
-	LeasedAt          *time.Time      `db:"leased_at"`
-	LeaseExpiry       *time.Time      `db:"lease_expiry"`
-	LeasedByWorkerID  *string         `db:"leased_by_worker_id"`
-	ScheduledAt       *time.Time      `db:"scheduled_at"`
-	CreatedAt         time.Time       `db:"created_at"`
-	UpdatedAt         time.Time       `db:"updated_at"`
+	ID               uuid.UUID       `db:"id"`
+	SourceTaskID     uuid.UUID       `db:"source_task_id"`
+	JobType          string          `db:"job_type"`
+	Status           string          `db:"status"`
+	Priority         int             `db:"priority"`
+	DedupeKey        *string         `db:"dedupe_key"`
+	AttemptCount     int             `db:"attempt_count"`
+	MaxAttempts      int             `db:"max_attempts"`
+	Payload          json.RawMessage `db:"payload"`
+	ErrorCode        *string         `db:"error_code"`
+	ErrorMessage     *string         `db:"error_message"`
+	LeasedAt         *time.Time      `db:"leased_at"`
+	LeaseExpiry      *time.Time      `db:"lease_expiry"`
+	LeasedByWorkerID *string         `db:"leased_by_worker_id"`
+	ScheduledAt      *time.Time      `db:"scheduled_at"`
+	CreatedAt        time.Time       `db:"created_at"`
+	UpdatedAt        time.Time       `db:"updated_at"`
 }
 
 // ProcessingRun records the result of a single execution attempt of a ProcessingJob.
