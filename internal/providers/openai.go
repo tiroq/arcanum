@@ -11,15 +11,19 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/tiroq/arcanum/internal/config"
 )
 
 // OpenAIProvider implements Provider for OpenAI-compatible APIs (OpenAI, OpenRouter, etc.).
 type OpenAIProvider struct {
-	name    string
-	baseURL string
-	apiKey  string
-	client  *http.Client
-	logger  *zap.Logger
+	name        string
+	baseURL     string
+	apiKey      string
+	httpReferer string // optional; sent as HTTP-Referer header when non-empty (OpenRouter attribution)
+	appName     string // optional; sent as X-Title header when non-empty (OpenRouter attribution)
+	client      *http.Client
+	logger      *zap.Logger
 }
 
 // NewOpenAIProvider creates a new OpenAIProvider.
@@ -30,6 +34,22 @@ func NewOpenAIProvider(name, baseURL, apiKey string, timeout time.Duration, logg
 		apiKey:  apiKey,
 		client:  &http.Client{Timeout: timeout},
 		logger:  logger,
+	}
+}
+
+// NewOpenRouterProvider creates an OpenAIProvider configured for the OpenRouter AI gateway.
+// OpenRouter uses the OpenAI-compatible chat completions API with a Bearer token.
+// The optional HTTPReferer and AppName fields are sent as HTTP-Referer and X-Title
+// headers respectively, enabling OpenRouter to attribute usage to the calling application.
+func NewOpenRouterProvider(name string, cfg config.OpenRouterConfig, logger *zap.Logger) *OpenAIProvider {
+	return &OpenAIProvider{
+		name:        name,
+		baseURL:     cfg.BaseURL,
+		apiKey:      cfg.APIKey,
+		httpReferer: cfg.HTTPReferer,
+		appName:     cfg.AppName,
+		client:      &http.Client{Timeout: cfg.Timeout},
+		logger:      logger,
 	}
 }
 
@@ -159,6 +179,12 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, body openAIRequest) (*op
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if p.httpReferer != "" {
+		httpReq.Header.Set("HTTP-Referer", p.httpReferer)
+	}
+	if p.appName != "" {
+		httpReq.Header.Set("X-Title", p.appName)
+	}
 
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {

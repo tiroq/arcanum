@@ -63,12 +63,26 @@ type OpenAIConfig struct {
 	Timeout        time.Duration
 }
 
+// OpenRouterConfig holds configuration for the OpenRouter AI gateway backend.
+// When Enabled is false, no OpenRouter provider is instantiated and profile
+// candidates with provider=openrouter fall back to the primary provider with a warning.
 type OpenRouterConfig struct {
-	APIKey         string `envconfig:"OPENROUTER_API_KEY"`
-	BaseURL        string `envconfig:"OPENROUTER_BASE_URL" default:"https://openrouter.ai/api/v1"`
-	DefaultModel   string `envconfig:"OPENROUTER_DEFAULT_MODEL" default:"openai/gpt-4o-mini"`
-	TimeoutSeconds int    `envconfig:"OPENROUTER_TIMEOUT_SECONDS" default:"60"`
-	Timeout        time.Duration
+	// Enabled gates the OpenRouter provider. Default false — safe for local-only setups.
+	Enabled bool `envconfig:"OPENROUTER_ENABLED" default:"false"`
+	// APIKey is the Bearer token for OpenRouter authentication. Required when Enabled.
+	APIKey string `envconfig:"OPENROUTER_API_KEY"`
+	// BaseURL is the OpenRouter API endpoint.
+	BaseURL string `envconfig:"OPENROUTER_BASE_URL" default:"https://openrouter.ai/api/v1"`
+	// DefaultModel is the fallback model when no model is specified per-candidate.
+	DefaultModel string `envconfig:"OPENROUTER_DEFAULT_MODEL" default:"openai/gpt-4o-mini"`
+	// TimeoutSeconds is the default per-request timeout for OpenRouter calls.
+	TimeoutSeconds int `envconfig:"OPENROUTER_TIMEOUT_SECONDS" default:"60"`
+	// HTTPReferer is sent as the HTTP-Referer header for OpenRouter attribution (optional).
+	HTTPReferer string `envconfig:"OPENROUTER_HTTP_REFERER"`
+	// AppName is sent as the X-Title header for OpenRouter attribution (optional).
+	AppName string `envconfig:"OPENROUTER_APP_NAME"`
+	// Computed.
+	Timeout time.Duration
 }
 
 type OllamaConfig struct {
@@ -226,6 +240,12 @@ func (c *Config) validate() error {
 	}
 	if c.Providers.OllamaCloud.TimeoutSeconds <= 0 {
 		errs = append(errs, "OLLAMA_CLOUD_TIMEOUT_SECONDS must be greater than 0")
+	}
+	if c.Providers.OpenRouter.Enabled && c.Providers.OpenRouter.APIKey == "" {
+		errs = append(errs, "OPENROUTER_API_KEY is required when OPENROUTER_ENABLED is true")
+	}
+	if c.Providers.OpenRouter.TimeoutSeconds <= 0 {
+		errs = append(errs, "OPENROUTER_TIMEOUT_SECONDS must be greater than 0")
 	}
 
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}

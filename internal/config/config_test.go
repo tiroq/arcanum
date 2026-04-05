@@ -248,3 +248,70 @@ func TestOllamaCloudFullConfig(t *testing.T) {
 	assert.Equal(t, 180, cfg.Providers.OllamaCloud.TimeoutSeconds)
 	assert.Equal(t, 180*time.Second, cfg.Providers.OllamaCloud.Timeout)
 }
+
+func TestOpenRouterDefaults(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Providers.OpenRouter.Enabled, "openrouter must be disabled by default")
+	assert.Equal(t, "https://openrouter.ai/api/v1", cfg.Providers.OpenRouter.BaseURL)
+	assert.Equal(t, "openai/gpt-4o-mini", cfg.Providers.OpenRouter.DefaultModel)
+	assert.Empty(t, cfg.Providers.OpenRouter.APIKey)
+	assert.Equal(t, 60, cfg.Providers.OpenRouter.TimeoutSeconds)
+	assert.Equal(t, 60*time.Second, cfg.Providers.OpenRouter.Timeout)
+	assert.Empty(t, cfg.Providers.OpenRouter.HTTPReferer)
+	assert.Empty(t, cfg.Providers.OpenRouter.AppName)
+}
+
+func TestOpenRouterTimeoutDerivation(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OPENROUTER_ENABLED", "true")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-test-key")
+	t.Setenv("OPENROUTER_TIMEOUT_SECONDS", "90")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, 90*time.Second, cfg.Providers.OpenRouter.Timeout)
+}
+
+func TestOpenRouterValidation_EnabledWithoutAPIKey(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OPENROUTER_ENABLED", "true")
+	// APIKey intentionally left empty
+
+	_, err := config.Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OPENROUTER_API_KEY")
+}
+
+func TestOpenRouterValidation_DisabledNoKeyNeeded(t *testing.T) {
+	setRequiredEnv(t)
+	// Enabled=false (default) — empty API key must not cause a validation error
+
+	_, err := config.Load()
+	require.NoError(t, err)
+}
+
+func TestOpenRouterFullConfig(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("OPENROUTER_ENABLED", "true")
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-secret-key")
+	t.Setenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+	t.Setenv("OPENROUTER_TIMEOUT_SECONDS", "120")
+	t.Setenv("OPENROUTER_HTTP_REFERER", "https://arcanum.example.com")
+	t.Setenv("OPENROUTER_APP_NAME", "Arcanum")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Providers.OpenRouter.Enabled)
+	assert.Equal(t, "sk-or-secret-key", cfg.Providers.OpenRouter.APIKey)
+	assert.Equal(t, "https://openrouter.ai/api/v1", cfg.Providers.OpenRouter.BaseURL)
+	assert.Equal(t, 120, cfg.Providers.OpenRouter.TimeoutSeconds)
+	assert.Equal(t, 120*time.Second, cfg.Providers.OpenRouter.Timeout)
+	assert.Equal(t, "https://arcanum.example.com", cfg.Providers.OpenRouter.HTTPReferer)
+	assert.Equal(t, "Arcanum", cfg.Providers.OpenRouter.AppName)
+}

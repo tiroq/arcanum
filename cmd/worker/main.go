@@ -142,6 +142,19 @@ func run() error {
 		logger.Debug("ollama-cloud provider disabled (set OLLAMA_CLOUD_ENABLED=true to enable)")
 	}
 
+	// Register OpenRouter if explicitly enabled. When disabled, candidates
+	// with provider=openrouter fall back to primary with a logged warning.
+	if orCfg := cfg.Providers.OpenRouter; orCfg.Enabled {
+		openRouter := providers.NewOpenRouterProvider("openrouter", orCfg, logger)
+		rawProviders.Register("openrouter", openRouter)
+		logger.Info("registered openrouter provider",
+			zap.String("base_url", orCfg.BaseURL),
+			zap.Bool("has_api_key", orCfg.APIKey != ""),
+		)
+	} else {
+		logger.Debug("openrouter provider disabled (set OPENROUTER_ENABLED=true to enable)")
+	}
+
 	execProvider := execution.NewExecutingProviderWithRegistry(ollamaBase, rawProviders, profiles, m, logger)
 
 	providerReg := providers.NewProviderRegistry()

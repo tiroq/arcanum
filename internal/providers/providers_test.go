@@ -481,3 +481,204 @@ func TestOllamaCloudProvider_RegistryRouting(t *testing.T) {
 		t.Errorf("TokensTotal: want 28, got %d", resp.TokensTotal)
 	}
 }
+
+func TestOpenRouterProvider_Name(t *testing.T) {
+	cfg := config.OpenRouterConfig{
+		Enabled:        true,
+		BaseURL:        "https://openrouter.ai/api/v1",
+		APIKey:         "sk-or-test-key",
+		TimeoutSeconds: 60,
+		Timeout:        60 * time.Second,
+	}
+	p := NewOpenRouterProvider("openrouter", cfg, zap.NewNop())
+	if p.Name() != "openrouter" {
+		t.Errorf("expected 'openrouter', got %q", p.Name())
+	}
+}
+
+func TestOpenRouterProvider_SendsAuthAndAttributionHeaders(t *testing.T) {
+	// Verify that the OpenRouter provider sends Authorization, HTTP-Referer, and X-Title headers.
+	var (
+		capturedAuth    string
+		capturedReferer string
+		capturedTitle   string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		capturedReferer = r.Header.Get("HTTP-Referer")
+		capturedTitle = r.Header.Get("X-Title")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"openai/gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}`)) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cfg := config.OpenRouterConfig{
+		Enabled:        true,
+		BaseURL:        srv.URL,
+		APIKey:         "sk-or-secret-key",
+		TimeoutSeconds: 30,
+		Timeout:        30 * time.Second,
+		HTTPReferer:    "https://arcanum.example.com",
+		AppName:        "Arcanum",
+	}
+	p := NewOpenRouterProvider("openrouter", cfg, zap.NewNop())
+
+	resp, err := p.Generate(context.Background(), GenerateRequest{
+		Model:      "openai/gpt-4o-mini",
+		UserPrompt: "hello",
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if capturedAuth != "Bearer sk-or-secret-key" {
+		t.Errorf("Authorization: want 'Bearer sk-or-secret-key', got %q", capturedAuth)
+	}
+	if capturedReferer != "https://arcanum.example.com" {
+		t.Errorf("HTTP-Referer: want 'https://arcanum.example.com', got %q", capturedReferer)
+	}
+	if capturedTitle != "Arcanum" {
+		t.Errorf("X-Title: want 'Arcanum', got %q", capturedTitle)
+	}
+	if resp.Content != "hello" {
+		t.Errorf("Content: want 'hello', got %q", resp.Content)
+	}
+	if resp.TokensPrompt != 12 {
+		t.Errorf("TokensPrompt: want 12, got %d", resp.TokensPrompt)
+	}
+	if resp.TokensCompletion != 5 {
+		t.Errorf("TokensCompletion: want 5, got %d", resp.TokensCompletion)
+	}
+	if resp.TokensTotal != 17 {
+		t.Errorf("TokensTotal: want 17, got %d", resp.TokensTotal)
+	}
+	if resp.Provider != "openrouter" {
+		t.Errorf("Provider: want 'openrouter', got %q", resp.Provider)
+	}
+}
+
+func TestOpenRouterProvider_NoAttributionHeadersWhenEmpty(t *testing.T) {
+	// Verify that HTTP-Referer and X-Title are omitted when not configured.
+	var (
+		capturedReferer string
+		capturedTitle   string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		capturedReferer = r.Header.Get("HTTP-Referer")
+		capturedTitle = r.Header.Get("X-Title")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"openai/gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cfg := config.OpenRouterConfig{
+		Enabled:        true,
+		BaseURL:        srv.URL,
+		APIKey:         "sk-or-key",
+		TimeoutSeconds: 30,
+		Timeout:        30 * time.Second,
+		// HTTPReferer and AppName intentionally empty
+	}
+	p := NewOpenRouterProvider("openrouter", cfg, zap.NewNop())
+
+	_, err := p.Generate(context.Background(), GenerateRequest{
+		Model:      "openai/gpt-4o-mini",
+		UserPrompt: "ping",
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if capturedReferer != "" {
+		t.Errorf("expected no HTTP-Referer header, got %q", capturedReferer)
+	}
+	if capturedTitle != "" {
+		t.Errorf("expected no X-Title header, got %q", capturedTitle)
+	}
+}
+
+func TestOpenRouterProvider_RegistryRouting(t *testing.T) {
+	// Verify the full routing path: registry resolves 'openrouter' for a profile candidate.
+	var openRouterCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		openRouterCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"openai/gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"routed"}}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}`)) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	cfg := config.OpenRouterConfig{
+		Enabled:        true,
+		BaseURL:        srv.URL,
+		APIKey:         "sk-or-key",
+		TimeoutSeconds: 30,
+		Timeout:        30 * time.Second,
+	}
+	openRouterProvider := NewOpenRouterProvider("openrouter", cfg, zap.NewNop())
+
+	reg := NewProviderRegistry()
+	reg.Register("openrouter", openRouterProvider)
+
+	got, err := reg.Get("openrouter")
+	if err != nil {
+		t.Fatalf("Get openrouter: %v", err)
+	}
+
+	resp, err := got.Generate(context.Background(), GenerateRequest{
+		Model:      "openai/gpt-4o-mini",
+		UserPrompt: "test",
+	})
+	if err != nil {
+		t.Fatalf("Generate via openrouter: %v", err)
+	}
+	if !openRouterCalled {
+		t.Error("openrouter server was not called")
+	}
+	if resp.Provider != "openrouter" {
+		t.Errorf("Provider: want 'openrouter', got %q", resp.Provider)
+	}
+	if resp.TokensTotal != 11 {
+		t.Errorf("TokensTotal: want 11, got %d", resp.TokensTotal)
+	}
+}
+
+func TestOpenAIProvider_NoAttributionHeaders(t *testing.T) {
+	// Verify that a plain OpenAI provider (no referer/appname) does not send attribution headers.
+	var (
+		capturedReferer string
+		capturedTitle   string
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		capturedReferer = r.Header.Get("HTTP-Referer")
+		capturedTitle = r.Header.Get("X-Title")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"model":"gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	p := NewOpenAIProvider("openai", srv.URL, "sk-test", 30*time.Second, zap.NewNop())
+
+	_, err := p.Generate(context.Background(), GenerateRequest{
+		Model:      "gpt-4o-mini",
+		UserPrompt: "hi",
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if capturedReferer != "" {
+		t.Errorf("expected no HTTP-Referer on plain OpenAI provider, got %q", capturedReferer)
+	}
+	if capturedTitle != "" {
+		t.Errorf("expected no X-Title on plain OpenAI provider, got %q", capturedTitle)
+	}
+}
