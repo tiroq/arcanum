@@ -150,6 +150,14 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 			"tokens_completion": result.TokensCompletion,
 			"tokens_total":      result.TokensUsed,
 			"timeout_used_s":    result.TimeoutUsed.Seconds(),
+			// Explicit fallback signal: true when the provider used its default
+			// model as a stand-in because no role-specific model was configured.
+			// Stored directly so the optimizer can use it as a first-class signal
+			// rather than inferring it from the failure rate proxy.
+			"used_fallback":  result.UsedFallback,
+			// attempt_number is the 1-based counter for this execution attempt
+			// on the job. It acts as fallback depth for multi-attempt analysis.
+			"attempt_number": job.AttemptCount + 1,
 		}
 		if result.OutputPayload != nil {
 			meta["output"] = json.RawMessage(result.OutputPayload)

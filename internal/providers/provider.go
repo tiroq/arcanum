@@ -38,6 +38,10 @@ type GenerateResponse struct {
 	TimeoutUsed      time.Duration
 	ThinkingContent  string
 	ExecutionTrace   json.RawMessage
+	// UsedFallback is true when the provider resolved the requested ModelRole to
+	// the default model because no role-specific model was configured.
+	// Only populated by providers that implement role resolution (e.g. Ollama).
+	UsedFallback bool
 	// ErrorClass is populated on failure; empty string on success.
 	// Carries the classified failure reason (timeout, rate_limit, validation, etc.)
 	// so callers can route, audit, and log errors without re-inspecting the error string.

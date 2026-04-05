@@ -39,6 +39,9 @@ type ProcessResult struct {
 	DurationMS            int64
 	TimeoutUsed           time.Duration
 	ExecutionTrace        json.RawMessage
+	// UsedFallback is true when the provider resolved to the default model
+	// because no role-specific model was configured.
+	UsedFallback bool
 }
 
 // Processor is the abstraction for all processing implementations.

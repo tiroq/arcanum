@@ -145,5 +145,6 @@ func (p *LLMRewriteProcessor) Process(ctx context.Context, jc JobContext) (Proce
 		DurationMS:            durationMS,
 		TimeoutUsed:           genResp.TimeoutUsed,
 		ExecutionTrace:        genResp.ExecutionTrace,
+		UsedFallback:          genResp.UsedFallback,
 	}, nil
 }

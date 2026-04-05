@@ -202,6 +202,7 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (Gen
 		TokensTotal:      tokensPrompt + tokensCompletion,
 		DurationMS:       durationMS,
 		TimeoutUsed:      timeout,
+		UsedFallback:     usedFallback,
 	}, nil
 }
 
