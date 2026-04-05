@@ -137,11 +137,13 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 	runResultPayload := result.OutputPayload
 	if result.ModelProvider != "" || result.ModelRole != "" {
 		meta := map[string]interface{}{
-			"provider":       result.ModelProvider,
-			"model_role":     result.ModelRole.String(),
-			"model_name":     result.ModelName,
-			"tokens_used":    result.TokensUsed,
-			"timeout_used_s": result.TimeoutUsed.Seconds(),
+			"provider":          result.ModelProvider,
+			"model_role":        result.ModelRole.String(),
+			"model_name":        result.ModelName,
+			"tokens_prompt":     result.TokensPrompt,
+			"tokens_completion": result.TokensCompletion,
+			"tokens_total":      result.TokensUsed,
+			"timeout_used_s":    result.TimeoutUsed.Seconds(),
 		}
 		if result.OutputPayload != nil {
 			meta["output"] = json.RawMessage(result.OutputPayload)
