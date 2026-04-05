@@ -116,6 +116,11 @@ func parseCandidate(seg string) (ModelCandidate, error) {
 				return ModelCandidate{}, fmt.Errorf("invalid json value %q: %w", val, err)
 			}
 			c.JSONMode = b
+		case "provider":
+			if val == "" {
+				return ModelCandidate{}, fmt.Errorf("provider name must not be empty")
+			}
+			c.ProviderName = val
 		default:
 			return ModelCandidate{}, fmt.Errorf("unknown option %q", key)
 		}

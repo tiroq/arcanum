@@ -374,3 +374,72 @@ func TestEngine_ValidationAbort(t *testing.T) {
 	require.Len(t, result.Trace.Attempts, 1)
 	assert.Equal(t, "model-a", result.Trace.Attempts[0].ModelName)
 }
+
+func TestEngine_CrossProviderRouting(t *testing.T) {
+	// Primary provider (ollama) fails; second candidate routes to secondary (openrouter)
+	// via the registry. The engine must call the correct provider per candidate.
+	ollama := &mockProvider{
+		name:   "ollama",
+		errors: []error{errors.New("ollama: unexpected status 503: service unavailable")},
+	}
+	openrouter := &mockProvider{
+		name: "openrouter",
+		responses: []providers.GenerateResponse{
+			{Content: "from openrouter", Model: "gpt-4o-mini", Provider: "openrouter"},
+		},
+	}
+
+	reg := providers.NewProviderRegistry()
+	reg.Register("ollama", ollama)
+	reg.Register("openrouter", openrouter)
+
+	engine := NewExecutionEngine(ollama, zap.NewNop()).WithRegistry(reg)
+	engine.SetMaxRetries(0)
+
+	candidates := []profile.ModelCandidate{
+		{ModelName: "qwen2.5:7b-instruct", ProviderName: "ollama"},
+		{ModelName: "gpt-4o-mini", ProviderName: "openrouter"},
+	}
+	req := providers.GenerateRequest{ModelRole: providers.RoleDefault}
+
+	result, err := engine.Execute(context.Background(), req, candidates, DefaultValidationPolicy())
+	require.NoError(t, err)
+
+	assert.Equal(t, OutcomeFallback, result.Outcome)
+	assert.Equal(t, "from openrouter", result.Response.Content)
+
+	// Ollama was tried once (failed), openrouter once (succeeded)
+	assert.Len(t, ollama.calls, 1)
+	assert.Len(t, openrouter.calls, 1)
+	assert.Equal(t, "qwen2.5:7b-instruct", ollama.calls[0].Model)
+	assert.Equal(t, "gpt-4o-mini", openrouter.calls[0].Model)
+
+	// Trace records provider names per attempt
+	require.Len(t, result.Trace.Attempts, 2)
+	assert.Equal(t, "ollama", result.Trace.Attempts[0].ProviderName)
+	assert.Equal(t, "openrouter", result.Trace.Attempts[1].ProviderName)
+}
+
+func TestEngine_CrossProviderMissingFromRegistry(t *testing.T) {
+	// Candidate references a provider not in registry → engine falls back to primary.
+	ollama := &mockProvider{
+		name:      "ollama",
+		responses: []providers.GenerateResponse{{Content: "from primary fallback", Model: "qwen"}},
+	}
+
+	reg := providers.NewProviderRegistry()
+	reg.Register("ollama", ollama)
+
+	engine := NewExecutionEngine(ollama, zap.NewNop()).WithRegistry(reg)
+
+	candidates := []profile.ModelCandidate{
+		{ModelName: "gpt-4o", ProviderName: "nonexistent"},
+	}
+
+	result, err := engine.Execute(context.Background(), providers.GenerateRequest{}, candidates, DefaultValidationPolicy())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSuccess, result.Outcome)
+	assert.Equal(t, "from primary fallback", result.Response.Content)
+	// Primary (ollama) was called because "nonexistent" was not found in registry
+	assert.Len(t, ollama.calls, 1)
+}

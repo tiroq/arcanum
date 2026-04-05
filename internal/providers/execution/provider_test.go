@@ -402,3 +402,65 @@ func TestExecutingProvider_TokenMetrics_ValidationFailureCounted(t *testing.T) {
 	assert.Equal(t, float64(18), readCounter(t, reg, "runeforge_tokens_prompt_total", second))
 	assert.Equal(t, float64(26), readCounter(t, reg, "runeforge_tokens_total", second))
 }
+
+func TestExecutingProvider_ErrorClassPopulated(t *testing.T) {
+	// When all candidates fail, the response must carry an ErrorClass derived from
+	// the last attempt's FailureClass.
+	mp := &mockProvider{
+		name: "ollama",
+		errors: []error{
+			fmt.Errorf("context deadline exceeded"),
+		},
+	}
+	profiles := profile.RoleProfiles{
+		providers.RoleDefault: []profile.ModelCandidate{
+			{ModelName: "qwen2.5", ThinkMode: profile.ThinkEnabled},
+		},
+	}
+	ep := NewExecutingProvider(mp, profiles, nil, zaptest.NewLogger(t))
+
+	resp, err := ep.Generate(context.Background(), providers.GenerateRequest{ModelRole: providers.RoleDefault})
+	require.Error(t, err)
+	assert.Equal(t, "timeout", resp.ErrorClass, "ErrorClass must be 'timeout' for context deadline exceeded")
+	assert.NotNil(t, resp.ExecutionTrace, "execution trace must be attached even on failure")
+}
+
+func TestExecutingProvider_CrossProviderTokenAccounting(t *testing.T) {
+	// When cross-provider routing is active, token metrics must be attributed to
+	// the correct provider name (from attempt.ProviderName), not always inner.Name().
+	reg := prometheus.NewPedanticRegistry()
+	m, err := metrics.NewMetrics(reg)
+	require.NoError(t, err)
+
+	ollama := &mockProvider{
+		name:   "ollama",
+		errors: []error{fmt.Errorf("ollama: unexpected status 503: unavailable")},
+	}
+	openrouter := &mockProvider{
+		name: "openrouter",
+		responses: []providers.GenerateResponse{
+			{Content: `{"ok":true}`, Model: "gpt-4o-mini", TokensPrompt: 20, TokensCompletion: 5, TokensTotal: 25},
+		},
+	}
+
+	rawReg := providers.NewProviderRegistry()
+	rawReg.Register("ollama", ollama)
+	rawReg.Register("openrouter", openrouter)
+
+	profiles := profile.RoleProfiles{
+		providers.RoleDefault: []profile.ModelCandidate{
+			{ModelName: "qwen2.5", ProviderName: "ollama", ThinkMode: profile.ThinkEnabled},
+			{ModelName: "gpt-4o-mini", ProviderName: "openrouter", JSONMode: true},
+		},
+	}
+	ep := NewExecutingProviderWithRegistry(ollama, rawReg, profiles, m, zaptest.NewLogger(t))
+
+	_, err = ep.Generate(context.Background(), providers.GenerateRequest{ModelRole: providers.RoleDefault})
+	require.NoError(t, err)
+
+	// Tokens for the successful openrouter attempt must be attributed to "openrouter".
+	orLabels := prometheus.Labels{"provider": "openrouter", "model": "gpt-4o-mini", "role": "default"}
+	assert.Equal(t, float64(20), readCounter(t, reg, "runeforge_tokens_prompt_total", orLabels))
+	assert.Equal(t, float64(5), readCounter(t, reg, "runeforge_tokens_completion_total", orLabels))
+	assert.Equal(t, float64(25), readCounter(t, reg, "runeforge_tokens_total", orLabels))
+}

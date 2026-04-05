@@ -27,6 +27,7 @@ type ExecutingProvider struct {
 }
 
 // NewExecutingProvider creates a provider that runs candidate chains for each role.
+// All candidates are resolved against the primary inner provider.
 func NewExecutingProvider(
 	inner providers.Provider,
 	profiles profile.RoleProfiles,
@@ -34,6 +35,28 @@ func NewExecutingProvider(
 	logger *zap.Logger,
 ) *ExecutingProvider {
 	engine := NewExecutionEngine(inner, logger)
+	return &ExecutingProvider{
+		inner:    inner,
+		profiles: profiles,
+		engine:   engine,
+		metrics:  m,
+		logger:   logger,
+	}
+}
+
+// NewExecutingProviderWithRegistry creates a provider that supports cross-provider
+// candidate routing. When a candidate's ProviderName is non-empty, the execution
+// engine resolves it from registry; falls back to inner when ProviderName is empty.
+// Use this constructor to enable fallback chains across different backends
+// (e.g., Ollama local → OpenRouter).
+func NewExecutingProviderWithRegistry(
+	inner providers.Provider,
+	registry *providers.ProviderRegistry,
+	profiles profile.RoleProfiles,
+	m *metrics.Metrics,
+	logger *zap.Logger,
+) *ExecutingProvider {
+	engine := NewExecutionEngine(inner, logger).WithRegistry(registry)
 	return &ExecutingProvider{
 		inner:    inner,
 		profiles: profiles,
@@ -80,6 +103,11 @@ func (p *ExecutingProvider) Generate(ctx context.Context, req providers.Generate
 	if err != nil {
 		resp := providers.GenerateResponse{}
 		if result.Trace != nil {
+			// Propagate the failure class from the last attempt so callers
+			// can route/audit errors without re-inspecting the error string.
+			if n := len(result.Trace.Attempts); n > 0 {
+				resp.ErrorClass = string(result.Trace.Attempts[n-1].FailureClass)
+			}
 			if traceJSON, jErr := result.Trace.ToJSON(); jErr == nil {
 				resp.ExecutionTrace = traceJSON
 			}
@@ -145,9 +173,15 @@ func (p *ExecutingProvider) recordMetrics(req providers.GenerateRequest, result 
 		// Increment token metrics per-attempt so per-model accounting is accurate
 		// even across fallback chains (different models may be tried).
 		if attempt.TokensTotal > 0 {
-			p.metrics.TokensPromptTotal.WithLabelValues(p.inner.Name(), attempt.ModelName, role).Add(float64(attempt.TokensPrompt))
-			p.metrics.TokensCompletionTotal.WithLabelValues(p.inner.Name(), attempt.ModelName, role).Add(float64(attempt.TokensCompletion))
-			p.metrics.TokensGrandTotal.WithLabelValues(p.inner.Name(), attempt.ModelName, role).Add(float64(attempt.TokensTotal))
+			// Use the attempt's ProviderName when set so cross-provider token
+			// accounting is attributed to the correct backend.
+			providerLabel := p.inner.Name()
+			if attempt.ProviderName != "" {
+				providerLabel = attempt.ProviderName
+			}
+			p.metrics.TokensPromptTotal.WithLabelValues(providerLabel, attempt.ModelName, role).Add(float64(attempt.TokensPrompt))
+			p.metrics.TokensCompletionTotal.WithLabelValues(providerLabel, attempt.ModelName, role).Add(float64(attempt.TokensCompletion))
+			p.metrics.TokensGrandTotal.WithLabelValues(providerLabel, attempt.ModelName, role).Add(float64(attempt.TokensTotal))
 		}
 	}
 }

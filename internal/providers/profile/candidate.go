@@ -57,8 +57,14 @@ func ParseThinkMode(s string) (ThinkMode, error) {
 // Candidates are tried in order; if one fails, the next is attempted according to
 // the fallback policy.
 type ModelCandidate struct {
-	// ModelName is the Ollama model identifier (e.g., "qwen2.5:7b-instruct").
+	// ModelName is the model identifier (e.g., "qwen2.5:7b-instruct", "gpt-4o-mini").
 	ModelName string
+
+	// ProviderName is the name of the backend provider to use for this candidate.
+	// Empty string means use the primary provider configured for the execution engine.
+	// Set to a registered provider name (e.g., "openrouter", "ollama-cloud") to route
+	// this candidate to a specific backend.
+	ProviderName string
 
 	// ThinkMode controls thinking/reasoning behavior for this candidate.
 	ThinkMode ThinkMode

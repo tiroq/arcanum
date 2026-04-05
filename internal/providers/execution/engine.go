@@ -17,18 +17,43 @@ const defaultMaxRetries = 1
 // ExecutionEngine executes a candidate chain against a Provider, handling
 // fallback, retry, validation, and trace recording.
 type ExecutionEngine struct {
-	provider   providers.Provider
+	primary    providers.Provider
+	registry   *providers.ProviderRegistry
 	logger     *zap.Logger
 	maxRetries int
 }
 
-// NewExecutionEngine creates an engine that delegates to the given provider.
-func NewExecutionEngine(provider providers.Provider, logger *zap.Logger) *ExecutionEngine {
+// NewExecutionEngine creates an engine that delegates to the given primary provider.
+func NewExecutionEngine(primary providers.Provider, logger *zap.Logger) *ExecutionEngine {
 	return &ExecutionEngine{
-		provider:   provider,
+		primary:    primary,
 		logger:     logger,
 		maxRetries: defaultMaxRetries,
 	}
+}
+
+// WithRegistry attaches an optional provider registry for per-candidate provider
+// resolution. When a candidate's ProviderName is non-empty the engine looks up
+// that name in the registry; if not found (or registry is nil) it falls back to
+// the primary provider. Returns the engine for chaining.
+func (e *ExecutionEngine) WithRegistry(reg *providers.ProviderRegistry) *ExecutionEngine {
+	e.registry = reg
+	return e
+}
+
+// resolveProvider returns the provider for a candidate, using the registry when
+// ProviderName is set, and falling back to the primary otherwise.
+func (e *ExecutionEngine) resolveProvider(name string) providers.Provider {
+	if name != "" && e.registry != nil {
+		if p, err := e.registry.Get(name); err == nil {
+			return p
+		}
+		e.logger.Warn("candidate provider not found, using primary",
+			zap.String("requested", name),
+			zap.String("primary", e.primary.Name()),
+		)
+	}
+	return e.primary
 }
 
 // SetMaxRetries overrides the per-candidate retry limit (default 1).
@@ -147,7 +172,7 @@ func (e *ExecutionEngine) tryCandidate(
 		candidateReq.JSONMode = true
 	}
 
-	resp, err := e.provider.Generate(ctx, candidateReq)
+	resp, err := e.resolveProvider(candidate.ProviderName).Generate(ctx, candidateReq)
 	finishedAt := time.Now().UTC()
 
 	if err != nil {

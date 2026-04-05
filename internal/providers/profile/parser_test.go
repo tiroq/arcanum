@@ -159,3 +159,33 @@ func TestParseProfile_ThreeCandidate(t *testing.T) {
 	assert.Equal(t, ThinkDisabled, candidates[2].ThinkMode)
 	assert.True(t, candidates[2].JSONMode)
 }
+func TestParseProfile_ProviderKey(t *testing.T) {
+	// provider= sets the target backend; other fields still work alongside it.
+	candidates, err := ParseProfile("gpt-4o-mini?provider=openrouter&timeout=60&json=true")
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+
+	c := candidates[0]
+	assert.Equal(t, "gpt-4o-mini", c.ModelName)
+	assert.Equal(t, "openrouter", c.ProviderName)
+	assert.Equal(t, 60*time.Second, c.Timeout)
+	assert.True(t, c.JSONMode)
+}
+
+func TestParseProfile_ProviderKeyInChain(t *testing.T) {
+	// Candidate chain with mixed providers.
+	dsl := "qwen2.5:7b-instruct?provider=ollama&timeout=240|gpt-4o-mini?provider=openrouter&timeout=30"
+	candidates, err := ParseProfile(dsl)
+	require.NoError(t, err)
+	require.Len(t, candidates, 2)
+
+	assert.Equal(t, "ollama", candidates[0].ProviderName)
+	assert.Equal(t, "openrouter", candidates[1].ProviderName)
+	assert.Equal(t, "gpt-4o-mini", candidates[1].ModelName)
+}
+
+func TestParseProfile_EmptyProviderValue(t *testing.T) {
+	_, err := ParseProfile("llama3.2:3b?provider=")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "provider name must not be empty")
+}

@@ -121,7 +121,15 @@ func run() error {
 		return fmt.Errorf("resolve execution profiles: %w", err)
 	}
 
-	execProvider := execution.NewExecutingProvider(ollamaBase, profiles, m, logger)
+	// rawProviders holds undecorated backend implementations for per-candidate
+	// provider resolution inside the execution engine. Separate from providerReg
+	// (which wraps backends with auditing and execution layers). Register additional
+	// backends here (e.g. openrouter, ollama-cloud) to make them available as
+	// fallback targets in profile DSLs: "model?provider=openrouter&timeout=60".
+	rawProviders := providers.NewProviderRegistry()
+	rawProviders.Register("ollama", ollamaBase)
+
+	execProvider := execution.NewExecutingProviderWithRegistry(ollamaBase, rawProviders, profiles, m, logger)
 
 	providerReg := providers.NewProviderRegistry()
 	providerReg.Register("ollama", providers.NewAuditedProvider(execProvider, auditor, logger))

@@ -11,6 +11,7 @@ import (
 type CandidateAttempt struct {
 	CandidateIndex   int            `json:"candidate_index"`
 	ModelName        string         `json:"model_name"`
+	ProviderName     string         `json:"provider_name,omitempty"`
 	ThinkMode        string         `json:"think_mode"`
 	StartedAt        time.Time      `json:"started_at"`
 	FinishedAt       time.Time      `json:"finished_at"`
@@ -82,6 +83,7 @@ func NewCandidateAttempt(index int, candidate profile.ModelCandidate, startedAt 
 	return CandidateAttempt{
 		CandidateIndex: index,
 		ModelName:      candidate.ModelName,
+		ProviderName:   candidate.ProviderName,
 		ThinkMode:      candidate.ThinkMode.String(),
 		StartedAt:      startedAt,
 	}

@@ -68,6 +68,9 @@ func (p *AuditedProvider) Generate(ctx context.Context, req GenerateRequest) (Ge
 	if err != nil {
 		payload["outcome"] = "failure"
 		payload["error"] = err.Error()
+		if resp.ErrorClass != "" {
+			payload["error_class"] = resp.ErrorClass
+		}
 	}
 	p.record(context.WithoutCancel(ctx), jobID, "llm.finished", payload)
 
