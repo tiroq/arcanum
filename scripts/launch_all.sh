@@ -39,13 +39,15 @@ echo ""
 echo "=== Health Checks ==="
 for port in 8090 8091 8092 8093; do
     name=""
+    health_path="/healthz"
+    ready_path="/readyz"
     case $port in
-        8090) name="api-gateway" ;;
+        8090) name="api-gateway"; health_path="/health"; ready_path="/ready" ;;
         8091) name="orchestrator" ;;
         8092) name="worker" ;;
         8093) name="notification" ;;
     esac
-    result=$(curl -sf "http://localhost:$port/health" 2>&1 || echo "FAILED")
+    result=$(curl -sf "http://localhost:$port${health_path}" 2>&1 || echo "FAILED")
     echo "$name ($port): $result"
 done
 
@@ -53,13 +55,15 @@ echo ""
 echo "=== Readiness Checks ==="
 for port in 8090 8091 8092 8093; do
     name=""
+    health_path="/healthz"
+    ready_path="/readyz"
     case $port in
-        8090) name="api-gateway" ;;
+        8090) name="api-gateway"; health_path="/health"; ready_path="/ready" ;;
         8091) name="orchestrator" ;;
         8092) name="worker" ;;
         8093) name="notification" ;;
     esac
-    result=$(curl -sf "http://localhost:$port/ready" 2>&1 || echo "FAILED")
+    result=$(curl -sf "http://localhost:$port${ready_path}" 2>&1 || echo "FAILED")
     echo "$name ($port): $result"
 done
 
