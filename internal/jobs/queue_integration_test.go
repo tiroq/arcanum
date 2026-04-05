@@ -100,6 +100,22 @@ func jobRow(t *testing.T, pool *pgxpool.Pool, jobID uuid.UUID) (status string, a
 	return
 }
 
+// jobOwner retrieves leased_by_worker_id for a job; returns "" if NULL.
+func jobOwner(t *testing.T, pool *pgxpool.Pool, jobID uuid.UUID) string {
+	t.Helper()
+	var owner *string
+	err := pool.QueryRow(context.Background(),
+		`SELECT leased_by_worker_id FROM processing_jobs WHERE id = $1`, jobID,
+	).Scan(&owner)
+	if err != nil {
+		t.Fatalf("query job owner: %v", err)
+	}
+	if owner == nil {
+		return ""
+	}
+	return *owner
+}
+
 // ─── ScenarioA: Complete after reclaim (no re-lease) ────────────────────────
 //
 //	Timeline:
@@ -246,8 +262,8 @@ func TestLiveScenarioC_FailAfterReclaimNoRelease(t *testing.T) {
 		t.Fatalf("reclaim: %v", err)
 	}
 
-	// G1 finishes with an error AFTER reclaim.
-	if err := q.Fail(ctx, jobID, "TIMEOUT", "processing exceeded timeout"); err != nil {
+	// G1 finishes with an error AFTER reclaim — reclaim cleared ownership.
+	if err := q.Fail(ctx, jobID, "worker-g1", "TIMEOUT", "processing exceeded timeout"); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 
@@ -352,7 +368,7 @@ func TestLiveScenarioE_ConcurrentFail_AtomicAttemptCount(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			if err := q.Fail(ctx, jobID, fmt.Sprintf("ERR%d", n), fmt.Sprintf("goroutine %d failed", n)); err != nil {
+			if err := q.Fail(ctx, jobID, "worker-concurrent", fmt.Sprintf("ERR%d", n), fmt.Sprintf("goroutine %d failed", n)); err != nil {
 				errCh <- err
 			}
 		}(i)
@@ -390,7 +406,7 @@ func TestLiveScenarioF_StaleCallsOnSucceededJob(t *testing.T) {
 	}
 
 	// Normal success path.
-	if err := q.Complete(ctx, jobID); err != nil {
+	if err := q.Complete(ctx, jobID, "worker-f"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -400,11 +416,11 @@ func TestLiveScenarioF_StaleCallsOnSucceededJob(t *testing.T) {
 	}
 
 	// Stale Complete (from a duplicate execute path).
-	if err := q.Complete(ctx, jobID); err != nil {
+	if err := q.Complete(ctx, jobID, "worker-stale"); err != nil {
 		t.Fatalf("stale Complete: %v", err)
 	}
 	// Stale Fail.
-	if err := q.Fail(ctx, jobID, "STALE", "arrived late"); err != nil {
+	if err := q.Fail(ctx, jobID, "worker-stale", "STALE", "arrived late"); err != nil {
 		t.Fatalf("stale Fail: %v", err)
 	}
 
