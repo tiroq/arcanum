@@ -26,14 +26,14 @@ type CandidateAttempt struct {
 
 // ExecutionTrace records the full execution of a candidate chain for a single Generate call.
 type ExecutionTrace struct {
-	TraceID                string             `json:"trace_id"`
-	Role                   string             `json:"role"`
-	Outcome                ExecutionOutcome   `json:"outcome"`
-	Attempts               []CandidateAttempt `json:"attempts"`
-	WinnerIndex            int                `json:"winner_index"`
-	TotalDurationMS        int64              `json:"total_duration_ms"`
-	StartedAt              time.Time          `json:"started_at"`
-	FinishedAt             time.Time          `json:"finished_at"`
+	TraceID         string             `json:"trace_id"`
+	Role            string             `json:"role"`
+	Outcome         ExecutionOutcome   `json:"outcome"`
+	Attempts        []CandidateAttempt `json:"attempts"`
+	WinnerIndex     int                `json:"winner_index"`
+	TotalDurationMS int64              `json:"total_duration_ms"`
+	StartedAt       time.Time          `json:"started_at"`
+	FinishedAt      time.Time          `json:"finished_at"`
 	// Accumulated token counts across all attempts (including retries and fallbacks).
 	TotalTokensPrompt     int `json:"total_tokens_prompt,omitempty"`
 	TotalTokensCompletion int `json:"total_tokens_completion,omitempty"`
