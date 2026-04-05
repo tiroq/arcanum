@@ -55,18 +55,21 @@ func (q *stubQueue) Lease(_ context.Context, _ string, _ []string) (*models.Proc
 	return j, nil
 }
 
-func (q *stubQueue) Complete(_ context.Context, _ uuid.UUID) error {
+func (q *stubQueue) Complete(_ context.Context, _ uuid.UUID, _ string) error {
 	q.completeCount.Add(1)
 	return nil
 }
 
-func (q *stubQueue) Fail(_ context.Context, _ uuid.UUID, _, _ string) error {
+func (q *stubQueue) Fail(_ context.Context, _ uuid.UUID, _, _, _ string) error {
 	q.failCount.Add(1)
 	return nil
 }
 
 func (q *stubQueue) ReclaimExpiredLeases(_ context.Context) (int64, error)    { return 0, nil }
 func (q *stubQueue) RequeueScheduledRetries(_ context.Context) (int64, error) { return 0, nil }
+func (q *stubQueue) RenewLease(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	return true, nil
+}
 
 // compile-time assertion: stubQueue satisfies the interface
 var _ jobs.Queuer = (*stubQueue)(nil)
