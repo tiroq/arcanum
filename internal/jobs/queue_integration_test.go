@@ -207,33 +207,26 @@ func TestLiveScenarioB_CompleteAfterReclaimAndRelease(t *testing.T) {
 		t.Fatalf("G2 leased different job %s (expected %s)", g2job.ID, jobID)
 	}
 
-	// G1 (still running) calls Complete — G2 also holds the lease.
-	if err := q.Complete(ctx, jobID); err != nil {
-		t.Fatalf("G1 Complete: %v", err)
+	// G1's stale Complete must be rejected — ownership mismatch.
+	if err := q.Complete(ctx, jobID, "worker-g1"); err != nil {
+		t.Fatalf("G1 Complete returned unexpected error: %v", err)
 	}
-
-	statusAfterG1Complete, _ := jobRow(t, pool, jobID)
-
-	// This is the known gap: the guard passes because status='leased' is still true.
-	if statusAfterG1Complete == models.JobStatusSucceeded {
-		t.Logf("SCENARIO B GAP CONFIRMED: G1's stale Complete() marked G2's leased job as 'succeeded'.")
-		t.Logf("  → Both G1 and G2 are now executing the same job.")
-		t.Logf("  → Job is now in terminal state; G2's future Complete() will be a no-op (0 rows).")
-		t.Logf("  → State will be deterministically 'succeeded', but DUPLICATE compute happened.")
-		t.Logf("  → Fix required: leased_by_worker_id column + heartbeat to close this gap.")
+	statusAfterG1, _ := jobRow(t, pool, jobID)
+	if statusAfterG1 != "leased" {
+		t.Errorf("SCENARIO B FAIL: G1's stale Complete() changed status to %q (expected 'leased')", statusAfterG1)
 	} else {
-		t.Logf("SCENARIO B result: status=%s (unexpected — check logic)", statusAfterG1Complete)
+		t.Logf("SCENARIO B PASS: G1's stale Complete() rejected by ownership guard (status=leased)")
 	}
 
-	// Now simulate G2 finishing and calling Complete — must be a no-op.
-	if err := q.Complete(ctx, jobID); err != nil {
+	// G2 completes normally.
+	if err := q.Complete(ctx, jobID, "worker-g2"); err != nil {
 		t.Fatalf("G2 Complete: %v", err)
 	}
-	statusFinal, _ := jobRow(t, pool, jobID)
-	if statusFinal != models.JobStatusSucceeded {
-		t.Errorf("expected final status=succeeded, got %s", statusFinal)
+	statusAfterG2, _ := jobRow(t, pool, jobID)
+	if statusAfterG2 != models.JobStatusSucceeded {
+		t.Errorf("SCENARIO B: G2 Complete should succeed, got status=%s", statusAfterG2)
 	} else {
-		t.Logf("SCENARIO B: G2 Complete() is a no-op after G1 already succeeded. Final state correct.")
+		t.Logf("SCENARIO B: G2 Complete succeeded cleanly (status=%s)", statusAfterG2)
 	}
 }
 
@@ -277,17 +270,15 @@ func TestLiveScenarioC_FailAfterReclaimNoRelease(t *testing.T) {
 	}
 }
 
-// ─── ScenarioD: G1 Fail while G2 holds the lease ────────────────────────────
+// ─── ScenarioD: Stale Fail while G2 holds the lease (FIXED by ownership) ───
 //
 //	Timeline:
-//	  G1 leases J → lease expires → maintenance reclaims → G2 re-leases →
-//	  G1 calls Fail(J)       [G2 holds the lease, real DB status='leased']
-//	  Expected: G1's Fail() hits AND status='leased' — it MATCHES (gap).
-//	             G2's subsequent Complete() → 0 rows (status='retry_scheduled').
-//	             G2's work is silently discarded even though it succeeded.
-//	  Result: STATE CORRUPTION GAP — G1 can fail G2's in-flight job.
-//	  Fix required: leased_by_worker_id column.
-func TestLiveScenarioD_G1FailWhileG2Holds(t *testing.T) {
+//	  G1 leases J (worker-g1) → lease expires → reclaim (owner cleared) →
+//	  G2 re-leases (worker-g2) → G1 calls Fail(J, "worker-g1")
+//	  Expected: G1's Fail() rejected — ownership mismatch. Status stays 'leased'.
+//	  G2's Complete() succeeds normally.
+//	  Result: FIXED by leased_by_worker_id ownership guard.
+func TestLiveScenarioD_StaleFailRejectedByOwnershipGuard(t *testing.T) {
 	pool := livePool(t)
 	q := liveQueue(t, pool)
 	ctx := context.Background()
@@ -300,7 +291,7 @@ func TestLiveScenarioD_G1FailWhileG2Holds(t *testing.T) {
 		t.Fatalf("G1 lease: %v", err)
 	}
 
-	// Expire lease, reclaim, G2 re-leases.
+	// Expire lease → reclaim → G2 re-leases.
 	expireLease(t, pool, jobID)
 	if _, err := q.ReclaimExpiredLeases(ctx); err != nil {
 		t.Fatalf("reclaim: %v", err)
@@ -309,36 +300,33 @@ func TestLiveScenarioD_G1FailWhileG2Holds(t *testing.T) {
 	if err != nil || g2job == nil {
 		t.Fatalf("G2 lease: %v / %v", err, g2job)
 	}
-
-	statusBeforeG1Fail, _ := jobRow(t, pool, jobID)
-	if statusBeforeG1Fail != "leased" {
-		t.Fatalf("expected G2 to hold lease (status=leased), got %s", statusBeforeG1Fail)
+	if o := jobOwner(t, pool, jobID); o != "worker-g2" {
+		t.Fatalf("expected owner=worker-g2, got %q", o)
 	}
 
-	// G1 goroutine finishes with error — hits the guard.
+	// G1's stale Fail must be rejected — ownership mismatch.
 	if err := q.Fail(ctx, jobID, "worker-g1", "G1_TIMEOUT", "G1 processing timed out"); err != nil {
-		t.Fatalf("G1 Fail: %v", err)
+		t.Fatalf("G1 Fail returned unexpected error: %v", err)
 	}
 
-	statusAfterG1Fail, attemptAfterG1Fail := jobRow(t, pool, jobID)
-
-	if statusAfterG1Fail == "retry_scheduled" || statusAfterG1Fail == "dead_letter" {
-		t.Logf("SCENARIO D GAP CONFIRMED: G1's stale Fail() corrupted G2's in-flight lease.")
-		t.Logf("  → status=%s attempt_count=%d", statusAfterG1Fail, attemptAfterG1Fail)
-		t.Logf("  → G2 will call Complete() which will get 0 rows → G2's success is discarded.")
-		t.Logf("  → Fix required: leased_by_worker_id column + hearbeat check in Fail().")
-
-		// Confirm G2's complete is now blocked.
-		if err := q.Complete(ctx, jobID, "worker-g2"); err != nil {
-			t.Fatalf("G2 Complete: %v", err)
-		}
-		statusFinal, _ := jobRow(t, pool, jobID)
-		t.Logf("  → After G2 Complete: status=%s (G2's success was discarded)", statusFinal)
-	} else if statusAfterG1Fail == "leased" {
-		t.Logf("SCENARIO D: G1's Fail() had no effect — status still 'leased'. This would be correct behavior.")
-		t.Logf("  → This would mean Fail() did NOT match because... manual check required.")
+	statusAfterG1Fail, attemptAfterG1 := jobRow(t, pool, jobID)
+	if statusAfterG1Fail != "leased" {
+		t.Errorf("SCENARIO D FAIL: G1's stale Fail() corrupted G2's lease — status=%s attempt=%d",
+			statusAfterG1Fail, attemptAfterG1)
 	} else {
-		t.Logf("SCENARIO D: unexpected status=%s after G1 Fail", statusAfterG1Fail)
+		t.Logf("SCENARIO D PASS: G1's stale Fail() rejected by ownership guard (status=leased attempt=%d)",
+			attemptAfterG1)
+	}
+
+	// G2 completes normally.
+	if err := q.Complete(ctx, jobID, "worker-g2"); err != nil {
+		t.Fatalf("G2 Complete: %v", err)
+	}
+	statusAfterG2, _ := jobRow(t, pool, jobID)
+	if statusAfterG2 != models.JobStatusSucceeded {
+		t.Errorf("SCENARIO D: G2 Complete should succeed, got status=%s", statusAfterG2)
+	} else {
+		t.Logf("SCENARIO D: G2 Complete succeeded after G1's rejection (status=%s)", statusAfterG2)
 	}
 }
 
