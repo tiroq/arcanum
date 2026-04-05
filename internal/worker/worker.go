@@ -18,9 +18,15 @@ import (
 const pollInterval = 2 * time.Second
 const maintenanceInterval = 30 * time.Second
 
+// maxConcurrentJobs is the maximum number of job goroutines that may run in
+// parallel within a single worker process. This bound prevents a burst of
+// queued jobs from spawning unbounded goroutines and, critically, limits the
+// window in which lease-expiry races can cause duplicate execution.
+const maxConcurrentJobs = 4
+
 // Worker executes processing jobs.
 type Worker struct {
-	queue     *jobs.Queue
+	queue     jobs.Queuer
 	registry  *processors.Registry
 	publisher *messaging.Publisher
 	db        *pgxpool.Pool
@@ -29,13 +35,17 @@ type Worker struct {
 	logger    *zap.Logger
 	workerID  string
 
+	// sem is a counting semaphore that limits how many job goroutines may run
+	// concurrently. Acquiring a slot before leasing ensures we never lease a job
+	// we cannot start immediately, preventing unnecessary lease churn.
+	sem    chan struct{}
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
 // New creates a new Worker.
 func New(
-	queue *jobs.Queue,
+	queue jobs.Queuer,
 	registry *processors.Registry,
 	publisher *messaging.Publisher,
 	db *pgxpool.Pool,
@@ -53,6 +63,7 @@ func New(
 		metrics:   m,
 		logger:    logger,
 		workerID:  workerID,
+		sem:       make(chan struct{}, maxConcurrentJobs),
 		stopCh:    make(chan struct{}),
 	}
 }
@@ -116,19 +127,31 @@ func (w *Worker) Stop() {
 }
 
 func (w *Worker) poll(ctx context.Context) {
+	// Acquire a concurrency slot before attempting to lease.
+	// Non-blocking: if all slots are taken we skip this tick — the running jobs
+	// already hold the slots and will release them when they finish.
+	select {
+	case w.sem <- struct{}{}:
+	default:
+		// At max concurrency — skip this poll tick.
+		return
+	}
+
 	jobTypes := []string{"llm_rewrite", "llm_routing", "rules_classify", "composite"}
 	job, err := w.queue.Lease(ctx, w.workerID, jobTypes)
 	if err != nil {
+		<-w.sem // release slot — no goroutine was spawned
 		w.logger.Error("lease job failed", zap.Error(err))
 		return
 	}
 	if job == nil {
-		// No jobs available — normal steady-state.
+		<-w.sem // release slot — no job to run
 		return
 	}
 
 	w.wg.Add(1)
 	go func() {
+		defer func() { <-w.sem }() // release slot when job finishes
 		defer w.wg.Done()
 		if err := w.RunJob(ctx, job); err != nil {
 			w.logger.Error("run job failed",
