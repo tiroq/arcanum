@@ -316,7 +316,7 @@ func TestLiveScenarioD_G1FailWhileG2Holds(t *testing.T) {
 	}
 
 	// G1 goroutine finishes with error — hits the guard.
-	if err := q.Fail(ctx, jobID, "G1_TIMEOUT", "G1 processing timed out"); err != nil {
+	if err := q.Fail(ctx, jobID, "worker-g1", "G1_TIMEOUT", "G1 processing timed out"); err != nil {
 		t.Fatalf("G1 Fail: %v", err)
 	}
 
@@ -329,7 +329,7 @@ func TestLiveScenarioD_G1FailWhileG2Holds(t *testing.T) {
 		t.Logf("  → Fix required: leased_by_worker_id column + hearbeat check in Fail().")
 
 		// Confirm G2's complete is now blocked.
-		if err := q.Complete(ctx, jobID); err != nil {
+		if err := q.Complete(ctx, jobID, "worker-g2"); err != nil {
 			t.Fatalf("G2 Complete: %v", err)
 		}
 		statusFinal, _ := jobRow(t, pool, jobID)
