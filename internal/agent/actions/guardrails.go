@@ -25,11 +25,18 @@ const (
 	maxRecentRetries = 3
 )
 
+// FeedbackProvider supplies learning signals for action types.
+// Implemented by the actionmemory package to avoid import cycles.
+type FeedbackProvider interface {
+	ShouldAvoid(ctx context.Context, actionType string) (bool, string)
+}
+
 // Guardrails evaluates whether planned actions are safe to execute.
 // It enforces rate limits, deduplication, and system load checks.
 type Guardrails struct {
-	db     *pgxpool.Pool
-	logger *zap.Logger
+	db       *pgxpool.Pool
+	logger   *zap.Logger
+	feedback FeedbackProvider
 
 	mu          sync.Mutex
 	recentExecs map[string]time.Time // action key → last execution time
@@ -44,9 +51,22 @@ func NewGuardrails(db *pgxpool.Pool, logger *zap.Logger) *Guardrails {
 	}
 }
 
+// WithFeedback attaches a FeedbackProvider for learning-based rejection.
+func (g *Guardrails) WithFeedback(fp FeedbackProvider) *Guardrails {
+	g.feedback = fp
+	return g
+}
+
 // EvaluateSafety checks whether an action is safe to execute.
 // Returns (safe bool, reason string).
 func (g *Guardrails) EvaluateSafety(ctx context.Context, action Action) (bool, string) {
+	// 0. Check feedback — reject actions with consistently poor outcomes.
+	if g.feedback != nil && action.Type != string(ActionLogRecommendation) {
+		if avoid, reason := g.feedback.ShouldAvoid(ctx, action.Type); avoid {
+			return false, reason
+		}
+	}
+
 	// 1. Check dedupe window — same target should not be acted on too frequently.
 	key := actionDedupeKey(action)
 	if g.isRecentDuplicate(key) {
