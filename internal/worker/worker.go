@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tiroq/arcanum/internal/audit"
+	"github.com/tiroq/arcanum/internal/db/models"
 	"github.com/tiroq/arcanum/internal/jobs"
 	"github.com/tiroq/arcanum/internal/messaging"
 	"github.com/tiroq/arcanum/internal/metrics"
@@ -116,7 +117,10 @@ func (w *Worker) poll(ctx context.Context) {
 		return
 	}
 
-	jobTypes := []string{"llm_rewrite", "llm_routing", "rules_classify", "composite"}
+	jobTypes := make([]string, 0, len(models.KnownJobTypes))
+	for t := range models.KnownJobTypes {
+		jobTypes = append(jobTypes, t)
+	}
 	job, err := w.queue.Lease(ctx, w.workerID, jobTypes)
 	if err != nil {
 		<-w.sem // release slot — no goroutine was spawned

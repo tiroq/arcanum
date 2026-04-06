@@ -587,11 +587,12 @@ func (h *Handlers) MetricsSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	summary := map[string]interface{}{
-		"jobs_queued":    h.countByStatus(r.Context(), "queued"),
-		"jobs_running":   h.countByStatus(r.Context(), "running"),
-		"jobs_succeeded": h.countByStatus(r.Context(), "succeeded"),
-		"jobs_failed":    h.countByStatus(r.Context(), "failed"),
-		"jobs_dead":      h.countByStatus(r.Context(), "dead_letter"),
+		"jobs_queued":          h.countByStatus(r.Context(), "queued"),
+		"jobs_leased":          h.countByStatus(r.Context(), "leased"),
+		"jobs_retry_scheduled": h.countByStatus(r.Context(), "retry_scheduled"),
+		"jobs_succeeded":       h.countByStatus(r.Context(), "succeeded"),
+		"jobs_failed":          h.countByStatus(r.Context(), "failed"),
+		"jobs_dead":            h.countByStatus(r.Context(), "dead_letter"),
 	}
 	writeJSON(w, http.StatusOK, summary)
 }

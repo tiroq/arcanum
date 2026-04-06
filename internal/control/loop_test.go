@@ -12,12 +12,14 @@ import (
 // --- stubs ---
 
 type stubQueuer struct {
-	reclaimCount   atomic.Int64
-	requeueCount   atomic.Int64
-	statsCallCount atomic.Int64
+	reclaimCount         atomic.Int64
+	requeueCount         atomic.Int64
+	statsCallCount       atomic.Int64
+	failUnknownCallCount atomic.Int64
 
-	reclaimResult int64
-	requeueResult int64
+	reclaimResult     int64
+	requeueResult     int64
+	failUnknownResult int64
 }
 
 func (q *stubQueuer) ReclaimExpiredLeases(_ context.Context) (int64, error) {
@@ -39,6 +41,11 @@ func (q *stubQueuer) QueueStats(_ context.Context) (map[string]int64, error) {
 		"failed":          0,
 		"dead_letter":     0,
 	}, nil
+}
+
+func (q *stubQueuer) FailUnknownJobTypes(_ context.Context, _ []string) (int64, error) {
+	q.failUnknownCallCount.Add(1)
+	return q.failUnknownResult, nil
 }
 
 // --- tests ---
@@ -78,6 +85,9 @@ func TestLoop_ScanCallsAllThreeMethods(t *testing.T) {
 	}
 	if got := q.requeueCount.Load(); got != 1 {
 		t.Errorf("RequeueScheduledRetries: want 1 call, got %d", got)
+	}
+	if got := q.failUnknownCallCount.Load(); got != 1 {
+		t.Errorf("FailUnknownJobTypes: want 1 call, got %d", got)
 	}
 	if got := q.statsCallCount.Load(); got != 1 {
 		t.Errorf("QueueStats: want 1 call, got %d", got)

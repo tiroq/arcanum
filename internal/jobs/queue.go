@@ -19,6 +19,9 @@ import (
 // expiry keeps the lease alive indefinitely.
 const leaseDuration = 5 * time.Minute
 
+// ErrUnknownJobType is returned when a job type is not in the known set.
+var ErrUnknownJobType = fmt.Errorf("unknown job type")
+
 // Queuer is the interface the worker depends on for job lifecycle operations.
 // Declared here so consumers (worker, tests) can depend on the interface rather
 // than the concrete *Queue, enabling unit testing without a real database.
@@ -91,6 +94,13 @@ func (q *Queue) record(ctx context.Context, entityType string, entityID uuid.UUI
 // Enqueue creates a new job unless a dedupe_key with an active (non-terminal) status already exists.
 // Returns nil job (no error) when deduplicated.
 func (q *Queue) Enqueue(ctx context.Context, params EnqueueParams) (*models.ProcessingJob, error) {
+	if !models.IsKnownJobType(params.JobType) {
+		q.logger.Error("enqueue rejected: unknown job type",
+			zap.String("job_type", params.JobType),
+		)
+		return nil, fmt.Errorf("%w: %s", ErrUnknownJobType, params.JobType)
+	}
+
 	if params.MaxAttempts <= 0 {
 		params.MaxAttempts = 3
 	}
@@ -479,4 +489,49 @@ func (q *Queue) QueueStats(ctx context.Context) (map[string]int64, error) {
 		stats[status] = cnt
 	}
 	return stats, rows.Err()
+}
+
+// FailUnknownJobTypes transitions any queued jobs whose job_type is not in the
+// known set to dead_letter. This prevents unknown types from remaining silently
+// stuck in the queue forever. Returns the number of affected jobs.
+func (q *Queue) FailUnknownJobTypes(ctx context.Context, knownTypes []string) (int64, error) {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE processing_jobs
+		SET status = 'dead_letter',
+		    error_code = 'UNKNOWN_JOB_TYPE',
+		    error_message = 'job type is not recognised by any processor',
+		    updated_at = $1
+		WHERE status = 'queued'
+		  AND job_type != ALL($2)
+		RETURNING id, job_type`
+
+	rows, err := q.db.Query(ctx, query, now, knownTypes)
+	if err != nil {
+		return 0, fmt.Errorf("fail unknown job types: %w", err)
+	}
+	defer rows.Close()
+
+	var count int64
+	for rows.Next() {
+		var id uuid.UUID
+		var jobType string
+		if err := rows.Scan(&id, &jobType); err != nil {
+			q.logger.Warn("fail unknown job types: scan row", zap.Error(err))
+			continue
+		}
+		count++
+		q.logger.Warn("dead-lettered unknown job type",
+			zap.String("job_id", id.String()),
+			zap.String("job_type", jobType),
+		)
+		q.record(ctx, "job", id, "job.dead_letter", "system", "control_loop", map[string]any{
+			"reason":   "unknown_job_type",
+			"job_type": jobType,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return count, fmt.Errorf("fail unknown job types: iterate rows: %w", err)
+	}
+	return count, nil
 }

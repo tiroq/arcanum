@@ -21,6 +21,7 @@ import (
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
+	"github.com/tiroq/arcanum/internal/db/models"
 	"github.com/tiroq/arcanum/internal/messaging"
 	"github.com/tiroq/arcanum/internal/metrics"
 )
@@ -38,6 +39,7 @@ type ControlQueuer interface {
 	ReclaimExpiredLeases(ctx context.Context) (int64, error)
 	RequeueScheduledRetries(ctx context.Context) (int64, error)
 	QueueStats(ctx context.Context) (map[string]int64, error)
+	FailUnknownJobTypes(ctx context.Context, knownTypes []string) (int64, error)
 }
 
 // Loop is the monitoring and recovery control component.
@@ -114,6 +116,7 @@ func (l *Loop) Stop() {
 func (l *Loop) scan(ctx context.Context) {
 	l.reclaimExpiredLeases(ctx)
 	l.requeueOverdueRetries(ctx)
+	l.failUnknownJobTypes(ctx)
 	l.checkQueueState(ctx)
 }
 
@@ -180,6 +183,35 @@ func (l *Loop) requeueOverdueRetries(ctx context.Context) {
 		l.audit.RecordEvent(ctx, "system", uuid.Nil,
 			"control.retry_requeue_completed", "control_loop", "scheduler",
 			map[string]any{"requeued_count": count})
+	}
+}
+
+func (l *Loop) failUnknownJobTypes(ctx context.Context) {
+	knownTypes := make([]string, 0, len(models.KnownJobTypes))
+	for t := range models.KnownJobTypes {
+		knownTypes = append(knownTypes, t)
+	}
+
+	count, err := l.queue.FailUnknownJobTypes(ctx, knownTypes)
+	if err != nil {
+		l.logger.Error("control: fail unknown job types", zap.Error(err))
+		return
+	}
+	if count == 0 {
+		return
+	}
+
+	l.logger.Warn("control: dead-lettered unknown job types", zap.Int64("count", count))
+
+	if l.metrics != nil {
+		l.metrics.ControlAlerts.WithLabelValues("unknown_job_type").Add(float64(count))
+	}
+
+	if l.audit != nil {
+		//nolint:errcheck
+		l.audit.RecordEvent(ctx, "system", uuid.Nil,
+			"control.unknown_job_types_failed", "control_loop", "scheduler",
+			map[string]any{"failed_count": count})
 	}
 }
 
