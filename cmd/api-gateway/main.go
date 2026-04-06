@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/goals"
+	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -91,9 +92,16 @@ func run() error {
 	executor := actions.NewExecutor(apiBaseURL, cfg.Auth.AdminToken, logger)
 	actionEngine := actions.NewEngine(goalEngine, planner, guardrails, executor, auditor, logger)
 
+	// Outcome verification layer (Iteration 4).
+	outcomeEval := outcome.NewEvaluator(pool, logger)
+	outcomeStore := outcome.NewStore(pool)
+	outcomeHandler := outcome.NewHandler(outcomeEval, outcomeStore, auditor, logger)
+	actionEngine.WithOutcomeVerification(outcomeHandler)
+
 	handlers := api.NewHandlers(pool, publisher, m, logger).
 		WithGoalEngine(goalEngine).
-		WithActionEngine(actionEngine)
+		WithActionEngine(actionEngine).
+		WithOutcomeStore(outcomeStore)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
