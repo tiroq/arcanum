@@ -257,7 +257,7 @@ func TestLiveScenarioC_FailAfterReclaimNoRelease(t *testing.T) {
 	}
 
 	// G1 finishes with an error AFTER reclaim — reclaim cleared ownership.
-	if err := q.Fail(ctx, jobID, "worker-g1", "TIMEOUT", "processing exceeded timeout"); err != nil {
+	if _, err := q.Fail(ctx, jobID, "worker-g1", "TIMEOUT", "processing exceeded timeout"); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 
@@ -306,7 +306,7 @@ func TestLiveScenarioD_StaleFailRejectedByOwnershipGuard(t *testing.T) {
 	}
 
 	// G1's stale Fail must be rejected — ownership mismatch.
-	if err := q.Fail(ctx, jobID, "worker-g1", "G1_TIMEOUT", "G1 processing timed out"); err != nil {
+	if _, err := q.Fail(ctx, jobID, "worker-g1", "G1_TIMEOUT", "G1 processing timed out"); err != nil {
 		t.Fatalf("G1 Fail returned unexpected error: %v", err)
 	}
 
@@ -357,7 +357,7 @@ func TestLiveScenarioE_ConcurrentFail_AtomicAttemptCount(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			if err := q.Fail(ctx, jobID, "worker-concurrent", fmt.Sprintf("ERR%d", n), fmt.Sprintf("goroutine %d failed", n)); err != nil {
+			if _, err := q.Fail(ctx, jobID, "worker-concurrent", fmt.Sprintf("ERR%d", n), fmt.Sprintf("goroutine %d failed", n)); err != nil {
 				errCh <- err
 			}
 		}(i)
@@ -409,7 +409,7 @@ func TestLiveScenarioF_StaleCallsOnSucceededJob(t *testing.T) {
 		t.Fatalf("stale Complete: %v", err)
 	}
 	// Stale Fail.
-	if err := q.Fail(ctx, jobID, "worker-stale", "STALE", "arrived late"); err != nil {
+	if _, err := q.Fail(ctx, jobID, "worker-stale", "STALE", "arrived late"); err != nil {
 		t.Fatalf("stale Fail: %v", err)
 	}
 

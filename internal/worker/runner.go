@@ -30,7 +30,7 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 
 	proc, err := w.registry.FindFor(job.JobType)
 	if err != nil {
-		return w.failJob(ctx, job.ID, "NO_PROCESSOR", err.Error())
+		return w.failJob(ctx, job, "NO_PROCESSOR", err.Error())
 	}
 
 	// Build job context: load snapshot payload.
@@ -154,7 +154,7 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 			// model as a stand-in because no role-specific model was configured.
 			// Stored directly so the optimizer can use it as a first-class signal
 			// rather than inferring it from the failure rate proxy.
-			"used_fallback":  result.UsedFallback,
+			"used_fallback": result.UsedFallback,
 			// attempt_number is the 1-based counter for this execution attempt
 			// on the job. It acts as fallback depth for multi-attempt analysis.
 			"attempt_number": job.AttemptCount + 1,
@@ -183,7 +183,7 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 	}
 
 	if outcome != models.RunOutcomeSuccess {
-		return w.failJob(ctx, job.ID, "PROCESSING_FAILED", errMsg)
+		return w.failJob(ctx, job, "PROCESSING_FAILED", errMsg)
 	}
 
 	// Create SuggestionProposal if there's an output payload.
@@ -241,13 +241,63 @@ func (w *Worker) RunJob(ctx context.Context, job *models.ProcessingJob) error {
 	return nil
 }
 
-func (w *Worker) failJob(ctx context.Context, jobID uuid.UUID, code, msg string) error {
-	if err := w.queue.Fail(ctx, jobID, w.workerID, code, msg); err != nil {
-		return fmt.Errorf("fail job %s: %w", jobID, err)
+func (w *Worker) failJob(ctx context.Context, job *models.ProcessingJob, code, msg string) error {
+	result, err := w.queue.Fail(ctx, job.ID, w.workerID, code, msg)
+	if err != nil {
+		return fmt.Errorf("fail job %s: %w", job.ID, err)
 	}
 	if w.metrics != nil {
 		w.metrics.JobsFailed.Inc()
 	}
+	if result == nil {
+		// Ownership guard rejected — no state change, no event to publish.
+		return nil
+	}
+
+	now := time.Now().UTC()
+	switch result.NewStatus {
+	case models.JobStatusRetryScheduled:
+		retryAt := now
+		if result.ScheduledAt != nil {
+			retryAt = *result.ScheduledAt
+		}
+		evt := events.NewJobRetryEvent(
+			job.ID.String(),
+			job.SourceTaskID.String(),
+			job.JobType,
+			result.AttemptCount,
+			result.MaxAttempts,
+			code,
+			msg,
+			retryAt,
+		)
+		if pubErr := w.publisher.Publish(ctx, subjects.SubjectJobRetry, evt); pubErr != nil {
+			w.logger.Error("publish job.retry event failed — DB state is correct, bus event lost",
+				zap.String("job_id", job.ID.String()),
+				zap.String("subject", subjects.SubjectJobRetry),
+				zap.Error(pubErr),
+			)
+		}
+	case models.JobStatusDeadLetter:
+		evt := events.NewJobDeadEvent(
+			job.ID.String(),
+			job.SourceTaskID.String(),
+			job.JobType,
+			result.AttemptCount,
+			result.MaxAttempts,
+			code,
+			msg,
+			now,
+		)
+		if pubErr := w.publisher.Publish(ctx, subjects.SubjectJobDead, evt); pubErr != nil {
+			w.logger.Error("publish job.dead event failed — DB state is correct, bus event lost",
+				zap.String("job_id", job.ID.String()),
+				zap.String("subject", subjects.SubjectJobDead),
+				zap.Error(pubErr),
+			)
+		}
+	}
+
 	return nil
 }
 

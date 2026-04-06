@@ -65,7 +65,7 @@ func TestLiveAudit_FullJobLifecycle(t *testing.T) {
 	requireAuditEvent(t, pool, jobID, "job.leased", "after Lease")
 
 	// 3. Fail (attempt 1) → job.failed + job.retry_scheduled
-	if err := q.Fail(ctx, jobID, workerID, "test_err", "intentional failure"); err != nil {
+	if _, err := q.Fail(ctx, jobID, workerID, "test_err", "intentional failure"); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 	requireAuditEvent(t, pool, jobID, "job.failed", "after Fail attempt 1")
@@ -133,7 +133,7 @@ func TestLiveAudit_DeadLetter(t *testing.T) {
 		t.Fatalf("Lease: %v (leased=%v)", err, leased)
 	}
 
-	if err := q.Fail(ctx, jobID, workerID, "fatal", "always fails"); err != nil {
+	if _, err := q.Fail(ctx, jobID, workerID, "fatal", "always fails"); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
 

@@ -30,7 +30,7 @@ type Queuer interface {
 	// in the SQL WHERE clause ensures only the current lease-holder may apply
 	// the terminal transition.
 	Complete(ctx context.Context, jobID uuid.UUID, workerID string) error
-	Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, errMsg string) error
+	Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, errMsg string) (*FailResult, error)
 	// RenewLease extends lease_expiry for jobs still owned by workerID.
 	// Returns (true, nil) on success, (false, nil) when ownership was lost,
 	// and (false, err) on transient DB errors.
@@ -44,6 +44,15 @@ type EnqueueParams struct {
 	Priority     int
 	DedupeKey    *string
 	MaxAttempts  int
+}
+
+// FailResult contains the outcome of a Fail operation.
+// nil result with nil error means the ownership guard rejected the call.
+type FailResult struct {
+	NewStatus    string
+	AttemptCount int
+	MaxAttempts  int
+	ScheduledAt  *time.Time // non-nil when NewStatus is retry_scheduled
 }
 
 // Queue manages ProcessingJob creation and status transitions.
@@ -217,7 +226,7 @@ func (q *Queue) Complete(ctx context.Context, jobID uuid.UUID, workerID string) 
 // computed in a single statement, eliminating the read-then-write TOCTOU race.
 // The workerID ownership guard ensures only the current lease-holder can fail
 // the job, preventing stale goroutines from corrupting a re-leased job.
-func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, errMsg string) error {
+func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, errMsg string) (*FailResult, error) {
 	now := time.Now().UTC()
 
 	const query = `
@@ -237,11 +246,13 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, er
 		    error_code           = $2,
 		    error_message        = $3
 		WHERE id = $4 AND status = 'leased' AND leased_by_worker_id = $5
-		RETURNING status, attempt_count`
+		RETURNING status, attempt_count, max_attempts, scheduled_at`
 
 	var newStatus string
 	var newAttemptCount int
-	err := q.db.QueryRow(ctx, query, now, errCode, errMsg, jobID, workerID).Scan(&newStatus, &newAttemptCount)
+	var maxAttempts int
+	var scheduledAt *time.Time
+	err := q.db.QueryRow(ctx, query, now, errCode, errMsg, jobID, workerID).Scan(&newStatus, &newAttemptCount, &maxAttempts, &scheduledAt)
 	if err == pgx.ErrNoRows {
 		// Ownership guard rejected — either the lease was reclaimed by maintenance
 		// and this worker no longer owns the job, or another worker re-leased it.
@@ -250,10 +261,10 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, er
 			zap.String("worker_id", workerID),
 			zap.String("error_code", errCode),
 		)
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("fail job %s: %w", jobID, err)
+		return nil, fmt.Errorf("fail job %s: %w", jobID, err)
 	}
 
 	q.logger.Info("job failed",
@@ -281,7 +292,12 @@ func (q *Queue) Fail(ctx context.Context, jobID uuid.UUID, workerID, errCode, er
 		"attempt_count": newAttemptCount,
 	})
 
-	return nil
+	return &FailResult{
+		NewStatus:    newStatus,
+		AttemptCount: newAttemptCount,
+		MaxAttempts:  maxAttempts,
+		ScheduledAt:  scheduledAt,
+	}, nil
 }
 
 // RenewLease extends the lease_expiry for a job that workerID still owns.

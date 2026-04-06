@@ -67,35 +67,53 @@ func NewJobCreatedEvent(jobID, sourceTaskID, jobType string, priority int, dedup
 type JobRetryEvent struct {
 	Version      string    `json:"version"`
 	JobID        string    `json:"job_id"`
+	SourceTaskID string    `json:"source_task_id"`
+	JobType      string    `json:"job_type"`
 	AttemptCount int       `json:"attempt_count"`
-	Reason       string    `json:"reason"`
+	MaxAttempts  int       `json:"max_attempts"`
+	ErrorCode    string    `json:"error_code"`
+	ErrorMessage string    `json:"error_message"`
 	RetryAt      time.Time `json:"retry_at"`
 }
 
-func NewJobRetryEvent(jobID string, attemptCount int, reason string, retryAt time.Time) JobRetryEvent {
+func NewJobRetryEvent(jobID, sourceTaskID, jobType string, attemptCount, maxAttempts int, errorCode, errorMessage string, retryAt time.Time) JobRetryEvent {
 	return JobRetryEvent{
 		Version:      "v1",
 		JobID:        jobID,
+		SourceTaskID: sourceTaskID,
+		JobType:      jobType,
 		AttemptCount: attemptCount,
-		Reason:       reason,
+		MaxAttempts:  maxAttempts,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
 		RetryAt:      retryAt,
 	}
 }
 
 // JobDeadEvent is published when a processing job is moved to dead-letter.
 type JobDeadEvent struct {
-	Version string    `json:"version"`
-	JobID   string    `json:"job_id"`
-	Reason  string    `json:"reason"`
-	DeadAt  time.Time `json:"dead_at"`
+	Version      string    `json:"version"`
+	JobID        string    `json:"job_id"`
+	SourceTaskID string    `json:"source_task_id"`
+	JobType      string    `json:"job_type"`
+	AttemptCount int       `json:"attempt_count"`
+	MaxAttempts  int       `json:"max_attempts"`
+	ErrorCode    string    `json:"error_code"`
+	ErrorMessage string    `json:"error_message"`
+	DeadAt       time.Time `json:"dead_at"`
 }
 
-func NewJobDeadEvent(jobID, reason string, deadAt time.Time) JobDeadEvent {
+func NewJobDeadEvent(jobID, sourceTaskID, jobType string, attemptCount, maxAttempts int, errorCode, errorMessage string, deadAt time.Time) JobDeadEvent {
 	return JobDeadEvent{
-		Version: "v1",
-		JobID:   jobID,
-		Reason:  reason,
-		DeadAt:  deadAt,
+		Version:      "v1",
+		JobID:        jobID,
+		SourceTaskID: sourceTaskID,
+		JobType:      jobType,
+		AttemptCount: attemptCount,
+		MaxAttempts:  maxAttempts,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		DeadAt:       deadAt,
 	}
 }
 

@@ -60,9 +60,9 @@ func (q *stubQueue) Complete(_ context.Context, _ uuid.UUID, _ string) error {
 	return nil
 }
 
-func (q *stubQueue) Fail(_ context.Context, _ uuid.UUID, _, _, _ string) error {
+func (q *stubQueue) Fail(_ context.Context, _ uuid.UUID, _, _, _ string) (*jobs.FailResult, error) {
 	q.failCount.Add(1)
-	return nil
+	return &jobs.FailResult{NewStatus: "retry_scheduled", AttemptCount: 1, MaxAttempts: 3}, nil
 }
 
 func (q *stubQueue) RenewLease(_ context.Context, _ uuid.UUID, _ string) (bool, error) {

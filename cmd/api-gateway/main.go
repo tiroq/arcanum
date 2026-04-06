@@ -11,7 +11,10 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/api"
+	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/db"
 	"github.com/tiroq/arcanum/internal/health"
@@ -78,7 +81,19 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create publisher: %w", err)
 	}
-	handlers := api.NewHandlers(pool, publisher, m, logger)
+	goalEngine := goals.NewGoalEngine(pool, logger)
+
+	// Action engine wiring.
+	auditor := audit.NewPostgresAuditRecorder(pool)
+	apiBaseURL := fmt.Sprintf("http://localhost:%d", cfg.HTTP.Port)
+	planner := actions.NewPlanner(pool, logger)
+	guardrails := actions.NewGuardrails(pool, logger)
+	executor := actions.NewExecutor(apiBaseURL, cfg.Auth.AdminToken, logger)
+	actionEngine := actions.NewEngine(goalEngine, planner, guardrails, executor, auditor, logger)
+
+	handlers := api.NewHandlers(pool, publisher, m, logger).
+		WithGoalEngine(goalEngine).
+		WithActionEngine(actionEngine)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
