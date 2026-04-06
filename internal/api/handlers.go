@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
@@ -25,13 +26,14 @@ import (
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	db           *pgxpool.Pool
-	publisher    *messaging.Publisher
-	metrics      *metrics.Metrics
-	goalEngine   *goals.GoalEngine
-	actionEngine *actions.Engine
-	outcomeStore *outcome.Store
-	logger       *zap.Logger
+	db                *pgxpool.Pool
+	publisher         *messaging.Publisher
+	metrics           *metrics.Metrics
+	goalEngine        *goals.GoalEngine
+	actionEngine      *actions.Engine
+	outcomeStore      *outcome.Store
+	actionMemoryStore *actionmemory.Store
+	logger            *zap.Logger
 }
 
 // NewHandlers creates Handlers with required dependencies.
@@ -54,6 +56,12 @@ func (h *Handlers) WithActionEngine(ae *actions.Engine) *Handlers {
 // WithOutcomeStore attaches an optional outcome store to the handlers.
 func (h *Handlers) WithOutcomeStore(os *outcome.Store) *Handlers {
 	h.outcomeStore = os
+	return h
+}
+
+// WithActionMemoryStore attaches an optional action memory store to the handlers.
+func (h *Handlers) WithActionMemoryStore(ms *actionmemory.Store) *Handlers {
+	h.actionMemoryStore = ms
 	return h
 }
 
@@ -846,6 +854,57 @@ func (h *Handlers) AgentOutcomes(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"outcomes": outcomes,
+	})
+}
+
+// AgentActionMemory returns accumulated action memory with feedback signals.
+// GET /api/v1/agent/action-memory
+func (h *Handlers) AgentActionMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actionMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "action memory store not configured")
+		return
+	}
+
+	records, err := h.actionMemoryStore.List(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	type memoryEntry struct {
+		ActionType     string  `json:"action_type"`
+		TargetType     string  `json:"target_type"`
+		TotalRuns      int     `json:"total_runs"`
+		SuccessRuns    int     `json:"success_runs"`
+		FailureRuns    int     `json:"failure_runs"`
+		NeutralRuns    int     `json:"neutral_runs"`
+		SuccessRate    float64 `json:"success_rate"`
+		FailureRate    float64 `json:"failure_rate"`
+		Recommendation string  `json:"recommendation"`
+	}
+
+	entries := make([]memoryEntry, 0, len(records))
+	for _, rec := range records {
+		fb := actionmemory.GenerateFeedback(&rec)
+		entries = append(entries, memoryEntry{
+			ActionType:     rec.ActionType,
+			TargetType:     rec.TargetType,
+			TotalRuns:      rec.TotalRuns,
+			SuccessRuns:    rec.SuccessRuns,
+			FailureRuns:    rec.FailureRuns,
+			NeutralRuns:    rec.NeutralRuns,
+			SuccessRate:    rec.SuccessRate,
+			FailureRate:    rec.FailureRate,
+			Recommendation: string(fb.Recommendation),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"memory": entries,
 	})
 }
 
