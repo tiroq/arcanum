@@ -11,6 +11,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
@@ -90,18 +91,26 @@ func run() error {
 	planner := actions.NewPlanner(pool, logger)
 	guardrails := actions.NewGuardrails(pool, logger)
 	executor := actions.NewExecutor(apiBaseURL, cfg.Auth.AdminToken, logger)
+
+	// Action memory + feedback loop (Iteration 5).
+	memoryStore := actionmemory.NewStore(pool)
+	feedbackAdapter := actionmemory.NewFeedbackAdapter(memoryStore)
+	guardrails.WithFeedback(feedbackAdapter)
+
 	actionEngine := actions.NewEngine(goalEngine, planner, guardrails, executor, auditor, logger)
 
 	// Outcome verification layer (Iteration 4).
 	outcomeEval := outcome.NewEvaluator(pool, logger)
 	outcomeStore := outcome.NewStore(pool)
-	outcomeHandler := outcome.NewHandler(outcomeEval, outcomeStore, auditor, logger)
+	outcomeHandler := outcome.NewHandler(outcomeEval, outcomeStore, auditor, logger).
+		WithMemoryStore(memoryStore)
 	actionEngine.WithOutcomeVerification(outcomeHandler)
 
 	handlers := api.NewHandlers(pool, publisher, m, logger).
 		WithGoalEngine(goalEngine).
 		WithActionEngine(actionEngine).
-		WithOutcomeStore(outcomeStore)
+		WithOutcomeStore(outcomeStore).
+		WithActionMemoryStore(memoryStore)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
