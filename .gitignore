@@ -2,3 +2,4 @@ benchmarks/bench_*/*
 .env
 bin/
 .arcanum/pids/*.pid
+logs/*.log
