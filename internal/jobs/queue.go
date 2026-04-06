@@ -86,24 +86,6 @@ func (q *Queue) Enqueue(ctx context.Context, params EnqueueParams) (*models.Proc
 		params.MaxAttempts = 3
 	}
 
-	// Check dedupe: if a non-terminal job with this key already exists, skip.
-	if params.DedupeKey != nil {
-		const checkDedupe = `
-			SELECT id FROM processing_jobs
-			WHERE dedupe_key = $1
-			  AND status NOT IN ('succeeded', 'dead_letter')`
-		var existingID uuid.UUID
-		err := q.db.QueryRow(ctx, checkDedupe, *params.DedupeKey).Scan(&existingID)
-		if err == nil {
-			q.logger.Debug("job deduplicated", zap.String("dedupe_key", *params.DedupeKey))
-			return nil, nil
-		}
-		if err != pgx.ErrNoRows {
-			return nil, fmt.Errorf("check dedupe key: %w", err)
-		}
-		// pgx.ErrNoRows means no conflict — proceed with insert.
-	}
-
 	now := time.Now().UTC()
 	job := &models.ProcessingJob{
 		ID:           uuid.New(),
@@ -118,15 +100,33 @@ func (q *Queue) Enqueue(ctx context.Context, params EnqueueParams) (*models.Proc
 		UpdatedAt:    now,
 	}
 
+	// Atomic insert with dedup guard.
+	// ON CONFLICT targets the partial unique index uq_processing_jobs_dedupe
+	// (dedupe_key IS NOT NULL AND status NOT IN ('succeeded','dead_letter')).
+	// DO NOTHING returns 0 rows affected when a live duplicate already exists,
+	// which we treat as a successful deduplication — no error, nil job returned.
+	// This is race-safe: no separate SELECT is needed.
 	const insert = `
 		INSERT INTO processing_jobs (id, source_task_id, job_type, status, priority, dedupe_key, attempt_count, max_attempts, payload, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $9)`
+		VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $9)
+		ON CONFLICT (dedupe_key)
+		    WHERE dedupe_key IS NOT NULL
+		      AND status NOT IN ('succeeded', 'dead_letter')
+		DO NOTHING`
 
-	if _, err := q.db.Exec(ctx, insert,
+	tag, err := q.db.Exec(ctx, insert,
 		job.ID, job.SourceTaskID, job.JobType, job.Status,
 		job.Priority, job.DedupeKey, job.MaxAttempts, job.Payload, now,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, fmt.Errorf("insert job: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Conflict on dedupe_key — a non-terminal job already exists.
+		if params.DedupeKey != nil {
+			q.logger.Debug("job deduplicated", zap.String("dedupe_key", *params.DedupeKey))
+		}
+		return nil, nil
 	}
 
 	q.logger.Info("job enqueued",

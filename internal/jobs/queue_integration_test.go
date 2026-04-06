@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/db/models"
 )
 
@@ -583,5 +584,231 @@ func TestLiveScenarioJ_ReclaimClearsOwnership(t *testing.T) {
 	}
 	if status == "queued" && owner == "" {
 		t.Logf("SCENARIO J PASS: reclaim set status=queued and cleared leased_by_worker_id")
+	}
+}
+
+// ─── Deduplication tests ─────────────────────────────────────────────────────
+
+// TestLive_Dedupe_Sequential verifies that two sequential Enqueue calls with the
+// same dedupe_key result in exactly one job being created.
+// The second call must silently return nil (no error, no job) while the first
+// job remains in the queue.
+func TestLive_Dedupe_Sequential(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	key := "dedupe-seq-" + uuid.New().String()[:8]
+
+	job1, err := q.Enqueue(ctx, EnqueueParams{
+		SourceTaskID: uuid.MustParse(knownTestTaskID),
+		JobType:      "llm_rewrite",
+		Priority:     0,
+		MaxAttempts:  3,
+		DedupeKey:    &key,
+	})
+	if err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+	if job1 == nil {
+		t.Fatal("first Enqueue returned nil — expected a new job")
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM processing_jobs WHERE dedupe_key = $1`, key) //nolint:errcheck
+	})
+
+	// Second Enqueue with the same dedupe_key must be a no-op.
+	job2, err := q.Enqueue(ctx, EnqueueParams{
+		SourceTaskID: uuid.MustParse(knownTestTaskID),
+		JobType:      "llm_rewrite",
+		Priority:     0,
+		MaxAttempts:  3,
+		DedupeKey:    &key,
+	})
+	if err != nil {
+		t.Fatalf("second Enqueue returned unexpected error: %v", err)
+	}
+	if job2 != nil {
+		t.Errorf("second Enqueue expected nil (deduplicated), got job ID %s", job2.ID)
+	}
+
+	// Exactly one row with this dedupe_key must exist.
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM processing_jobs WHERE dedupe_key = $1`, key).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 job with dedupe_key=%q, got %d", key, count)
+	} else {
+		t.Logf("PASS: exactly 1 job with dedupe_key=%q", key)
+	}
+}
+
+// TestLive_Dedupe_Concurrent verifies that concurrent Enqueue calls with the
+// same dedupe_key remain race-safe — the DB constraint prevents duplicates even
+// when multiple goroutines race past any Go-level check simultaneously.
+func TestLive_Dedupe_Concurrent(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	key := "dedupe-conc-" + uuid.New().String()[:8]
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM processing_jobs WHERE dedupe_key = $1`, key) //nolint:errcheck
+	})
+
+	const goroutines = 8
+	results := make([]*models.ProcessingJob, goroutines)
+	errs := make([]error, goroutines)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = q.Enqueue(ctx, EnqueueParams{
+				SourceTaskID: uuid.MustParse(knownTestTaskID),
+				JobType:      "llm_rewrite",
+				Priority:     0,
+				MaxAttempts:  3,
+				DedupeKey:    &key,
+			})
+		}()
+	}
+	wg.Wait()
+
+	// No goroutine should have received an error.
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d Enqueue error: %v", i, err)
+		}
+	}
+
+	// Count successful inserts (non-nil jobs).
+	created := 0
+	for _, job := range results {
+		if job != nil {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Errorf("expected exactly 1 goroutine to create a job, got %d", created)
+	} else {
+		t.Logf("PASS: %d/%d goroutines raced, exactly 1 job created", goroutines, goroutines)
+	}
+
+	// Exactly one row in DB.
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM processing_jobs WHERE dedupe_key = $1`, key).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 row in DB with dedupe_key=%q, got %d", key, count)
+	}
+}
+
+// TestLive_Dedupe_AllowsNewJobAfterTerminal verifies that once a job with a
+// given dedupe_key reaches a terminal state (succeeded or dead_letter), a new
+// resync for the same key is allowed to create a fresh job.
+func TestLive_Dedupe_AllowsNewJobAfterTerminal(t *testing.T) {
+	pool := livePool(t)
+	q := liveQueue(t, pool)
+	ctx := context.Background()
+
+	key := "dedupe-terminal-" + uuid.New().String()[:8]
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM processing_jobs WHERE dedupe_key = $1`, key) //nolint:errcheck
+	})
+
+	// Create and immediately terminate first job via direct SQL.
+	firstID := uuid.New()
+	_, err := pool.Exec(ctx, `
+		INSERT INTO processing_jobs
+		    (id, source_task_id, job_type, status, priority, dedupe_key, attempt_count, max_attempts, payload, created_at, updated_at)
+		VALUES ($1, $2, 'llm_rewrite', 'succeeded', 0, $3, 0, 3, '{}', NOW(), NOW())`,
+		firstID, knownTestTaskID, key,
+	)
+	if err != nil {
+		t.Fatalf("seed succeeded job: %v", err)
+	}
+
+	// A new Enqueue with the same key must succeed because the old job is terminal.
+	job2, err := q.Enqueue(ctx, EnqueueParams{
+		SourceTaskID: uuid.MustParse(knownTestTaskID),
+		JobType:      "llm_rewrite",
+		Priority:     0,
+		MaxAttempts:  3,
+		DedupeKey:    &key,
+	})
+	if err != nil {
+		t.Fatalf("Enqueue after terminal: %v", err)
+	}
+	if job2 == nil {
+		t.Error("expected a new job after the previous one reached terminal status, got nil (incorrectly deduplicated)")
+	} else {
+		t.Logf("PASS: new job %s created after previous terminal job %s", job2.ID, firstID)
+	}
+}
+
+// TestLive_Audit_EnqueueRecordsJobCreated verifies that Enqueue() records
+// a job.created audit event when a queue with an auditor is used.
+// This is the integration proof for BUG#1 (orchestrator queue missing .WithAudit).
+func TestLive_Audit_EnqueueRecordsJobCreated(t *testing.T) {
+	pool := livePool(t)
+	logger, _ := zap.NewDevelopment()
+	auditor := audit.NewPostgresAuditRecorder(pool)
+	q := NewQueue(pool, logger).WithAudit(auditor)
+
+	ctx := context.Background()
+	job, err := q.Enqueue(ctx, EnqueueParams{
+		SourceTaskID: uuid.MustParse(knownTestTaskID),
+		JobType:      "bugfix_audit_smoke",
+		Priority:     0,
+		MaxAttempts:  1,
+	})
+	if err != nil || job == nil {
+		t.Fatalf("Enqueue: err=%v job=%v", err, job)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM processing_jobs WHERE id = $1`, job.ID)     //nolint:errcheck
+		pool.Exec(context.Background(), `DELETE FROM audit_events WHERE entity_id = $1`, job.ID) //nolint:errcheck
+	})
+
+	requireAuditEvent(t, pool, job.ID, "job.created", "after Enqueue with auditor")
+}
+
+// TestLive_Audit_EnqueueWithoutAuditorSkipsJobCreated verifies the inverse:
+// a queue created without .WithAudit does NOT write audit events.
+func TestLive_Audit_EnqueueWithoutAuditorSkipsJobCreated(t *testing.T) {
+	pool := livePool(t)
+	logger, _ := zap.NewDevelopment()
+	q := NewQueue(pool, logger) // no auditor
+
+	ctx := context.Background()
+	job, err := q.Enqueue(ctx, EnqueueParams{
+		SourceTaskID: uuid.MustParse(knownTestTaskID),
+		JobType:      "bugfix_no_audit_smoke",
+		Priority:     0,
+		MaxAttempts:  1,
+	})
+	if err != nil || job == nil {
+		t.Fatalf("Enqueue: err=%v job=%v", err, job)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM processing_jobs WHERE id = $1`, job.ID) //nolint:errcheck
+	})
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM audit_events WHERE entity_id = $1 AND event_type = 'job.created'`,
+		job.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("audit count query: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 audit events without auditor, got %d", count)
+	} else {
+		t.Logf("PASS: no audit events written when queue has no auditor")
 	}
 }

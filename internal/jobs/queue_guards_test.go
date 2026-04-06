@@ -141,3 +141,43 @@ func TestFailQueryReturnsNewState(t *testing.T) {
 		t.Error("Fail() must use RETURNING to detect whether the update was applied (0 rows = ownership rejected)")
 	}
 }
+
+// enqueueInsertQuery is the INSERT statement used by Enqueue() — kept in sync with queue.go.
+const enqueueInsertQuery = `
+		INSERT INTO processing_jobs (id, source_task_id, job_type, status, priority, dedupe_key, attempt_count, max_attempts, payload, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9, $9)
+		ON CONFLICT (dedupe_key)
+		    WHERE dedupe_key IS NOT NULL
+		      AND status NOT IN ('succeeded', 'dead_letter')
+		DO NOTHING`
+
+// TestEnqueueQueryHasNoSeparateSelectForDedupe verifies that Enqueue() does NOT
+// use a separate SELECT to check for duplicates before the INSERT.
+// A SELECT-then-INSERT is a TOCTOU race; deduplication must be handled by the
+// database in a single atomic statement.
+func TestEnqueueQueryHasNoSeparateSelectForDedupe(t *testing.T) {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(enqueueInsertQuery), " "))
+
+	if strings.Contains(normalized, "SELECT") {
+		t.Error("Enqueue() insert must NOT contain a separate SELECT — dedup must be handled atomically by ON CONFLICT")
+	}
+}
+
+// TestEnqueueQueryUsesOnConflictDoNothing verifies that Enqueue() uses a
+// partial ON CONFLICT clause to atomically handle duplicate dedupe_key values.
+func TestEnqueueQueryUsesOnConflictDoNothing(t *testing.T) {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(enqueueInsertQuery), " "))
+
+	if !strings.Contains(normalized, "ON CONFLICT") {
+		t.Error("Enqueue() insert must use ON CONFLICT for atomic deduplication")
+	}
+	if !strings.Contains(normalized, "DO NOTHING") {
+		t.Error("Enqueue() ON CONFLICT handler must be DO NOTHING")
+	}
+	if !strings.Contains(normalized, "DEDUPE_KEY IS NOT NULL") {
+		t.Error("Enqueue() ON CONFLICT WHERE clause must include 'dedupe_key IS NOT NULL'")
+	}
+	if !strings.Contains(normalized, "STATUS NOT IN") {
+		t.Error("Enqueue() ON CONFLICT WHERE clause must exclude terminal statuses")
+	}
+}

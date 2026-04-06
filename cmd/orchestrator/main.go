@@ -93,7 +93,7 @@ func run() error {
 	}
 	logger.Info("jetstream streams configured")
 
-	queue := jobs.NewQueue(pool, logger)
+	queue := jobs.NewQueue(pool, logger).WithAudit(auditor)
 
 	publisher, err := messaging.NewPublisher(nc, logger)
 	if err != nil {

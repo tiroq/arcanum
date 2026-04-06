@@ -125,11 +125,15 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 				return
 			}
 
+			// Deduplicate by source_task_id + job_type so that rapid duplicate
+			// resync commands do not create parallel jobs for the same work unit.
+			dedupeKey := cmd.SourceTaskID + ":" + cmd.JobType
 			job, err := o.queue.Enqueue(ctx, jobs.EnqueueParams{
 				SourceTaskID: sourceTaskID,
 				JobType:      cmd.JobType,
 				Priority:     cmd.Priority,
 				MaxAttempts:  3,
+				DedupeKey:    &dedupeKey,
 			})
 			if err != nil {
 				o.logger.Error("enqueue resync job", zap.String("source_task_id", cmd.SourceTaskID), zap.Error(err))
