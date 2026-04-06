@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -22,15 +24,29 @@ import (
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	db        *pgxpool.Pool
-	publisher *messaging.Publisher
-	metrics   *metrics.Metrics
-	logger    *zap.Logger
+	db           *pgxpool.Pool
+	publisher    *messaging.Publisher
+	metrics      *metrics.Metrics
+	goalEngine   *goals.GoalEngine
+	actionEngine *actions.Engine
+	logger       *zap.Logger
 }
 
 // NewHandlers creates Handlers with required dependencies.
 func NewHandlers(db *pgxpool.Pool, publisher *messaging.Publisher, m *metrics.Metrics, logger *zap.Logger) *Handlers {
 	return &Handlers{db: db, publisher: publisher, metrics: m, logger: logger}
+}
+
+// WithGoalEngine attaches an optional GoalEngine to the handlers.
+func (h *Handlers) WithGoalEngine(ge *goals.GoalEngine) *Handlers {
+	h.goalEngine = ge
+	return h
+}
+
+// WithActionEngine attaches an optional ActionEngine to the handlers.
+func (h *Handlers) WithActionEngine(ae *actions.Engine) *Handlers {
+	h.actionEngine = ae
+	return h
 }
 
 // --- JSON helpers ---
@@ -698,6 +714,91 @@ func (h *Handlers) AgentTimeline(w http.ResponseWriter, r *http.Request) {
 		"events":         evts,
 		"memory":         memories,
 	})
+}
+
+// --- Agent Goals ---
+
+// AgentGoals returns advisory goals derived from current system state.
+// GET /api/v1/agent/goals
+func (h *Handlers) AgentGoals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "goal engine not configured")
+		return
+	}
+
+	result, err := h.goalEngine.Evaluate(r.Context())
+	if err != nil {
+		h.logger.Error("goal engine evaluation failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "goal evaluation failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"goals": result,
+	})
+}
+
+// --- Agent Actions ---
+
+// AgentActions returns the latest action audit trail.
+// GET /api/v1/agent/actions
+func (h *Handlers) AgentActions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	pg := parsePagination(r)
+	const query = `
+		SELECT id, entity_type, entity_id, event_type, actor_type, actor_id, payload, occurred_at
+		FROM audit_events
+		WHERE entity_type = 'action'
+		ORDER BY occurred_at DESC
+		LIMIT $1 OFFSET $2`
+	rows, err := h.db.Query(r.Context(), query, pg.PerPage, pg.Offset)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+	defer rows.Close()
+
+	var auditRows []models.AuditEvent
+	for rows.Next() {
+		var ae models.AuditEvent
+		if err := rows.Scan(&ae.ID, &ae.EntityType, &ae.EntityID, &ae.EventType,
+			&ae.ActorType, &ae.ActorID, &ae.Payload, &ae.OccurredAt); err != nil {
+			continue
+		}
+		auditRows = append(auditRows, ae)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"actions": auditRows,
+	})
+}
+
+// RunActions triggers a single action engine cycle.
+// POST /api/v1/agent/run-actions
+func (h *Handlers) RunActions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actionEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "action engine not configured")
+		return
+	}
+
+	report, err := h.actionEngine.RunCycle(r.Context())
+	if err != nil {
+		h.logger.Error("action engine cycle failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "action cycle failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
 }
 
 // --- Helpers ---
