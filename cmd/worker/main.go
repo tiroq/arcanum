@@ -14,6 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/agent/core"
+	"github.com/tiroq/arcanum/internal/agent/eventstore"
+	agentmemory "github.com/tiroq/arcanum/internal/agent/memory"
+	agentstate "github.com/tiroq/arcanum/internal/agent/state"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/db"
@@ -98,8 +102,15 @@ func run() error {
 		return fmt.Errorf("create publisher: %w", err)
 	}
 
-	auditor := audit.NewPostgresAuditRecorder(pool)
-	queue := jobs.NewQueue(pool, logger).WithAudit(auditor)
+	baseAuditor := audit.NewPostgresAuditRecorder(pool)
+	agentCore := core.New(
+		baseAuditor,
+		eventstore.New(pool),
+		agentstate.New(pool),
+		agentmemory.New(pool),
+		logger,
+	)
+	queue := jobs.NewQueue(pool, logger).WithAudit(agentCore)
 	templateLoader := prompts.NewTemplateLoader("prompts")
 
 	// --- Provider setup with execution profiles ---
@@ -210,7 +221,7 @@ func run() error {
 	execProvider := execution.NewExecutingProviderWithRegistry(ollamaBase, rawProviders, profiles, m, logger)
 
 	providerReg := providers.NewProviderRegistry()
-	providerReg.Register("ollama", providers.NewAuditedProvider(execProvider, auditor, logger))
+	providerReg.Register("ollama", providers.NewAuditedProvider(execProvider, agentCore, logger))
 	logger.Info("registered ollama provider with execution profiles")
 
 	// --- Processor registry ---
@@ -235,7 +246,7 @@ func run() error {
 		workerID = fmt.Sprintf("worker-%d", os.Getpid())
 	}
 
-	w := worker.New(queue, procRegistry, publisher, pool, auditor, m, logger, workerID)
+	w := worker.New(queue, procRegistry, publisher, pool, agentCore, m, logger, workerID)
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()

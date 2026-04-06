@@ -14,6 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/tiroq/arcanum/internal/agent/core"
+	"github.com/tiroq/arcanum/internal/agent/eventstore"
+	agentmemory "github.com/tiroq/arcanum/internal/agent/memory"
+	agentstate "github.com/tiroq/arcanum/internal/agent/state"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/control"
@@ -68,7 +72,14 @@ func run() error {
 	defer pool.Close()
 	logger.Info("database connected")
 
-	auditor := audit.NewPostgresAuditRecorder(pool)
+	baseAuditor := audit.NewPostgresAuditRecorder(pool)
+	agentCore := core.New(
+		baseAuditor,
+		eventstore.New(pool),
+		agentstate.New(pool),
+		agentmemory.New(pool),
+		logger,
+	)
 
 	nc, err := natsgo.Connect(cfg.NATS.URL,
 		natsgo.Name(serviceName),
@@ -93,7 +104,7 @@ func run() error {
 	}
 	logger.Info("jetstream streams configured")
 
-	queue := jobs.NewQueue(pool, logger).WithAudit(auditor)
+	queue := jobs.NewQueue(pool, logger).WithAudit(agentCore)
 
 	publisher, err := messaging.NewPublisher(nc, logger)
 	if err != nil {
@@ -108,7 +119,7 @@ func run() error {
 	procRegistry := processors.NewRegistry()
 
 	orch := orchestrator.New(queue, publisher, subscriber, procRegistry, pool, m, logger)
-	ctrlLoop := control.New(queue, publisher, auditor, m, logger)
+	ctrlLoop := control.New(queue, publisher, agentCore, m, logger)
 
 	orchCtx, orchCancel := context.WithCancel(context.Background())
 	defer orchCancel()

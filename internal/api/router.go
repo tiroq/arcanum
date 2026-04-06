@@ -53,5 +53,8 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	// Metrics summary
 	mux.Handle("/api/v1/metrics/summary", chain(handlers.MetricsSummary))
 
+	// Agent timeline
+	mux.Handle("/api/v1/agent/timeline/", chain(handlers.AgentTimeline))
+
 	return requestIDMiddleware(mux)
 }

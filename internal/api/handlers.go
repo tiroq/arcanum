@@ -586,6 +586,120 @@ func (h *Handlers) countByStatus(ctx context.Context, status string) int64 {
 	return count
 }
 
+// --- Agent Timeline ---
+
+// AgentTimeline returns the full event journal and derived episodic memories
+// for a given correlation_id (= job_id).
+// GET /api/v1/agent/timeline/{id}
+func (h *Handlers) AgentTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/timeline/")
+	idStr = strings.TrimSuffix(idStr, "/")
+	correlationID, err := uuid.Parse(idStr)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid correlation_id")
+		return
+	}
+
+	type agentEventRow struct {
+		EventID       uuid.UUID       `json:"event_id"`
+		EventType     string          `json:"event_type"`
+		Source        string          `json:"source"`
+		Timestamp     time.Time       `json:"timestamp"`
+		CorrelationID *uuid.UUID      `json:"correlation_id,omitempty"`
+		CausationID   *uuid.UUID      `json:"causation_id,omitempty"`
+		Priority      int             `json:"priority"`
+		Confidence    float64         `json:"confidence"`
+		Payload       json.RawMessage `json:"payload"`
+		Tags          []string        `json:"tags"`
+	}
+
+	const eventsQ = `
+		SELECT event_id, event_type, source, timestamp,
+		       correlation_id, causation_id, priority, confidence, payload, tags
+		FROM agent_events
+		WHERE correlation_id = $1
+		ORDER BY timestamp ASC`
+
+	eRows, err := h.db.Query(r.Context(), eventsQ, correlationID)
+	if err != nil {
+		h.logger.Error("query agent events", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "failed to query events")
+		return
+	}
+	defer eRows.Close()
+
+	evts := make([]agentEventRow, 0)
+	for eRows.Next() {
+		var e agentEventRow
+		if err := eRows.Scan(
+			&e.EventID, &e.EventType, &e.Source, &e.Timestamp,
+			&e.CorrelationID, &e.CausationID,
+			&e.Priority, &e.Confidence, &e.Payload, &e.Tags,
+		); err != nil {
+			h.logger.Error("scan agent event", zap.Error(err))
+			writeError(w, r, http.StatusInternalServerError, "scan failed")
+			return
+		}
+		evts = append(evts, e)
+	}
+	if err := eRows.Err(); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "events rows error")
+		return
+	}
+
+	type memRow struct {
+		ID            uuid.UUID  `json:"id"`
+		EventID       uuid.UUID  `json:"event_id"`
+		CorrelationID *uuid.UUID `json:"correlation_id,omitempty"`
+		Summary       string     `json:"summary"`
+		Salience      float64    `json:"salience"`
+		CreatedAt     time.Time  `json:"created_at"`
+	}
+
+	const memQ = `
+		SELECT id, event_id, correlation_id, summary, salience, created_at
+		FROM agent_memory_episodic
+		WHERE correlation_id = $1
+		ORDER BY salience DESC, created_at ASC`
+
+	mRows, err := h.db.Query(r.Context(), memQ, correlationID)
+	if err != nil {
+		h.logger.Error("query agent memories", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "failed to query memory")
+		return
+	}
+	defer mRows.Close()
+
+	memories := make([]memRow, 0)
+	for mRows.Next() {
+		var m memRow
+		if err := mRows.Scan(
+			&m.ID, &m.EventID, &m.CorrelationID,
+			&m.Summary, &m.Salience, &m.CreatedAt,
+		); err != nil {
+			h.logger.Error("scan memory row", zap.Error(err))
+			writeError(w, r, http.StatusInternalServerError, "scan failed")
+			return
+		}
+		memories = append(memories, m)
+	}
+	if err := mRows.Err(); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "memory rows error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"correlation_id": correlationID,
+		"events":         evts,
+		"memory":         memories,
+	})
+}
+
 // --- Helpers ---
 
 func parseIDFromPath(r *http.Request, prefix string) (uuid.UUID, bool) {
