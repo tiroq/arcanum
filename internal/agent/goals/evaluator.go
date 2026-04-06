@@ -62,10 +62,10 @@ func evalFailureRate(snap SystemSnapshot, now time.Time, goals []Goal) []Goal {
 			rate*100, thresholdFailureRate*100,
 		),
 		Evidence: map[string]any{
-			"failure_rate":      rate,
-			"threshold":         thresholdFailureRate,
-			"failed_recent":     snap.FailedJobsRecent,
-			"total_recent":      snap.TotalJobsRecent,
+			"failure_rate":  rate,
+			"threshold":     thresholdFailureRate,
+			"failed_recent": snap.FailedJobsRecent,
+			"total_recent":  snap.TotalJobsRecent,
 		},
 		CreatedAt: now,
 	})
@@ -115,7 +115,7 @@ func evalAcceptanceRate(snap SystemSnapshot, now time.Time, goals []Goal) []Goal
 		),
 		Evidence: map[string]any{
 			"acceptance_rate":    rate,
-			"threshold":         thresholdLowAcceptance,
+			"threshold":          thresholdLowAcceptance,
 			"accepted_proposals": snap.AcceptedProposals,
 			"rejected_proposals": snap.RejectedProposals,
 			"total_proposals":    snap.TotalProposals,
