@@ -12,15 +12,22 @@ import (
 	"github.com/tiroq/arcanum/internal/audit"
 )
 
+// OutcomeHandler is called after each executed action to evaluate and persist
+// the real-world outcome. Implemented by the outcome verification layer.
+type OutcomeHandler interface {
+	HandleOutcome(ctx context.Context, action Action, result ActionResult) error
+}
+
 // Engine is the top-level action engine. It ties together the planner,
 // guardrails, and executor into a single RunCycle operation.
 type Engine struct {
-	goalEngine *goals.GoalEngine
-	planner    *Planner
-	guardrails *Guardrails
-	executor   *Executor
-	auditor    audit.AuditRecorder
-	logger     *zap.Logger
+	goalEngine     *goals.GoalEngine
+	planner        *Planner
+	guardrails     *Guardrails
+	executor       *Executor
+	auditor        audit.AuditRecorder
+	outcomeHandler OutcomeHandler
+	logger         *zap.Logger
 }
 
 // NewEngine creates an Engine.
@@ -40,6 +47,13 @@ func NewEngine(
 		auditor:    auditor,
 		logger:     logger,
 	}
+}
+
+// WithOutcomeVerification attaches an OutcomeHandler to the engine.
+// When set, every executed action will be evaluated for real-world impact.
+func (e *Engine) WithOutcomeVerification(handler OutcomeHandler) *Engine {
+	e.outcomeHandler = handler
+	return e
 }
 
 // RunCycle performs one complete action cycle:
@@ -122,6 +136,9 @@ func (e *Engine) RunCycle(ctx context.Context) (*CycleReport, error) {
 		case StatusExecuted:
 			e.auditAction(ctx, a, "action.executed", "", "")
 			report.Executed = append(report.Executed, result)
+
+			// 5. Evaluate outcome (non-invasive, best-effort).
+			e.evaluateOutcome(ctx, a, result)
 		case StatusFailed:
 			e.auditAction(ctx, a, "action.failed", "", result.Error)
 			report.Failed = append(report.Failed, result)
@@ -137,6 +154,21 @@ func (e *Engine) RunCycle(ctx context.Context) (*CycleReport, error) {
 	)
 
 	return report, nil
+}
+
+// evaluateOutcome runs the outcome handler and audits the result.
+// This is a best-effort, non-invasive post-execution step.
+func (e *Engine) evaluateOutcome(ctx context.Context, a Action, result ActionResult) {
+	if e.outcomeHandler == nil {
+		return
+	}
+
+	if err := e.outcomeHandler.HandleOutcome(ctx, a, result); err != nil {
+		e.logger.Warn("outcome_evaluation_failed",
+			zap.String("action_id", a.ID),
+			zap.Error(err),
+		)
+	}
 }
 
 // auditAction records an audit event for an action lifecycle step.
