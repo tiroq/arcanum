@@ -63,5 +63,8 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/actions", chain(handlers.AgentActions))
 	mux.Handle("/api/v1/agent/run-actions", chain(handlers.RunActions))
 
+	// Agent outcomes (read-only verification layer)
+	mux.Handle("/api/v1/agent/outcomes", chain(handlers.AgentOutcomes))
+
 	return requestIDMiddleware(mux)
 }

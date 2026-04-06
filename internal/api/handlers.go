@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/goals"
+	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -29,6 +30,7 @@ type Handlers struct {
 	metrics      *metrics.Metrics
 	goalEngine   *goals.GoalEngine
 	actionEngine *actions.Engine
+	outcomeStore *outcome.Store
 	logger       *zap.Logger
 }
 
@@ -46,6 +48,12 @@ func (h *Handlers) WithGoalEngine(ge *goals.GoalEngine) *Handlers {
 // WithActionEngine attaches an optional ActionEngine to the handlers.
 func (h *Handlers) WithActionEngine(ae *actions.Engine) *Handlers {
 	h.actionEngine = ae
+	return h
+}
+
+// WithOutcomeStore attaches an optional outcome store to the handlers.
+func (h *Handlers) WithOutcomeStore(os *outcome.Store) *Handlers {
+	h.outcomeStore = os
 	return h
 }
 
@@ -800,6 +808,45 @@ func (h *Handlers) RunActions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, report)
+}
+
+// AgentOutcomes returns stored action outcome evaluations.
+// GET /api/v1/agent/outcomes?action_id=...&target_id=...
+func (h *Handlers) AgentOutcomes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.outcomeStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "outcome store not configured")
+		return
+	}
+
+	pg := parsePagination(r)
+	f := outcome.ListFilter{
+		Limit:  pg.PerPage,
+		Offset: pg.Offset,
+	}
+
+	if raw := r.URL.Query().Get("action_id"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			f.ActionID = &id
+		}
+	}
+	if raw := r.URL.Query().Get("target_id"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			f.TargetID = &id
+		}
+	}
+
+	outcomes, err := h.outcomeStore.List(r.Context(), f)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"outcomes": outcomes,
+	})
 }
 
 // --- Helpers ---
