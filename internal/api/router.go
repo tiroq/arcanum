@@ -103,5 +103,9 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/causal/evaluate", chain(handlers.CausalEvaluate))
 	mux.Handle("/api/v1/agent/causal/", chain(handlers.CausalBySubject))
 
+	// Agent exploration (bounded exploration vs exploitation)
+	mux.Handle("/api/v1/agent/exploration/status", chain(handlers.ExplorationStatus))
+	mux.Handle("/api/v1/agent/exploration/history", chain(handlers.ExplorationHistory))
+
 	return requestIDMiddleware(mux)
 }

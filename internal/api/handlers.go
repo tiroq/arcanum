@@ -16,6 +16,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/causal"
+	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
@@ -48,6 +49,7 @@ type Handlers struct {
 	stabilityEngine   *stability.Engine
 	policyEngine      *policy.Engine
 	causalEngine      *causal.Engine
+	explorationEngine *exploration.Engine
 	logger            *zap.Logger
 }
 
@@ -121,6 +123,12 @@ func (h *Handlers) WithPolicyEngine(pe *policy.Engine) *Handlers {
 // WithCausalEngine attaches the causal reasoning engine.
 func (h *Handlers) WithCausalEngine(ce *causal.Engine) *Handlers {
 	h.causalEngine = ce
+	return h
+}
+
+// WithExplorationEngine attaches the exploration engine.
+func (h *Handlers) WithExplorationEngine(ee *exploration.Engine) *Handlers {
+	h.explorationEngine = ee
 	return h
 }
 
@@ -1653,6 +1661,88 @@ func (h *Handlers) CausalBySubject(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"attributions": attributions,
+	})
+}
+
+// --- Agent Exploration ---
+
+// ExplorationStatus returns the current exploration budget and last decision.
+func (h *Handlers) ExplorationStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.explorationEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "exploration engine not configured")
+		return
+	}
+
+	result := map[string]any{
+		"enabled": true,
+	}
+
+	lastDecision := h.explorationEngine.LastDecision()
+	if lastDecision != nil {
+		result["last_decision"] = lastDecision
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ExplorationHistory returns recent exploration events from the audit trail.
+func (h *Handlers) ExplorationHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	p := parsePagination(r)
+
+	rows, err := h.db.Query(r.Context(), `
+		SELECT id, entity_type, entity_id, event_type, actor_type, actor_id,
+		       payload, occurred_at
+		FROM audit_events
+		WHERE entity_type = 'exploration'
+		ORDER BY occurred_at DESC
+		LIMIT $1 OFFSET $2
+	`, p.PerPage, p.Offset)
+	if err != nil {
+		h.logger.Error("exploration_history_query_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+	defer rows.Close()
+
+	var events []map[string]any
+	for rows.Next() {
+		var (
+			id, entityID                              uuid.UUID
+			entityType, eventType, actorType, actorID string
+			payload                                   json.RawMessage
+			occurredAt                                time.Time
+		)
+		if err := rows.Scan(&id, &entityType, &entityID, &eventType,
+			&actorType, &actorID, &payload, &occurredAt); err != nil {
+			continue
+		}
+		events = append(events, map[string]any{
+			"id":          id,
+			"entity_type": entityType,
+			"entity_id":   entityID,
+			"event_type":  eventType,
+			"actor_type":  actorType,
+			"actor_id":    actorID,
+			"payload":     json.RawMessage(payload),
+			"occurred_at": occurredAt,
+		})
+	}
+	if events == nil {
+		events = []map[string]any{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events": events,
+		"page":   p.Page,
 	})
 }
 
