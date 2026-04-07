@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -84,6 +85,7 @@ func (e *Engine) RunCycle(ctx context.Context) (*CycleResult, error) {
 		ActionMemory:       memories,
 		CurrentValues:      currentValues,
 		StabilityMode:      stabilityMode,
+		Now:                time.Now().UTC(),
 	}
 	proposals := GenerateProposals(input)
 

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
@@ -13,6 +14,7 @@ type ProposalInput struct {
 	ActionMemory       []actionmemory.ActionMemoryRecord
 	CurrentValues      map[PolicyParam]float64
 	StabilityMode      string // "normal", "throttled", "safe_mode"
+	Now                time.Time
 }
 
 // GenerateProposals produces deterministic policy change proposals from
@@ -88,11 +90,22 @@ func rulePlannerIgnoresFeedback(input ProposalInput) []PolicyChange {
 // Rule 3 — Effective Action Pattern
 // IF any action has success_rate >= 70% AND >= 5 samples
 // THEN slightly increase feedbackPreferBoost by +0.03
+// Confidence is scaled by evidence quality (recency × sample weight).
 func ruleEffectivePattern(input ProposalInput) []PolicyChange {
 	effectiveCount := 0
+	var bestConfidence float64
 	for _, m := range input.ActionMemory {
 		if m.TotalRuns >= 5 && m.SuccessRate >= 0.70 {
 			effectiveCount++
+			if !input.Now.IsZero() {
+				ec := actionmemory.EvidenceConfidence(
+					actionmemory.RecencyWeight(m.LastUpdated, input.Now),
+					actionmemory.SampleWeight(m.TotalRuns),
+				)
+				if ec > bestConfidence {
+					bestConfidence = ec
+				}
+			}
 		}
 	}
 	if effectiveCount == 0 {
@@ -103,14 +116,19 @@ func ruleEffectivePattern(input ProposalInput) []PolicyChange {
 	delta := 0.03
 	newVal := current + delta
 
+	proposalConf := 0.75
+	if bestConfidence > 0 {
+		proposalConf *= bestConfidence
+	}
+
 	return []PolicyChange{{
 		Parameter:  ParamFeedbackPreferBoost,
 		OldValue:   current,
 		NewValue:   newVal,
 		Delta:      delta,
 		Reason:     fmt.Sprintf("effective_action_pattern: %d actions with success>=70%% — increasing prefer boost", effectiveCount),
-		Evidence:   map[string]any{"effective_actions": effectiveCount},
-		Confidence: 0.75,
+		Evidence:   map[string]any{"effective_actions": effectiveCount, "evidence_confidence": bestConfidence},
+		Confidence: proposalConf,
 	}}
 }
 
@@ -150,12 +168,23 @@ func ruleHighNoopRatio(input ProposalInput) []PolicyChange {
 // Rule 5 — Retry Amplification
 // IF retry_job failure_rate >= 50%
 // THEN reduce highRetryBoost by -0.05
+// Confidence is scaled by evidence quality (recency × sample weight).
 func ruleRetryAmplification(input ProposalInput) []PolicyChange {
 	for _, m := range input.ActionMemory {
 		if m.ActionType == "retry_job" && m.TotalRuns >= 5 && m.FailureRate >= 0.50 {
 			current := currentOrDefault(input.CurrentValues, ParamHighRetryBoost)
 			delta := -0.05
 			newVal := current + delta
+
+			proposalConf := 0.80
+			var ec float64
+			if !input.Now.IsZero() {
+				ec = actionmemory.EvidenceConfidence(
+					actionmemory.RecencyWeight(m.LastUpdated, input.Now),
+					actionmemory.SampleWeight(m.TotalRuns),
+				)
+				proposalConf *= ec
+			}
 
 			return []PolicyChange{{
 				Parameter: ParamHighRetryBoost,
@@ -164,11 +193,12 @@ func ruleRetryAmplification(input ProposalInput) []PolicyChange {
 				Delta:     delta,
 				Reason:    fmt.Sprintf("retry_job failure_rate=%.2f >= 50%% — reducing retry boost", m.FailureRate),
 				Evidence: map[string]any{
-					"action_type":  "retry_job",
-					"total_runs":   m.TotalRuns,
-					"failure_rate": m.FailureRate,
+					"action_type":         "retry_job",
+					"total_runs":          m.TotalRuns,
+					"failure_rate":        m.FailureRate,
+					"evidence_confidence": ec,
 				},
-				Confidence: 0.80,
+				Confidence: proposalConf,
 			}}
 		}
 	}
