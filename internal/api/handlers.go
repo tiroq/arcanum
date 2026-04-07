@@ -1033,6 +1033,80 @@ func (h *Handlers) AgentContextMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// AgentProviderContextMemory returns provider-context action memory with feedback signals.
+// GET /api/v1/agent/action-memory/provider-context
+// Optional query params: provider_name, action_type
+func (h *Handlers) AgentProviderContextMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actionMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "action memory store not configured")
+		return
+	}
+
+	providerName := r.URL.Query().Get("provider_name")
+	actionType := r.URL.Query().Get("action_type")
+
+	records, err := h.actionMemoryStore.ListProviderContextRecords(r.Context(), providerName, actionType)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	type providerContextEntry struct {
+		ActionType     string  `json:"action_type"`
+		GoalType       string  `json:"goal_type"`
+		JobType        string  `json:"job_type"`
+		ProviderName   string  `json:"provider_name"`
+		ModelRole      string  `json:"model_role"`
+		FailureBucket  string  `json:"failure_bucket"`
+		BacklogBucket  string  `json:"backlog_bucket"`
+		TotalRuns      int     `json:"total_runs"`
+		SuccessRuns    int     `json:"success_runs"`
+		FailureRuns    int     `json:"failure_runs"`
+		NeutralRuns    int     `json:"neutral_runs"`
+		SuccessRate    float64 `json:"success_rate"`
+		FailureRate    float64 `json:"failure_rate"`
+		Recommendation string  `json:"recommendation"`
+	}
+
+	entries := make([]providerContextEntry, 0, len(records))
+	for _, rec := range records {
+		amr := actionmemory.ActionMemoryRecord{
+			ActionType:  rec.ActionType,
+			TotalRuns:   rec.TotalRuns,
+			SuccessRuns: rec.SuccessRuns,
+			FailureRuns: rec.FailureRuns,
+			NeutralRuns: rec.NeutralRuns,
+			SuccessRate: rec.SuccessRate,
+			FailureRate: rec.FailureRate,
+		}
+		fb := actionmemory.GenerateFeedback(&amr)
+		entries = append(entries, providerContextEntry{
+			ActionType:     rec.ActionType,
+			GoalType:       rec.GoalType,
+			JobType:        rec.JobType,
+			ProviderName:   rec.ProviderName,
+			ModelRole:      rec.ModelRole,
+			FailureBucket:  rec.FailureBucket,
+			BacklogBucket:  rec.BacklogBucket,
+			TotalRuns:      rec.TotalRuns,
+			SuccessRuns:    rec.SuccessRuns,
+			FailureRuns:    rec.FailureRuns,
+			NeutralRuns:    rec.NeutralRuns,
+			SuccessRate:    rec.SuccessRate,
+			FailureRate:    rec.FailureRate,
+			Recommendation: string(fb.Recommendation),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider_context_memory": entries,
+	})
+}
+
 // AgentPlanningDecisions returns the most recent adaptive planning decisions.
 // GET /api/v1/agent/planning-decisions
 func (h *Handlers) AgentPlanningDecisions(w http.ResponseWriter, r *http.Request) {

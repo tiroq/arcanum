@@ -95,6 +95,9 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 		// Update contextual memory (best-effort).
 		// Context dimensions are embedded in Action.Params by the adaptive planner.
 		h.updateContextualMemory(ctx, action, *o)
+
+		// Update provider-context memory (best-effort).
+		h.updateProviderContextMemory(ctx, action, *o)
 	}
 
 	return nil
@@ -161,6 +164,47 @@ func (h *Handler) updateContextualMemory(ctx context.Context, action actions.Act
 			zap.String("goal_type", goalType),
 			zap.String("failure_bucket", failureBucket),
 			zap.String("backlog_bucket", backlogBucket),
+			zap.String("outcome_status", string(o.OutcomeStatus)),
+		)
+	}
+}
+
+// updateProviderContextMemory extracts provider dimensions from Action.Params
+// and updates the provider-context memory store. Provider dimensions are
+// embedded at planning time. If missing, the update is silently skipped
+// (backward compatible with non-provider-aware actions).
+func (h *Handler) updateProviderContextMemory(ctx context.Context, action actions.Action, o ActionOutcome) {
+	providerName, _ := action.Params["_ctx_provider_name"].(string)
+	if providerName == "" {
+		return // No provider info — skip silently.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	modelRole, _ := action.Params["_ctx_model_role"].(string)
+	failureBucket, _ := action.Params["_ctx_failure_bucket"].(string)
+	backlogBucket, _ := action.Params["_ctx_backlog_bucket"].(string)
+
+	pcInput := actionmemory.ProviderContextOutcomeInput{
+		ActionType:    o.ActionType,
+		GoalType:      goalType,
+		JobType:       "",
+		ProviderName:  providerName,
+		ModelRole:     modelRole,
+		FailureBucket: failureBucket,
+		BacklogBucket: backlogBucket,
+		OutcomeStatus: string(o.OutcomeStatus),
+	}
+	if err := h.memoryStore.UpdateProviderContext(ctx, pcInput); err != nil {
+		h.logger.Warn("provider_context_memory_update_failed",
+			zap.String("action_id", action.ID),
+			zap.String("provider_name", providerName),
+			zap.Error(err),
+		)
+	} else {
+		h.logger.Info("provider_context_memory_updated",
+			zap.String("action_type", o.ActionType),
+			zap.String("provider_name", providerName),
+			zap.String("model_role", modelRole),
 			zap.String("outcome_status", string(o.OutcomeStatus)),
 		)
 	}
