@@ -22,6 +22,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/agent/stability"
+	"github.com/tiroq/arcanum/internal/agent/strategy"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -185,6 +186,13 @@ func run() error {
 	explorationPlannerAdapter := exploration.NewPlannerAdapter(explorationEngine)
 	adaptivePlanner.WithExploration(explorationPlannerAdapter)
 
+	// Strategic planning layer (Iteration 17).
+	strategyStore := strategy.NewStore(pool)
+	strategyStabilityAdapter := stability.NewStrategyStabilityAdapter(stabilityEngine)
+	strategyEngine := strategy.NewEngine(strategyStore, strategyStabilityAdapter, auditor, logger)
+	strategyPlannerAdapter := strategy.NewPlannerAdapter(strategyEngine)
+	adaptivePlanner.WithStrategy(strategyPlannerAdapter)
+
 	handlers := api.NewHandlers(pool, publisher, m, logger).
 		WithGoalEngine(goalEngine).
 		WithActionEngine(actionEngine).
@@ -197,7 +205,8 @@ func run() error {
 		WithStabilityEngine(stabilityEngine).
 		WithPolicyEngine(policyEngine).
 		WithCausalEngine(causalEngine).
-		WithExplorationEngine(explorationEngine)
+		WithExplorationEngine(explorationEngine).
+		WithStrategyEngine(strategyEngine)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
