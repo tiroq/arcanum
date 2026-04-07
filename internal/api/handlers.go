@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/causal"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
@@ -46,6 +47,7 @@ type Handlers struct {
 	schedulerEnabled  bool
 	stabilityEngine   *stability.Engine
 	policyEngine      *policy.Engine
+	causalEngine      *causal.Engine
 	logger            *zap.Logger
 }
 
@@ -113,6 +115,12 @@ func (h *Handlers) WithStabilityEngine(se *stability.Engine) *Handlers {
 // WithPolicyEngine attaches the policy adaptation engine.
 func (h *Handlers) WithPolicyEngine(pe *policy.Engine) *Handlers {
 	h.policyEngine = pe
+	return h
+}
+
+// WithCausalEngine attaches the causal reasoning engine.
+func (h *Handlers) WithCausalEngine(ce *causal.Engine) *Handlers {
+	h.causalEngine = ce
 	return h
 }
 
@@ -1259,6 +1267,82 @@ func (h *Handlers) PolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// --- Causal Reasoning Handlers ---
+
+// CausalAttributions returns recent causal attributions (GET /api/v1/agent/causal).
+func (h *Handlers) CausalAttributions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.causalEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "causal engine not configured")
+		return
+	}
+
+	pg := parsePagination(r)
+	attributions, err := h.causalEngine.ListRecent(r.Context(), pg.PerPage)
+	if err != nil {
+		h.logger.Error("causal_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"attributions": attributions,
+	})
+}
+
+// CausalEvaluate triggers a causal analysis pass (POST /api/v1/agent/causal/evaluate).
+func (h *Handlers) CausalEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.causalEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "causal engine not configured")
+		return
+	}
+
+	result, err := h.causalEngine.RunAnalysis(r.Context())
+	if err != nil {
+		h.logger.Error("causal_evaluate_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "analysis failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// CausalBySubject returns attributions for a specific subject (GET /api/v1/agent/causal/{subject_id}).
+func (h *Handlers) CausalBySubject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.causalEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "causal engine not configured")
+		return
+	}
+
+	subjectID, ok := parseIDFromPath(r, "/api/v1/agent/causal/")
+	if !ok {
+		writeError(w, r, http.StatusBadRequest, "invalid subject_id")
+		return
+	}
+
+	attributions, err := h.causalEngine.ListBySubject(r.Context(), subjectID)
+	if err != nil {
+		h.logger.Error("causal_by_subject_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"attributions": attributions,
+	})
 }
 
 // --- Helpers ---
