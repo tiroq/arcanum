@@ -15,6 +15,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -88,7 +89,7 @@ func run() error {
 	// Action engine wiring.
 	auditor := audit.NewPostgresAuditRecorder(pool)
 	apiBaseURL := fmt.Sprintf("http://localhost:%d", cfg.HTTP.Port)
-	planner := actions.NewPlanner(pool, logger)
+	staticPlanner := actions.NewPlanner(pool, logger)
 	guardrails := actions.NewGuardrails(pool, logger)
 	executor := actions.NewExecutor(apiBaseURL, cfg.Auth.AdminToken, logger)
 
@@ -97,7 +98,11 @@ func run() error {
 	feedbackAdapter := actionmemory.NewFeedbackAdapter(memoryStore)
 	guardrails.WithFeedback(feedbackAdapter)
 
-	actionEngine := actions.NewEngine(goalEngine, planner, guardrails, executor, auditor, logger)
+	// Adaptive planning layer (Iteration 6).
+	contextCollector := planning.NewContextCollector(pool, memoryStore, logger)
+	adaptivePlanner := planning.NewAdaptivePlanner(contextCollector, staticPlanner, auditor, logger)
+
+	actionEngine := actions.NewEngine(goalEngine, adaptivePlanner, guardrails, executor, auditor, logger)
 
 	// Outcome verification layer (Iteration 4).
 	outcomeEval := outcome.NewEvaluator(pool, logger)
@@ -110,7 +115,8 @@ func run() error {
 		WithGoalEngine(goalEngine).
 		WithActionEngine(actionEngine).
 		WithOutcomeStore(outcomeStore).
-		WithActionMemoryStore(memoryStore)
+		WithActionMemoryStore(memoryStore).
+		WithAdaptivePlanner(adaptivePlanner)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
