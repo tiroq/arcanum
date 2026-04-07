@@ -127,35 +127,69 @@ func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedA
 }
 
 // applyFeedbackRulesP adjusts score using provided params.
+// When contextual memory records are available, they are resolved via
+// the fallback chain (exact → partial → global) and blended with global
+// feedback at a maximum 70% contextual weight.
 func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
-	fb, hasFeedback := pctx.RecentActionFeedback[c.ActionType]
-	if !hasFeedback {
+	// Resolve contextual feedback if data exists.
+	var ctxFb *actionmemory.ContextualFeedback
+	if len(pctx.ContextRecords) > 0 {
+		ctxFb = actionmemory.ResolveContextualFeedback(
+			pctx.ContextRecords, c.ActionType, c.GoalType,
+			pctx.FailureBucket, pctx.BacklogBucket,
+		)
+	}
+
+	globalFb, hasGlobal := pctx.RecentActionFeedback[c.ActionType]
+
+	// When contextual data is available, use blended adjustment.
+	if ctxFb != nil {
+		var globalPtr *actionmemory.ActionFeedback
+		if hasGlobal {
+			globalPtr = &globalFb
+		}
+		adj, reason := actionmemory.BlendFeedbackAdjustment(
+			ctxFb, globalPtr, params.FeedbackAvoidPenalty, params.FeedbackPreferBoost,
+		)
+		if adj != 0 {
+			c.Score += adj
+		}
+		if reason != "" {
+			c.Reasoning = append(c.Reasoning, reason)
+		} else {
+			c.Reasoning = append(c.Reasoning, "contextual + global feedback: no bias applied")
+		}
+		return c
+	}
+
+	// Fall back to global-only feedback (original behavior, unchanged).
+	if !hasGlobal {
 		c.Reasoning = append(c.Reasoning, "no historical feedback available")
 		return c
 	}
 
-	switch fb.Recommendation {
+	switch globalFb.Recommendation {
 	case actionmemory.RecommendAvoidAction:
 		c.Score -= params.FeedbackAvoidPenalty
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 			"feedback avoid_action: -%.2f (success=%.2f, failure=%.2f, n=%d)",
-			params.FeedbackAvoidPenalty, fb.SuccessRate, fb.FailureRate, fb.SampleSize,
+			params.FeedbackAvoidPenalty, globalFb.SuccessRate, globalFb.FailureRate, globalFb.SampleSize,
 		))
 	case actionmemory.RecommendPreferAction:
 		c.Score += params.FeedbackPreferBoost
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 			"feedback prefer_action: +%.2f (success=%.2f, failure=%.2f, n=%d)",
-			params.FeedbackPreferBoost, fb.SuccessRate, fb.FailureRate, fb.SampleSize,
+			params.FeedbackPreferBoost, globalFb.SuccessRate, globalFb.FailureRate, globalFb.SampleSize,
 		))
 	case actionmemory.RecommendInsufficientData:
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 			"feedback insufficient_data (n=%d): no bias applied",
-			fb.SampleSize,
+			globalFb.SampleSize,
 		))
 	case actionmemory.RecommendNeutral:
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 			"feedback neutral (success=%.2f, failure=%.2f, n=%d): no bias applied",
-			fb.SuccessRate, fb.FailureRate, fb.SampleSize,
+			globalFb.SuccessRate, globalFb.FailureRate, globalFb.SampleSize,
 		))
 	}
 

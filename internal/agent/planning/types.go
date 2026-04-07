@@ -17,6 +17,14 @@ type PlanningContext struct {
 	AcceptanceRate       float64                                `json:"acceptance_rate"`
 	RecentActionFeedback map[string]actionmemory.ActionFeedback `json:"recent_action_feedback"`
 	Timestamp            time.Time                              `json:"timestamp"`
+
+	// Contextual policy adaptation fields (Iteration 12).
+	// ContextRecords holds all contextual memory records, loaded once per cycle.
+	ContextRecords []actionmemory.ContextMemoryRecord `json:"context_records,omitempty"`
+	// FailureBucket is the deterministic bucket for the current system failure rate.
+	FailureBucket string `json:"failure_bucket,omitempty"`
+	// BacklogBucket is the deterministic bucket for the current queue backlog.
+	BacklogBucket string `json:"backlog_bucket,omitempty"`
 }
 
 // PlannedActionCandidate represents one possible action for a goal,

@@ -47,6 +47,11 @@ func (cc *ContextCollector) Collect(ctx context.Context) (PlanningContext, error
 		return pctx, fmt.Errorf("collect action feedback: %w", err)
 	}
 
+	// Best-effort: contextual feedback loading is non-fatal.
+	if err := cc.loadContextualFeedback(ctx, &pctx); err != nil {
+		cc.logger.Warn("collect_contextual_feedback_failed", zap.Error(err))
+	}
+
 	return pctx, nil
 }
 
@@ -117,6 +122,22 @@ func (cc *ContextCollector) loadActionFeedback(ctx context.Context, pctx *Planni
 		fb := actionmemory.GenerateFeedback(&records[i])
 		pctx.RecentActionFeedback[records[i].ActionType] = fb
 	}
+
+	return nil
+}
+
+// loadContextualFeedback loads all contextual memory records and computes
+// deterministic buckets from the already-loaded system state.
+// Must be called after loadQueueState and loadRates.
+func (cc *ContextCollector) loadContextualFeedback(ctx context.Context, pctx *PlanningContext) error {
+	pctx.FailureBucket = actionmemory.BucketFailureRate(pctx.FailureRate)
+	pctx.BacklogBucket = actionmemory.BucketBacklog(pctx.QueueBacklog)
+
+	records, err := cc.memoryStore.ListContextRecords(ctx)
+	if err != nil {
+		return fmt.Errorf("list context memory: %w", err)
+	}
+	pctx.ContextRecords = records
 
 	return nil
 }

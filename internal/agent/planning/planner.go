@@ -106,7 +106,7 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 			continue
 		}
 
-		resolved := ap.resolveActions(ctx, g, decision)
+		resolved := ap.resolveActions(ctx, g, decision, pctx)
 		allActions = append(allActions, resolved...)
 	}
 
@@ -182,7 +182,9 @@ func (ap *AdaptivePlanner) scoringParams() ScoringParams {
 // resolveActions converts a planning decision into concrete executable Action(s).
 // For action types that need specific targets (retry_job, trigger_resync), it
 // delegates to the TargetResolver to find actual job/task IDs.
-func (ap *AdaptivePlanner) resolveActions(ctx context.Context, g goals.Goal, d PlanningDecision) []actions.Action {
+// Context dimensions from pctx are embedded in Action.Params so the outcome
+// handler can update contextual memory without additional DB queries.
+func (ap *AdaptivePlanner) resolveActions(ctx context.Context, g goals.Goal, d PlanningDecision, pctx PlanningContext) []actions.Action {
 	switch d.SelectedActionType {
 	case "retry_job":
 		if ap.targetResolver != nil {
@@ -191,9 +193,9 @@ func (ap *AdaptivePlanner) resolveActions(ctx context.Context, g goals.Goal, d P
 				ap.logger.Warn("resolve_retry_targets_failed", zap.Error(err))
 			}
 			if len(targets) > 0 {
-				// Annotate description with adaptive planning context.
 				for i := range targets {
 					targets[i].Description = fmt.Sprintf("[adaptive] %s", targets[i].Description)
+					embedContextDimensions(&targets[i], g, pctx)
 				}
 				return targets
 			}
@@ -210,6 +212,7 @@ func (ap *AdaptivePlanner) resolveActions(ctx context.Context, g goals.Goal, d P
 			if len(targets) > 0 {
 				for i := range targets {
 					targets[i].Description = fmt.Sprintf("[adaptive] %s", targets[i].Description)
+					embedContextDimensions(&targets[i], g, pctx)
 				}
 				return targets
 			}
@@ -222,6 +225,17 @@ func (ap *AdaptivePlanner) resolveActions(ctx context.Context, g goals.Goal, d P
 	default:
 		return []actions.Action{ap.makeLogRecommendation(g, d)}
 	}
+}
+
+// embedContextDimensions adds planning context dimensions to an action's
+// Params so the outcome handler can update contextual memory.
+func embedContextDimensions(a *actions.Action, g goals.Goal, pctx PlanningContext) {
+	if a.Params == nil {
+		a.Params = make(map[string]any)
+	}
+	a.Params["_ctx_goal_type"] = g.Type
+	a.Params["_ctx_failure_bucket"] = pctx.FailureBucket
+	a.Params["_ctx_backlog_bucket"] = pctx.BacklogBucket
 }
 
 // makeLogRecommendation creates a log_recommendation action with planning context.

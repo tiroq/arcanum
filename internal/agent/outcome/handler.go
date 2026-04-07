@@ -91,6 +91,10 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 			fb := actionmemory.GenerateFeedback(record)
 			h.auditFeedback(ctx, action, fb)
 		}
+
+		// Update contextual memory (best-effort).
+		// Context dimensions are embedded in Action.Params by the adaptive planner.
+		h.updateContextualMemory(ctx, action, *o)
 	}
 
 	return nil
@@ -121,4 +125,43 @@ func (h *Handler) auditFeedback(ctx context.Context, action actions.Action, fb a
 		zap.Float64("failure_rate", fb.FailureRate),
 		zap.String("recommendation", string(fb.Recommendation)),
 	)
+}
+
+// updateContextualMemory extracts context dimensions from Action.Params
+// and updates the contextual memory store. Dimensions are embedded at
+// planning time by the adaptive planner. If missing, the update is
+// silently skipped (backward compatible with non-adaptive actions).
+func (h *Handler) updateContextualMemory(ctx context.Context, action actions.Action, o ActionOutcome) {
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	failureBucket, _ := action.Params["_ctx_failure_bucket"].(string)
+	backlogBucket, _ := action.Params["_ctx_backlog_bucket"].(string)
+
+	// All three required — skip if any dimension is missing.
+	if goalType == "" || failureBucket == "" || backlogBucket == "" {
+		return
+	}
+
+	ctxInput := actionmemory.ContextOutcomeInput{
+		ActionType:    o.ActionType,
+		GoalType:      goalType,
+		JobType:       "", // not tracked yet
+		FailureBucket: failureBucket,
+		BacklogBucket: backlogBucket,
+		OutcomeStatus: string(o.OutcomeStatus),
+	}
+	if err := h.memoryStore.UpdateContext(ctx, ctxInput); err != nil {
+		h.logger.Warn("contextual_memory_update_failed",
+			zap.String("action_id", action.ID),
+			zap.String("goal_type", goalType),
+			zap.Error(err),
+		)
+	} else {
+		h.logger.Info("contextual_memory_updated",
+			zap.String("action_type", o.ActionType),
+			zap.String("goal_type", goalType),
+			zap.String("failure_bucket", failureBucket),
+			zap.String("backlog_bucket", backlogBucket),
+			zap.String("outcome_status", string(o.OutcomeStatus)),
+		)
+	}
 }
