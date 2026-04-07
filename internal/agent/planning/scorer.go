@@ -127,12 +127,12 @@ func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedA
 }
 
 // applyFeedbackRulesP adjusts score using provided params.
-// Resolution order: weighted evidence-based (when timestamps available) →
+// Resolution order: hierarchical evidence-based (when timestamps available) →
 // categorical fallback (provider-context → contextual → global).
 func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
-	// Weighted path: when timestamp is available and records have temporal data.
+	// Hierarchical path: when timestamp is available and records have temporal data.
 	if !pctx.Timestamp.IsZero() && hasTemporalData(pctx) {
-		candidates := actionmemory.GatherWeightedCandidates(
+		candidates := actionmemory.GatherHierarchicalCandidates(
 			pctx.ProviderContextRecords,
 			pctx.ContextRecords,
 			pctx.RecentActionFeedback,
@@ -142,9 +142,9 @@ func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params 
 			pctx.Timestamp,
 		)
 
-		best, _ := actionmemory.ResolveWeightedFeedback(candidates)
+		best, _ := actionmemory.ResolveHierarchicalFeedback(candidates)
 		if best != nil {
-			adj, reason := actionmemory.WeightedScoreAdjustment(
+			adj, reason := actionmemory.HierarchicalScoreAdjustment(
 				best, params.FeedbackAvoidPenalty, params.FeedbackPreferBoost,
 			)
 			if adj != 0 {
@@ -153,12 +153,12 @@ func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params 
 			if reason != "" {
 				c.Reasoning = append(c.Reasoning, reason)
 			} else {
-				c.Reasoning = append(c.Reasoning, "weighted feedback: no bias applied")
+				c.Reasoning = append(c.Reasoning, "hierarchical feedback: no bias applied")
 			}
 			return c
 		}
 
-		c.Reasoning = append(c.Reasoning, "no actionable weighted feedback available")
+		c.Reasoning = append(c.Reasoning, "no actionable hierarchical feedback available")
 		return c
 	}
 

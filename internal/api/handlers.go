@@ -1194,6 +1194,90 @@ func (h *Handlers) AgentWeightedMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// AgentHierarchicalMemory returns hierarchical feedback analysis across all memory layers.
+// GET /api/v1/agent/action-memory/hierarchical
+// Optional query params: action_type, provider_name
+func (h *Handlers) AgentHierarchicalMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actionMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "action memory store not configured")
+		return
+	}
+
+	filterAction := r.URL.Query().Get("action_type")
+	filterProvider := r.URL.Query().Get("provider_name")
+
+	now := time.Now().UTC()
+
+	globalRecords, err := h.actionMemoryStore.List(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query global memory failed")
+		return
+	}
+	contextRecords, err := h.actionMemoryStore.ListContextRecords(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query context memory failed")
+		return
+	}
+	providerRecords, err := h.actionMemoryStore.ListProviderContextRecords(r.Context(), filterProvider, filterAction)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "query provider-context memory failed")
+		return
+	}
+
+	globalFeedback := make(map[string]actionmemory.ActionFeedback, len(globalRecords))
+	for _, rec := range globalRecords {
+		fb := actionmemory.GenerateFeedback(&rec)
+		globalFeedback[rec.ActionType] = fb
+	}
+
+	actionTypes := make(map[string]bool)
+	for _, r := range globalRecords {
+		actionTypes[r.ActionType] = true
+	}
+	for _, r := range contextRecords {
+		actionTypes[r.ActionType] = true
+	}
+	for _, r := range providerRecords {
+		actionTypes[r.ActionType] = true
+	}
+
+	type hierarchicalEntry struct {
+		ActionType    string                               `json:"action_type"`
+		Best          *actionmemory.HierarchicalCandidate  `json:"best"`
+		AllCandidates []actionmemory.HierarchicalCandidate `json:"all_candidates"`
+	}
+
+	var results []hierarchicalEntry
+	for at := range actionTypes {
+		if filterAction != "" && at != filterAction {
+			continue
+		}
+
+		candidates := actionmemory.GatherHierarchicalCandidates(
+			providerRecords, contextRecords, globalFeedback,
+			at, "",
+			filterProvider, "",
+			"", "",
+			now,
+		)
+		best, all := actionmemory.ResolveHierarchicalFeedback(candidates)
+		results = append(results, hierarchicalEntry{
+			ActionType:    at,
+			Best:          best,
+			AllCandidates: all,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hierarchical_memory": results,
+		"timestamp":           now,
+	})
+}
+
 // AgentPlanningDecisions returns the most recent adaptive planning decisions.
 // GET /api/v1/agent/planning-decisions
 func (h *Handlers) AgentPlanningDecisions(w http.ResponseWriter, r *http.Request) {

@@ -636,7 +636,7 @@ func TestHierarchical_SimilarConfidencePrefersSimpler(t *testing.T) {
 			Level:          HierarchyGeneralized,
 			LevelName:      HierarchyGeneralized.String(),
 			Recommendation: RecommendAvoidAction,
-			Confidence:     0.88, // within 0.05 of 0.90
+			Confidence:     0.88,                        // within 0.05 of 0.90
 			FinalScore:     0.88 + hierBonusGeneralized, // 0.89
 		},
 	}
@@ -664,7 +664,7 @@ func TestHierarchical_LargeConfidenceGapExactWins(t *testing.T) {
 			Level:          HierarchyGeneralized,
 			LevelName:      HierarchyGeneralized.String(),
 			Recommendation: RecommendAvoidAction,
-			Confidence:     0.50, // far from 0.95
+			Confidence:     0.50,                        // far from 0.95
 			FinalScore:     0.50 + hierBonusGeneralized, // 0.51
 		},
 	}

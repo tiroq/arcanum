@@ -34,7 +34,7 @@ func TestScorer_WeightedPath_FreshAvoidFullPenalty(t *testing.T) {
 	// base=0.65, fresh+strong avoid should produce near-full penalty.
 	// Confidence=sqrt(1.0*1.0)=1.0, adj=-0.40*1.0=-0.40.
 	assertFloat(t, "weighted fresh avoid", c.Score, 0.25)
-	assertContains(t, "reasoning", c.Reasoning, "weighted")
+	assertContains(t, "reasoning", c.Reasoning, "hierarchical")
 }
 
 // TestScorer_WeightedPath_StaleAvoidReducedPenalty verifies stale evidence
