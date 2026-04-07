@@ -13,6 +13,7 @@ func Analyze(input AnalysisInput) []CausalAttribution {
 	attributions = append(attributions, analyzePolicyChanges(input)...)
 	attributions = append(attributions, analyzeStabilityIntervention(input)...)
 	attributions = append(attributions, analyzePlannerConditions(input)...)
+	attributions = append(attributions, analyzeProviderDegradation(input)...)
 	return attributions
 }
 
@@ -222,6 +223,105 @@ func analyzePlannerConditions(input AnalysisInput) []CausalAttribution {
 	}
 
 	return []CausalAttribution{a}
+}
+
+// --- Rule 6: Provider-specific degradation ---
+
+// providerDegradationMinSample is the minimum sample count for provider-context
+// records to be considered in causal analysis.
+const providerDegradationMinSample = 5
+
+// providerDegradationFailureThreshold is the failure rate above which a
+// provider is considered degraded.
+const providerDegradationFailureThreshold = 0.50
+
+func analyzeProviderDegradation(input AnalysisInput) []CausalAttribution {
+	if len(input.ProviderContextMemory) == 0 {
+		return nil
+	}
+
+	// Group by action_type to detect provider-specific divergence.
+	type provStats struct {
+		ProviderName string
+		TotalRuns    int
+		FailureRate  float64
+	}
+	byAction := make(map[string][]provStats)
+	for _, pc := range input.ProviderContextMemory {
+		if pc.TotalRuns < providerDegradationMinSample {
+			continue
+		}
+		byAction[pc.ActionType] = append(byAction[pc.ActionType], provStats{
+			ProviderName: pc.ProviderName,
+			TotalRuns:    pc.TotalRuns,
+			FailureRate:  pc.FailureRate,
+		})
+	}
+
+	var out []CausalAttribution
+
+	for actionType, providers := range byAction {
+		if len(providers) < 2 {
+			continue // Need at least 2 providers to detect divergence.
+		}
+
+		// Identify degraded vs healthy providers.
+		var degraded, healthy []provStats
+		for _, p := range providers {
+			if p.FailureRate >= providerDegradationFailureThreshold {
+				degraded = append(degraded, p)
+			} else {
+				healthy = append(healthy, p)
+			}
+		}
+
+		// Only emit attributions when divergence exists.
+		if len(degraded) == 0 || len(healthy) == 0 {
+			continue
+		}
+
+		degradedNames := make([]string, 0, len(degraded))
+		for _, d := range degraded {
+			degradedNames = append(degradedNames, d.ProviderName)
+		}
+		healthyNames := make([]string, 0, len(healthy))
+		for _, h := range healthy {
+			healthyNames = append(healthyNames, h.ProviderName)
+		}
+
+		a := CausalAttribution{
+			SubjectType: SubjectProviderDegradation,
+			SubjectID:   uuid.Nil,
+			Hypothesis: fmt.Sprintf(
+				"%s underperforms with provider(s) %v but not with %v — provider-specific degradation likely",
+				actionType, degradedNames, healthyNames,
+			),
+			Attribution: AttributionExternal,
+			Confidence:  0.70,
+			Evidence: map[string]any{
+				"action_type":        actionType,
+				"degraded_providers": degradedNames,
+				"healthy_providers":  healthyNames,
+				"degraded_failure_rates": func() map[string]float64 {
+					m := make(map[string]float64)
+					for _, d := range degraded {
+						m[d.ProviderName] = d.FailureRate
+					}
+					return m
+				}(),
+			},
+			CompetingExplanations: []string{
+				"global action degradation that coincidentally affects one provider more",
+				"workload pattern shift that routes harder tasks to specific provider",
+				"provider-specific rate limits or model version changes",
+			},
+			CreatedAt: input.Timestamp,
+		}
+
+		out = append(out, a)
+	}
+
+	return out
 }
 
 // --- Helpers ---

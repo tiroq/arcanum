@@ -401,3 +401,106 @@ func TestAnalyze_NonAppliedChangesSkipped(t *testing.T) {
 		}
 	}
 }
+
+// --- Rule 6: Provider degradation detection ---
+
+func TestAnalyze_ProviderDegradation_Divergence(t *testing.T) {
+	input := AnalysisInput{
+		StabilityMode: "normal",
+		ProviderContextMemory: []ProviderContextSummary{
+			{ActionType: "retry_job", ProviderName: "openrouter", TotalRuns: 10, SuccessRate: 0.2, FailureRate: 0.7},
+			{ActionType: "retry_job", ProviderName: "ollama-local", TotalRuns: 10, SuccessRate: 0.8, FailureRate: 0.1},
+		},
+		Timestamp: time.Now(),
+	}
+
+	attributions := Analyze(input)
+
+	found := false
+	for _, a := range attributions {
+		if a.SubjectType == SubjectProviderDegradation && a.Attribution == AttributionExternal {
+			found = true
+			if a.Confidence < 0.60 {
+				t.Errorf("expected high confidence for clear divergence, got %.2f", a.Confidence)
+			}
+			if len(a.CompetingExplanations) == 0 {
+				t.Error("expected competing explanations")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected provider_degradation attribution, got: %+v", attributions)
+	}
+}
+
+func TestAnalyze_ProviderDegradation_NoDivergence(t *testing.T) {
+	input := AnalysisInput{
+		StabilityMode: "normal",
+		ProviderContextMemory: []ProviderContextSummary{
+			// Both providers are healthy — no divergence.
+			{ActionType: "retry_job", ProviderName: "openrouter", TotalRuns: 10, SuccessRate: 0.8, FailureRate: 0.1},
+			{ActionType: "retry_job", ProviderName: "ollama-local", TotalRuns: 10, SuccessRate: 0.7, FailureRate: 0.2},
+		},
+		Timestamp: time.Now(),
+	}
+
+	attributions := Analyze(input)
+
+	for _, a := range attributions {
+		if a.SubjectType == SubjectProviderDegradation {
+			t.Error("should not produce provider_degradation when no divergence")
+		}
+	}
+}
+
+func TestAnalyze_ProviderDegradation_InsufficientSamples(t *testing.T) {
+	input := AnalysisInput{
+		StabilityMode: "normal",
+		ProviderContextMemory: []ProviderContextSummary{
+			{ActionType: "retry_job", ProviderName: "openrouter", TotalRuns: 3, SuccessRate: 0.0, FailureRate: 1.0},
+			{ActionType: "retry_job", ProviderName: "ollama-local", TotalRuns: 10, SuccessRate: 0.8, FailureRate: 0.1},
+		},
+		Timestamp: time.Now(),
+	}
+
+	attributions := Analyze(input)
+
+	for _, a := range attributions {
+		if a.SubjectType == SubjectProviderDegradation {
+			t.Error("should not produce attribution when provider has insufficient samples")
+		}
+	}
+}
+
+func TestAnalyze_ProviderDegradation_SingleProvider(t *testing.T) {
+	input := AnalysisInput{
+		StabilityMode: "normal",
+		ProviderContextMemory: []ProviderContextSummary{
+			{ActionType: "retry_job", ProviderName: "ollama-local", TotalRuns: 10, SuccessRate: 0.1, FailureRate: 0.8},
+		},
+		Timestamp: time.Now(),
+	}
+
+	attributions := Analyze(input)
+
+	for _, a := range attributions {
+		if a.SubjectType == SubjectProviderDegradation {
+			t.Error("should not detect divergence with only one provider")
+		}
+	}
+}
+
+func TestAnalyze_ProviderDegradation_Empty(t *testing.T) {
+	input := AnalysisInput{
+		StabilityMode: "normal",
+		Timestamp:     time.Now(),
+	}
+
+	attributions := Analyze(input)
+
+	for _, a := range attributions {
+		if a.SubjectType == SubjectProviderDegradation {
+			t.Error("should not produce provider attribution with no data")
+		}
+	}
+}

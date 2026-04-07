@@ -185,6 +185,47 @@ func (e *Engine) collectInput(ctx context.Context) (*AnalysisInput, error) {
 		}
 	}
 
+	// Collect provider-context memory for provider-aware causal reasoning.
+	provRecords, err := e.memoryStore.ListProviderContextRecords(ctx, "", "")
+	if err != nil {
+		e.logger.Warn("causal_provider_context_load_failed", zap.Error(err))
+	} else {
+		// Aggregate by action_type + provider_name for causal analysis.
+		type key struct{ action, provider string }
+		agg := make(map[key]*ProviderContextSummary)
+		for _, r := range provRecords {
+			k := key{r.ActionType, r.ProviderName}
+			if s, ok := agg[k]; ok {
+				s.TotalRuns += r.TotalRuns
+				if s.TotalRuns > 0 {
+					s.SuccessRate = float64(s.TotalRuns-int(float64(s.TotalRuns)*r.FailureRate)) / float64(s.TotalRuns)
+					totalFail := int(float64(r.TotalRuns) * r.FailureRate)
+					prevFail := int(float64(s.TotalRuns-r.TotalRuns) * s.FailureRate)
+					s.FailureRate = float64(totalFail+prevFail) / float64(s.TotalRuns)
+				}
+			} else {
+				agg[k] = &ProviderContextSummary{
+					ActionType:   r.ActionType,
+					ProviderName: r.ProviderName,
+					TotalRuns:    r.TotalRuns,
+					SuccessRate:  r.SuccessRate,
+					FailureRate:  r.FailureRate,
+				}
+			}
+		}
+		for _, s := range agg {
+			input.ProviderContextMemory = append(input.ProviderContextMemory, *s)
+		}
+
+		// Detect provider instability: any provider with high failure rate.
+		for _, s := range input.ProviderContextMemory {
+			if s.TotalRuns >= 5 && s.FailureRate >= 0.50 {
+				input.ProviderInstability = true
+				break
+			}
+		}
+	}
+
 	return input, nil
 }
 

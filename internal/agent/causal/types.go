@@ -20,9 +20,10 @@ const (
 type SubjectType string
 
 const (
-	SubjectPolicyChange   SubjectType = "policy_change"
-	SubjectStabilityEvent SubjectType = "stability_event"
-	SubjectPlannerShift   SubjectType = "planner_shift"
+	SubjectPolicyChange        SubjectType = "policy_change"
+	SubjectStabilityEvent      SubjectType = "stability_event"
+	SubjectPlannerShift        SubjectType = "planner_shift"
+	SubjectProviderDegradation SubjectType = "provider_degradation"
 )
 
 // CausalAttribution is a single causal reasoning record.
@@ -56,6 +57,8 @@ type AnalysisInput struct {
 	HighSystemFailure   bool
 	// How many simultaneous changes occurred recently.
 	SimultaneousChanges int
+	// Provider-context memory summaries for provider-specific causal reasoning.
+	ProviderContextMemory []ProviderContextSummary
 	// Timestamp of analysis.
 	Timestamp time.Time
 }
@@ -77,6 +80,16 @@ type ActionMemorySummary struct {
 	TotalRuns   int
 	SuccessRate float64
 	FailureRate float64
+}
+
+// ProviderContextSummary is a simplified view of provider-context memory
+// for causal analysis. Aggregated per action_type + provider_name.
+type ProviderContextSummary struct {
+	ActionType   string
+	ProviderName string
+	TotalRuns    int
+	SuccessRate  float64
+	FailureRate  float64
 }
 
 // AnalysisResult is the output of one causal analysis pass.
