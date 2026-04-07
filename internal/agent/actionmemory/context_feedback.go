@@ -138,3 +138,8 @@ func feedbackAdjustment(rec Recommendation, avoidPenalty, preferBoost float64) f
 		return 0
 	}
 }
+
+// FeedbackAdjustmentValue is the exported version of feedbackAdjustment.
+func FeedbackAdjustmentValue(rec Recommendation, avoidPenalty, preferBoost float64) float64 {
+	return feedbackAdjustment(rec, avoidPenalty, preferBoost)
+}
