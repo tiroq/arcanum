@@ -77,5 +77,12 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/scheduler/stop", chain(handlers.SchedulerStop))
 	mux.Handle("/api/v1/agent/scheduler/status", chain(handlers.SchedulerStatus))
 
+	// Agent reflection (self-analysis, read-only/advisory)
+	mux.Handle("/api/v1/agent/reflect", chain(handlers.TriggerReflection))
+	mux.Handle("/api/v1/agent/reflections", chain(handlers.ListReflections))
+
+	// Agent decision journal (durable planning history)
+	mux.Handle("/api/v1/agent/journal", chain(handlers.ListJournalDecisions))
+
 	return requestIDMiddleware(mux)
 }

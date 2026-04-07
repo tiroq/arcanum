@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
+	"github.com/tiroq/arcanum/internal/agent/reflection"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
@@ -36,6 +37,9 @@ type Handlers struct {
 	outcomeStore      *outcome.Store
 	actionMemoryStore *actionmemory.Store
 	adaptivePlanner   *planning.AdaptivePlanner
+	decisionJournal   *planning.DecisionJournal
+	reflectionEngine  *reflection.Engine
+	reflectionStore   *reflection.Store
 	scheduler         *scheduler.Scheduler
 	schedulerEnabled  bool
 	logger            *zap.Logger
@@ -80,6 +84,19 @@ func (h *Handlers) WithAdaptivePlanner(ap *planning.AdaptivePlanner) *Handlers {
 func (h *Handlers) WithScheduler(s *scheduler.Scheduler, enabled bool) *Handlers {
 	h.scheduler = s
 	h.schedulerEnabled = enabled
+	return h
+}
+
+// WithDecisionJournal attaches an optional decision journal for durable planning history.
+func (h *Handlers) WithDecisionJournal(j *planning.DecisionJournal) *Handlers {
+	h.decisionJournal = j
+	return h
+}
+
+// WithReflectionEngine attaches the reflection engine and its store.
+func (h *Handlers) WithReflectionEngine(e *reflection.Engine, s *reflection.Store) *Handlers {
+	h.reflectionEngine = e
+	h.reflectionStore = s
 	return h
 }
 
@@ -1025,6 +1042,75 @@ func (h *Handlers) SchedulerStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := h.scheduler.GetStatus(h.schedulerEnabled)
 	writeJSON(w, http.StatusOK, status)
+}
+
+// TriggerReflection triggers a reflection cycle (POST /api/v1/agent/reflect).
+func (h *Handlers) TriggerReflection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.reflectionEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "reflection engine not configured")
+		return
+	}
+
+	report, err := h.reflectionEngine.Reflect(r.Context())
+	if err != nil {
+		h.logger.Error("reflection_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "reflection failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+// ListReflections lists recent reflection findings (GET /api/v1/agent/reflections).
+func (h *Handlers) ListReflections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.reflectionStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "reflection store not configured")
+		return
+	}
+
+	pg := parsePagination(r)
+	findings, err := h.reflectionStore.ListRecent(r.Context(), pg.PerPage)
+	if err != nil {
+		h.logger.Error("list_reflections_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"findings": findings,
+	})
+}
+
+// ListJournalDecisions lists durable planning decisions (GET /api/v1/agent/journal).
+func (h *Handlers) ListJournalDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.decisionJournal == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "decision journal not configured")
+		return
+	}
+
+	pg := parsePagination(r)
+	decisions, err := h.decisionJournal.ListRecent(r.Context(), pg.PerPage)
+	if err != nil {
+		h.logger.Error("list_journal_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"decisions": decisions,
+	})
 }
 
 // --- Helpers ---
