@@ -68,6 +68,7 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 
 	// Agent action memory (read-only learning layer)
 	mux.Handle("/api/v1/agent/action-memory", chain(handlers.AgentActionMemory))
+	mux.Handle("/api/v1/agent/action-memory/context", chain(handlers.AgentContextMemory))
 
 	// Agent planning decisions (read-only adaptive planning layer)
 	mux.Handle("/api/v1/agent/planning-decisions", chain(handlers.AgentPlanningDecisions))
