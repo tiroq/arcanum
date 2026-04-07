@@ -22,6 +22,21 @@ type PolicyProvider interface {
 	GetScoringParams(ctx context.Context) ScoringParams
 }
 
+// ExplorationDecision captures an exploration engine's decision.
+// Mirrors exploration.ExplorationDecision to avoid import cycles.
+type ExplorationDecision struct {
+	Chosen           bool   `json:"chosen"`
+	ChosenActionType string `json:"chosen_action_type,omitempty"`
+	DecisionReason   string `json:"decision_reason"`
+}
+
+// ExplorationProvider evaluates whether exploration should override the
+// normal exploitation decision. Returns a decision with Chosen=true and
+// the replacement action type when exploration is warranted.
+type ExplorationProvider interface {
+	EvaluateForPlanner(ctx context.Context, decision PlanningDecision, globalFeedback map[string]actionmemory.ActionFeedback) ExplorationDecision
+}
+
 // AdaptivePlanner replaces static goal→action mapping with context-aware,
 // feedback-informed action selection. It is deterministic: same inputs
 // always produce the same outputs.
@@ -37,6 +52,10 @@ type AdaptivePlanner struct {
 
 	// policy provides dynamic scoring parameters. When nil, defaults are used.
 	policy PolicyProvider
+
+	// exploration provides bounded exploratory override capability.
+	// When nil, exploration is disabled and the system is pure exploitation.
+	exploration ExplorationProvider
 
 	// lastDecisions holds the most recent planning decisions for API visibility.
 	lastDecisions []PlanningDecision
@@ -69,6 +88,12 @@ func (ap *AdaptivePlanner) WithPolicy(p PolicyProvider) *AdaptivePlanner {
 	return ap
 }
 
+// WithExploration attaches an ExplorationProvider for bounded exploration.
+func (ap *AdaptivePlanner) WithExploration(e ExplorationProvider) *AdaptivePlanner {
+	ap.exploration = e
+	return ap
+}
+
 // PlanActions implements the same signature as actions.Planner.PlanActions
 // but uses adaptive scoring instead of a static mapping.
 func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goal) ([]actions.Action, error) {
@@ -87,6 +112,19 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 
 	for _, g := range goalList {
 		decision := ap.planForGoal(g, pctx)
+
+		// --- Exploration override (bounded, optional) ---
+		isExploration := false
+		explorationReason := ""
+		if ap.exploration != nil {
+			ed := ap.exploration.EvaluateForPlanner(ctx, decision, pctx.RecentActionFeedback)
+			if ed.Chosen && ed.ChosenActionType != "" {
+				isExploration = true
+				explorationReason = ed.DecisionReason
+				decision.SelectedActionType = ed.ChosenActionType
+				decision.Explanation += fmt.Sprintf(" [exploration override: %s]", ed.DecisionReason)
+			}
+		}
 
 		// Audit planning events.
 		ap.auditPlanningEvaluated(ctx, decision)
@@ -107,6 +145,16 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 		}
 
 		resolved := ap.resolveActions(ctx, g, decision, pctx)
+		// Tag exploration on resolved actions.
+		if isExploration {
+			for i := range resolved {
+				if resolved[i].Params == nil {
+					resolved[i].Params = make(map[string]any)
+				}
+				resolved[i].Params["_ctx_is_exploration"] = true
+				resolved[i].Params["_ctx_exploration_reason"] = explorationReason
+			}
+		}
 		allActions = append(allActions, resolved...)
 	}
 
