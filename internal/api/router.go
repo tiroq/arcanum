@@ -72,5 +72,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	// Agent planning decisions (read-only adaptive planning layer)
 	mux.Handle("/api/v1/agent/planning-decisions", chain(handlers.AgentPlanningDecisions))
 
+	// Agent scheduler control
+	mux.Handle("/api/v1/agent/scheduler/start", chain(handlers.SchedulerStart))
+	mux.Handle("/api/v1/agent/scheduler/stop", chain(handlers.SchedulerStop))
+	mux.Handle("/api/v1/agent/scheduler/status", chain(handlers.SchedulerStatus))
+
 	return requestIDMiddleware(mux)
 }
