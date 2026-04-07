@@ -52,6 +52,11 @@ func (cc *ContextCollector) Collect(ctx context.Context) (PlanningContext, error
 		cc.logger.Warn("collect_contextual_feedback_failed", zap.Error(err))
 	}
 
+	// Best-effort: provider-context feedback loading is non-fatal.
+	if err := cc.loadProviderContextFeedback(ctx, &pctx); err != nil {
+		cc.logger.Warn("collect_provider_context_feedback_failed", zap.Error(err))
+	}
+
 	return pctx, nil
 }
 
@@ -139,5 +144,16 @@ func (cc *ContextCollector) loadContextualFeedback(ctx context.Context, pctx *Pl
 	}
 	pctx.ContextRecords = records
 
+	return nil
+}
+
+// loadProviderContextFeedback loads all provider-context memory records.
+// Must be called after loadQueueState and loadRates.
+func (cc *ContextCollector) loadProviderContextFeedback(ctx context.Context, pctx *PlanningContext) error {
+	records, err := cc.memoryStore.ListProviderContextRecords(ctx, "", "")
+	if err != nil {
+		return fmt.Errorf("list provider context memory: %w", err)
+	}
+	pctx.ProviderContextRecords = records
 	return nil
 }

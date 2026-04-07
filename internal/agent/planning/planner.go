@@ -236,6 +236,12 @@ func embedContextDimensions(a *actions.Action, g goals.Goal, pctx PlanningContex
 	a.Params["_ctx_goal_type"] = g.Type
 	a.Params["_ctx_failure_bucket"] = pctx.FailureBucket
 	a.Params["_ctx_backlog_bucket"] = pctx.BacklogBucket
+	if pctx.ProviderName != "" {
+		a.Params["_ctx_provider_name"] = pctx.ProviderName
+	}
+	if pctx.ModelRole != "" {
+		a.Params["_ctx_model_role"] = pctx.ModelRole
+	}
 }
 
 // makeLogRecommendation creates a log_recommendation action with planning context.

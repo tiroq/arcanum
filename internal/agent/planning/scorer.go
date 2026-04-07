@@ -127,10 +127,19 @@ func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedA
 }
 
 // applyFeedbackRulesP adjusts score using provided params.
-// When contextual memory records are available, they are resolved via
-// the fallback chain (exact → partial → global) and blended with global
-// feedback at a maximum 70% contextual weight.
+// Resolution order: provider-context → contextual → global (fallback chain).
+// When provider-context data is available, it blends with the next-best signal.
 func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
+	// Resolve provider-context feedback if data exists.
+	var provFb *actionmemory.ContextualFeedback
+	if len(pctx.ProviderContextRecords) > 0 && pctx.ProviderName != "" {
+		provFb = actionmemory.ResolveProviderContextFeedback(
+			pctx.ProviderContextRecords, c.ActionType, c.GoalType,
+			pctx.ProviderName, pctx.ModelRole,
+			pctx.FailureBucket, pctx.BacklogBucket,
+		)
+	}
+
 	// Resolve contextual feedback if data exists.
 	var ctxFb *actionmemory.ContextualFeedback
 	if len(pctx.ContextRecords) > 0 {
@@ -142,6 +151,40 @@ func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params 
 
 	globalFb, hasGlobal := pctx.RecentActionFeedback[c.ActionType]
 
+	// When provider-context data is available, blend with fallback (contextual or global).
+	if provFb != nil {
+		// Compute the fallback adjustment (contextual → global).
+		fallbackAdj := 0.0
+		fallbackReason := ""
+		if ctxFb != nil {
+			var globalPtr *actionmemory.ActionFeedback
+			if hasGlobal {
+				globalPtr = &globalFb
+			}
+			fallbackAdj, fallbackReason = actionmemory.BlendFeedbackAdjustment(
+				ctxFb, globalPtr, params.FeedbackAvoidPenalty, params.FeedbackPreferBoost,
+			)
+		} else if hasGlobal {
+			fallbackAdj = actionmemory.FeedbackAdjustmentValue(globalFb.Recommendation, params.FeedbackAvoidPenalty, params.FeedbackPreferBoost)
+			fallbackReason = fmt.Sprintf("global %s: %.2f", globalFb.Recommendation, fallbackAdj)
+		}
+
+		adj, reason := actionmemory.BlendProviderFeedbackAdjustment(
+			provFb, fallbackAdj, fallbackReason,
+			params.FeedbackAvoidPenalty, params.FeedbackPreferBoost,
+		)
+		if adj != 0 {
+			c.Score += adj
+		}
+		if reason != "" {
+			c.Reasoning = append(c.Reasoning, reason)
+		} else {
+			c.Reasoning = append(c.Reasoning, "provider-context + fallback feedback: no bias applied")
+		}
+		return c
+	}
+
+	// No provider-context: fall back to contextual → global (existing behavior).
 	// When contextual data is available, use blended adjustment.
 	if ctxFb != nil {
 		var globalPtr *actionmemory.ActionFeedback

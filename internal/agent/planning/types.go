@@ -25,6 +25,14 @@ type PlanningContext struct {
 	FailureBucket string `json:"failure_bucket,omitempty"`
 	// BacklogBucket is the deterministic bucket for the current queue backlog.
 	BacklogBucket string `json:"backlog_bucket,omitempty"`
+
+	// Provider-aware reasoning fields (Iteration 13).
+	// ProviderContextRecords holds all provider-context memory records, loaded once per cycle.
+	ProviderContextRecords []actionmemory.ProviderContextMemoryRecord `json:"provider_context_records,omitempty"`
+	// ProviderName is the current provider (if known from job context).
+	ProviderName string `json:"provider_name,omitempty"`
+	// ModelRole is the current model role (if known from job context).
+	ModelRole string `json:"model_role,omitempty"`
 }
 
 // PlannedActionCandidate represents one possible action for a goal,
