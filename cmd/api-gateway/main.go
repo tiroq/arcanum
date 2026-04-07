@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/causal"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
@@ -152,6 +153,17 @@ func run() error {
 		logger,
 	)
 
+	// Causal reasoning layer (Iteration 11).
+	causalStore := causal.NewStore(pool)
+	causalEngine := causal.NewEngine(
+		causalStore,
+		policyStore,
+		memoryStore,
+		stabilityEngine,
+		auditor,
+		logger,
+	)
+
 	// Autonomous scheduler (Iteration 7).
 	agentScheduler := scheduler.New(
 		actionEngine,
@@ -175,7 +187,8 @@ func run() error {
 		WithReflectionEngine(reflectionEngine, reflectionFindingStore).
 		WithScheduler(agentScheduler, cfg.Scheduler.Enabled).
 		WithStabilityEngine(stabilityEngine).
-		WithPolicyEngine(policyEngine)
+		WithPolicyEngine(policyEngine).
+		WithCausalEngine(causalEngine)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
