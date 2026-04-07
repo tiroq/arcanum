@@ -107,5 +107,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/exploration/status", chain(handlers.ExplorationStatus))
 	mux.Handle("/api/v1/agent/exploration/history", chain(handlers.ExplorationHistory))
 
+	// Agent strategy (bounded multi-step planning)
+	mux.Handle("/api/v1/agent/strategy/status", chain(handlers.StrategyStatus))
+	mux.Handle("/api/v1/agent/strategy/history", chain(handlers.StrategyHistory))
+	mux.Handle("/api/v1/agent/strategy/plans", chain(handlers.StrategyPlans))
+
 	return requestIDMiddleware(mux)
 }
