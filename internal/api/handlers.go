@@ -24,6 +24,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/agent/stability"
+	"github.com/tiroq/arcanum/internal/agent/strategy"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -50,6 +51,7 @@ type Handlers struct {
 	policyEngine      *policy.Engine
 	causalEngine      *causal.Engine
 	explorationEngine *exploration.Engine
+	strategyEngine    *strategy.Engine
 	logger            *zap.Logger
 }
 
@@ -129,6 +131,12 @@ func (h *Handlers) WithCausalEngine(ce *causal.Engine) *Handlers {
 // WithExplorationEngine attaches the exploration engine.
 func (h *Handlers) WithExplorationEngine(ee *exploration.Engine) *Handlers {
 	h.explorationEngine = ee
+	return h
+}
+
+// WithStrategyEngine attaches the strategy engine.
+func (h *Handlers) WithStrategyEngine(se *strategy.Engine) *Handlers {
+	h.strategyEngine = se
 	return h
 }
 
@@ -1743,6 +1751,139 @@ func (h *Handlers) ExplorationHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"events": events,
 		"page":   p.Page,
+	})
+}
+
+// --- Strategy handlers ---
+
+// StrategyStatus returns the current strategy engine state and last decision.
+func (h *Handlers) StrategyStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.strategyEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "strategy engine not configured")
+		return
+	}
+
+	result := map[string]any{
+		"enabled": true,
+	}
+
+	lastDecision := h.strategyEngine.LastDecision()
+	if lastDecision != nil {
+		result["last_decision"] = lastDecision
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// StrategyHistory returns recent strategy events from the audit trail.
+func (h *Handlers) StrategyHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	p := parsePagination(r)
+
+	rows, err := h.db.Query(r.Context(), `
+		SELECT id, entity_type, entity_id, event_type, actor_type, actor_id,
+		       payload, occurred_at
+		FROM audit_events
+		WHERE entity_type = 'strategy'
+		ORDER BY occurred_at DESC
+		LIMIT $1 OFFSET $2
+	`, p.PerPage, p.Offset)
+	if err != nil {
+		h.logger.Error("strategy_history_query_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+	defer rows.Close()
+
+	var events []map[string]any
+	for rows.Next() {
+		var (
+			id, entityID                              uuid.UUID
+			entityType, eventType, actorType, actorID string
+			payload                                   json.RawMessage
+			occurredAt                                time.Time
+		)
+		if err := rows.Scan(&id, &entityType, &entityID, &eventType,
+			&actorType, &actorID, &payload, &occurredAt); err != nil {
+			continue
+		}
+		events = append(events, map[string]any{
+			"id":          id,
+			"entity_type": entityType,
+			"entity_id":   entityID,
+			"event_type":  eventType,
+			"actor_type":  actorType,
+			"actor_id":    actorID,
+			"payload":     json.RawMessage(payload),
+			"occurred_at": occurredAt,
+		})
+	}
+	if events == nil {
+		events = []map[string]any{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events": events,
+		"page":   p.Page,
+	})
+}
+
+// StrategyPlans returns persisted strategy plans with optional filtering.
+func (h *Handlers) StrategyPlans(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.strategyEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "strategy engine not configured")
+		return
+	}
+
+	store := h.strategyEngine.GetStore()
+	if store == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "strategy store not configured")
+		return
+	}
+
+	p := parsePagination(r)
+
+	// Filter by goal_id if provided.
+	goalID := r.URL.Query().Get("goal_id")
+	selectedOnly := r.URL.Query().Get("selected") == "true"
+
+	var plans []strategy.StrategyPlan
+	var err error
+
+	switch {
+	case goalID != "":
+		plans, err = store.ListByGoal(r.Context(), goalID)
+	case selectedOnly:
+		plans, err = store.ListSelected(r.Context(), p.PerPage, p.Offset)
+	default:
+		plans, err = store.ListRecent(r.Context(), p.PerPage, p.Offset)
+	}
+
+	if err != nil {
+		h.logger.Error("strategy_plans_query_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if plans == nil {
+		plans = []strategy.StrategyPlan{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plans": plans,
+		"page":  p.Page,
 	})
 }
 
