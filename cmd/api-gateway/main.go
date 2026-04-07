@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -121,6 +122,20 @@ func run() error {
 	reflectionFindingStore := reflection.NewStore(pool)
 	reflectionEngine := reflection.NewEngine(pool, decisionJournal, outcomeStore, memoryStore, reflectionFindingStore, auditor, logger)
 
+	// Self-stability layer (Iteration 9).
+	stabilityStore := stability.NewStore(pool)
+	stabilityEngine := stability.NewEngine(
+		stabilityStore,
+		decisionJournal,
+		outcomeStore,
+		memoryStore,
+		reflectionFindingStore,
+		auditor,
+		logger,
+	)
+	stabilityGuardrailAdapter := stability.NewGuardrailAdapter(stabilityStore)
+	guardrails.WithStability(stabilityGuardrailAdapter)
+
 	// Autonomous scheduler (Iteration 7).
 	agentScheduler := scheduler.New(
 		actionEngine,
@@ -130,6 +145,10 @@ func run() error {
 		logger,
 	)
 
+	// Wire stability into scheduler.
+	schedulerStabilityAdapter := stability.NewSchedulerAdapter(stabilityEngine)
+	agentScheduler.WithStability(schedulerStabilityAdapter)
+
 	handlers := api.NewHandlers(pool, publisher, m, logger).
 		WithGoalEngine(goalEngine).
 		WithActionEngine(actionEngine).
@@ -138,7 +157,8 @@ func run() error {
 		WithAdaptivePlanner(adaptivePlanner).
 		WithDecisionJournal(decisionJournal).
 		WithReflectionEngine(reflectionEngine, reflectionFindingStore).
-		WithScheduler(agentScheduler, cfg.Scheduler.Enabled)
+		WithScheduler(agentScheduler, cfg.Scheduler.Enabled).
+		WithStabilityEngine(stabilityEngine)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
