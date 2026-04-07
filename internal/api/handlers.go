@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
+	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -35,6 +36,8 @@ type Handlers struct {
 	outcomeStore      *outcome.Store
 	actionMemoryStore *actionmemory.Store
 	adaptivePlanner   *planning.AdaptivePlanner
+	scheduler         *scheduler.Scheduler
+	schedulerEnabled  bool
 	logger            *zap.Logger
 }
 
@@ -70,6 +73,13 @@ func (h *Handlers) WithActionMemoryStore(ms *actionmemory.Store) *Handlers {
 // WithAdaptivePlanner attaches an optional adaptive planner for read-only visibility.
 func (h *Handlers) WithAdaptivePlanner(ap *planning.AdaptivePlanner) *Handlers {
 	h.adaptivePlanner = ap
+	return h
+}
+
+// WithScheduler attaches an optional autonomous scheduler.
+func (h *Handlers) WithScheduler(s *scheduler.Scheduler, enabled bool) *Handlers {
+	h.scheduler = s
+	h.schedulerEnabled = enabled
 	return h
 }
 
@@ -973,6 +983,48 @@ func (h *Handlers) AgentPlanningDecisions(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"decisions": entries,
 	})
+}
+
+// SchedulerStart starts the autonomous scheduler.
+func (h *Handlers) SchedulerStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.scheduler == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduler not configured")
+		return
+	}
+	h.scheduler.Start()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+// SchedulerStop stops the autonomous scheduler.
+func (h *Handlers) SchedulerStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.scheduler == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduler not configured")
+		return
+	}
+	h.scheduler.Stop()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+// SchedulerStatus returns the current scheduler state.
+func (h *Handlers) SchedulerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.scheduler == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduler not configured")
+		return
+	}
+	status := h.scheduler.GetStatus(h.schedulerEnabled)
+	writeJSON(w, http.StatusOK, status)
 }
 
 // --- Helpers ---
