@@ -31,12 +31,19 @@ type FeedbackProvider interface {
 	ShouldAvoid(ctx context.Context, actionType string) (bool, string)
 }
 
+// StabilityChecker tells guardrails whether an action type is currently
+// blocked by the stability layer. Implemented by stability.Engine.
+type StabilityChecker interface {
+	IsActionBlocked(ctx context.Context, actionType string) (bool, string)
+}
+
 // Guardrails evaluates whether planned actions are safe to execute.
 // It enforces rate limits, deduplication, and system load checks.
 type Guardrails struct {
-	db       *pgxpool.Pool
-	logger   *zap.Logger
-	feedback FeedbackProvider
+	db        *pgxpool.Pool
+	logger    *zap.Logger
+	feedback  FeedbackProvider
+	stability StabilityChecker
 
 	mu          sync.Mutex
 	recentExecs map[string]time.Time // action key → last execution time
@@ -57,10 +64,23 @@ func (g *Guardrails) WithFeedback(fp FeedbackProvider) *Guardrails {
 	return g
 }
 
+// WithStability attaches a StabilityChecker for stability-layer blocking.
+func (g *Guardrails) WithStability(sc StabilityChecker) *Guardrails {
+	g.stability = sc
+	return g
+}
+
 // EvaluateSafety checks whether an action is safe to execute.
 // Returns (safe bool, reason string).
 func (g *Guardrails) EvaluateSafety(ctx context.Context, action Action) (bool, string) {
-	// 0. Check feedback — reject actions with consistently poor outcomes.
+	// 0a. Check stability layer — reject actions blocked by stability controls.
+	if g.stability != nil && action.Type != string(ActionLogRecommendation) {
+		if blocked, reason := g.stability.IsActionBlocked(ctx, action.Type); blocked {
+			return false, reason
+		}
+	}
+
+	// 0b. Check feedback — reject actions with consistently poor outcomes.
 	if g.feedback != nil && action.Type != string(ActionLogRecommendation) {
 		if avoid, reason := g.feedback.ShouldAvoid(ctx, action.Type); avoid {
 			return false, reason

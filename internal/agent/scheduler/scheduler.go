@@ -19,14 +19,25 @@ type CycleRunner interface {
 	RunCycle(ctx context.Context) (*actions.CycleReport, error)
 }
 
+// StabilityProvider lets the scheduler consult and update stability state.
+type StabilityProvider interface {
+	// GetThrottleMultiplier returns the current interval multiplier (1.0 = no change).
+	GetThrottleMultiplier(ctx context.Context) float64
+	// RecordCycleResult informs the stability engine about cycle success/failure.
+	RecordCycleResult(err error)
+	// RunEvaluation triggers a stability evaluation pass after each cycle.
+	RunEvaluation(ctx context.Context)
+}
+
 // Scheduler runs the action engine periodically with single-flight protection,
 // bounded timeouts, and full audit visibility. At most one cycle runs at a time.
 type Scheduler struct {
-	runner   CycleRunner
-	interval time.Duration
-	timeout  time.Duration
-	logger   *zap.Logger
-	auditor  audit.AuditRecorder
+	runner    CycleRunner
+	interval  time.Duration
+	timeout   time.Duration
+	logger    *zap.Logger
+	auditor   audit.AuditRecorder
+	stability StabilityProvider
 
 	mu      sync.Mutex
 	running bool
@@ -53,6 +64,12 @@ func New(
 		auditor:  auditor,
 		logger:   logger,
 	}
+}
+
+// WithStability attaches a StabilityProvider for throttle and evaluation integration.
+func (s *Scheduler) WithStability(sp StabilityProvider) *Scheduler {
+	s.stability = sp
+	return s
 }
 
 // Status holds the observable state of the scheduler for the API layer.
@@ -130,10 +147,12 @@ func (s *Scheduler) GetStatus(enabled bool) Status {
 
 // loop is the main ticker goroutine. It dispatches cycle attempts without
 // blocking on execution, so it can detect and audit skipped ticks.
+// When a StabilityProvider is attached, the interval is dynamically scaled
+// by the throttle multiplier.
 func (s *Scheduler) loop() {
 	defer s.wg.Done()
 
-	ticker := time.NewTicker(s.interval)
+	ticker := time.NewTicker(s.effectiveInterval())
 	defer ticker.Stop()
 
 	for {
@@ -142,8 +161,23 @@ func (s *Scheduler) loop() {
 			return
 		case <-ticker.C:
 			s.tryRunCycle()
+			// Re-adjust interval after each tick (throttle may have changed).
+			ticker.Reset(s.effectiveInterval())
 		}
 	}
+}
+
+// effectiveInterval returns the base interval scaled by the stability
+// throttle multiplier, if a StabilityProvider is attached.
+func (s *Scheduler) effectiveInterval() time.Duration {
+	if s.stability == nil {
+		return s.interval
+	}
+	multiplier := s.stability.GetThrottleMultiplier(context.Background())
+	if multiplier < 1.0 {
+		multiplier = 1.0
+	}
+	return time.Duration(float64(s.interval) * multiplier)
 }
 
 // tryRunCycle attempts to start one cycle. If a cycle is already running,
@@ -227,6 +261,8 @@ func (s *Scheduler) executeCycle() {
 			zap.Duration("duration", duration),
 			zap.Error(cycleErr),
 		)
+		// Report failure to stability layer and run evaluation.
+		s.recordAndEvaluateStability(cycleErr)
 		return
 	}
 
@@ -245,6 +281,19 @@ func (s *Scheduler) executeCycle() {
 		zap.String("cycle_id", cycleID),
 		zap.Duration("duration", duration),
 	)
+
+	// Report success to stability layer and run evaluation.
+	s.recordAndEvaluateStability(nil)
+}
+
+// recordAndEvaluateStability reports the cycle result and triggers a stability
+// evaluation pass. No-op when no StabilityProvider is attached.
+func (s *Scheduler) recordAndEvaluateStability(cycleErr error) {
+	if s.stability == nil {
+		return
+	}
+	s.stability.RecordCycleResult(cycleErr)
+	s.stability.RunEvaluation(context.Background())
 }
 
 // auditEvent records an audit event for a scheduler lifecycle step.
