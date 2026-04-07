@@ -14,6 +14,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/causal"
+	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
@@ -177,6 +178,13 @@ func run() error {
 	schedulerStabilityAdapter := stability.NewSchedulerAdapter(stabilityEngine)
 	agentScheduler.WithStability(schedulerStabilityAdapter)
 
+	// Exploration vs exploitation layer (Iteration 16).
+	explorationBudgetStore := exploration.NewBudgetStore(pool)
+	explorationStabilityAdapter := stability.NewExplorationStabilityAdapter(stabilityEngine)
+	explorationEngine := exploration.NewEngine(explorationBudgetStore, explorationStabilityAdapter, auditor, logger)
+	explorationPlannerAdapter := exploration.NewPlannerAdapter(explorationEngine)
+	adaptivePlanner.WithExploration(explorationPlannerAdapter)
+
 	handlers := api.NewHandlers(pool, publisher, m, logger).
 		WithGoalEngine(goalEngine).
 		WithActionEngine(actionEngine).
@@ -188,7 +196,8 @@ func run() error {
 		WithScheduler(agentScheduler, cfg.Scheduler.Enabled).
 		WithStabilityEngine(stabilityEngine).
 		WithPolicyEngine(policyEngine).
-		WithCausalEngine(causalEngine)
+		WithCausalEngine(causalEngine).
+		WithExplorationEngine(explorationEngine)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
