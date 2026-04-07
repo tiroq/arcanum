@@ -37,6 +37,22 @@ type ExplorationProvider interface {
 	EvaluateForPlanner(ctx context.Context, decision PlanningDecision, globalFeedback map[string]actionmemory.ActionFeedback) ExplorationDecision
 }
 
+// StrategyOverride captures a strategy engine's override decision.
+// Mirrors strategy.StrategyDecision to avoid import cycles.
+type StrategyOverride struct {
+	Applied      bool   `json:"applied"`
+	ActionType   string `json:"action_type,omitempty"`
+	StrategyID   string `json:"strategy_id,omitempty"`
+	StrategyType string `json:"strategy_type,omitempty"`
+	Reason       string `json:"reason"`
+}
+
+// StrategyProvider evaluates bounded multi-step strategies and may override
+// the tactical action selection with the first step of a selected strategy.
+type StrategyProvider interface {
+	EvaluateForPlanner(ctx context.Context, decision PlanningDecision, globalFeedback map[string]actionmemory.ActionFeedback) StrategyOverride
+}
+
 // AdaptivePlanner replaces static goal→action mapping with context-aware,
 // feedback-informed action selection. It is deterministic: same inputs
 // always produce the same outputs.
@@ -56,6 +72,10 @@ type AdaptivePlanner struct {
 	// exploration provides bounded exploratory override capability.
 	// When nil, exploration is disabled and the system is pure exploitation.
 	exploration ExplorationProvider
+
+	// strategy provides bounded multi-step strategy evaluation.
+	// When nil, strategic planning is disabled and the system uses tactical only.
+	strategy StrategyProvider
 
 	// lastDecisions holds the most recent planning decisions for API visibility.
 	lastDecisions []PlanningDecision
@@ -94,6 +114,12 @@ func (ap *AdaptivePlanner) WithExploration(e ExplorationProvider) *AdaptivePlann
 	return ap
 }
 
+// WithStrategy attaches a StrategyProvider for bounded multi-step planning.
+func (ap *AdaptivePlanner) WithStrategy(s StrategyProvider) *AdaptivePlanner {
+	ap.strategy = s
+	return ap
+}
+
 // PlanActions implements the same signature as actions.Planner.PlanActions
 // but uses adaptive scoring instead of a static mapping.
 func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goal) ([]actions.Action, error) {
@@ -112,6 +138,18 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 
 	for _, g := range goalList {
 		decision := ap.planForGoal(g, pctx)
+
+		// --- Strategy override (bounded, optional) ---
+		// Strategy evaluates before exploration: it enhances tactical
+		// with multi-step reasoning. Exploration can still override strategy.
+		var strategyOverride StrategyOverride
+		if ap.strategy != nil {
+			strategyOverride = ap.strategy.EvaluateForPlanner(ctx, decision, pctx.RecentActionFeedback)
+			if strategyOverride.Applied && strategyOverride.ActionType != "" {
+				decision.SelectedActionType = strategyOverride.ActionType
+				decision.Explanation += fmt.Sprintf(" [strategy override: %s strategy=%s]", strategyOverride.Reason, strategyOverride.StrategyType)
+			}
+		}
 
 		// --- Exploration override (bounded, optional) ---
 		isExploration := false
@@ -153,6 +191,17 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 				}
 				resolved[i].Params["_ctx_is_exploration"] = true
 				resolved[i].Params["_ctx_exploration_reason"] = explorationReason
+			}
+		}
+		// Tag strategy context on resolved actions.
+		if strategyOverride.Applied {
+			for i := range resolved {
+				if resolved[i].Params == nil {
+					resolved[i].Params = make(map[string]any)
+				}
+				resolved[i].Params["_ctx_strategy_id"] = strategyOverride.StrategyID
+				resolved[i].Params["_ctx_strategy_type"] = strategyOverride.StrategyType
+				resolved[i].Params["_ctx_strategy_step"] = 1
 			}
 		}
 		allActions = append(allActions, resolved...)
