@@ -17,6 +17,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -33,6 +34,7 @@ type Handlers struct {
 	actionEngine      *actions.Engine
 	outcomeStore      *outcome.Store
 	actionMemoryStore *actionmemory.Store
+	adaptivePlanner   *planning.AdaptivePlanner
 	logger            *zap.Logger
 }
 
@@ -62,6 +64,12 @@ func (h *Handlers) WithOutcomeStore(os *outcome.Store) *Handlers {
 // WithActionMemoryStore attaches an optional action memory store to the handlers.
 func (h *Handlers) WithActionMemoryStore(ms *actionmemory.Store) *Handlers {
 	h.actionMemoryStore = ms
+	return h
+}
+
+// WithAdaptivePlanner attaches an optional adaptive planner for read-only visibility.
+func (h *Handlers) WithAdaptivePlanner(ap *planning.AdaptivePlanner) *Handlers {
+	h.adaptivePlanner = ap
 	return h
 }
 
@@ -905,6 +913,65 @@ func (h *Handlers) AgentActionMemory(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"memory": entries,
+	})
+}
+
+// AgentPlanningDecisions returns the most recent adaptive planning decisions.
+// GET /api/v1/agent/planning-decisions
+func (h *Handlers) AgentPlanningDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.adaptivePlanner == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "adaptive planner not configured")
+		return
+	}
+
+	decisions := h.adaptivePlanner.LastDecisions()
+
+	type candidateEntry struct {
+		ActionType   string   `json:"action_type"`
+		Score        float64  `json:"score"`
+		Confidence   float64  `json:"confidence"`
+		Reasoning    []string `json:"reasoning"`
+		Rejected     bool     `json:"rejected"`
+		RejectReason string   `json:"reject_reason,omitempty"`
+	}
+	type decisionEntry struct {
+		GoalID             string           `json:"goal_id"`
+		GoalType           string           `json:"goal_type"`
+		SelectedActionType string           `json:"selected_action_type"`
+		Explanation        string           `json:"explanation"`
+		PlannedAt          string           `json:"planned_at"`
+		Candidates         []candidateEntry `json:"candidates"`
+	}
+
+	entries := make([]decisionEntry, 0, len(decisions))
+	for _, d := range decisions {
+		candidates := make([]candidateEntry, 0, len(d.Candidates))
+		for _, c := range d.Candidates {
+			candidates = append(candidates, candidateEntry{
+				ActionType:   c.ActionType,
+				Score:        c.Score,
+				Confidence:   c.Confidence,
+				Reasoning:    c.Reasoning,
+				Rejected:     c.Rejected,
+				RejectReason: c.RejectReason,
+			})
+		}
+		entries = append(entries, decisionEntry{
+			GoalID:             d.GoalID,
+			GoalType:           d.GoalType,
+			SelectedActionType: d.SelectedActionType,
+			Explanation:        d.Explanation,
+			PlannedAt:          d.PlannedAt.Format(time.RFC3339),
+			Candidates:         candidates,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"decisions": entries,
 	})
 }
 
