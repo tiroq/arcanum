@@ -1,6 +1,11 @@
 package actions
 
-import "time"
+import (
+	"context"
+	"time"
+
+	"github.com/tiroq/arcanum/internal/agent/goals"
+)
 
 // ActionType enumerates the kinds of actions the engine can produce.
 type ActionType string
@@ -51,4 +56,12 @@ type CycleReport struct {
 	Executed  []ActionResult `json:"executed"`
 	Failed    []ActionResult `json:"failed"`
 	Timestamp time.Time      `json:"timestamp"`
+}
+
+// TargetResolver finds concrete targets for action types that need specific
+// parameters (e.g., retry_job needs job IDs, trigger_resync needs task IDs).
+// Implemented by the static Planner.
+type TargetResolver interface {
+	FindRetryTargets(ctx context.Context, g goals.Goal) ([]Action, error)
+	FindResyncTargets(ctx context.Context, g goals.Goal) ([]Action, error)
 }

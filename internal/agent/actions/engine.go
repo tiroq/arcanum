@@ -18,11 +18,17 @@ type OutcomeHandler interface {
 	HandleOutcome(ctx context.Context, action Action, result ActionResult) error
 }
 
+// ActionPlanner converts goals into concrete actions. Implemented by both
+// the static Planner and the adaptive planning layer.
+type ActionPlanner interface {
+	PlanActions(ctx context.Context, goals []goals.Goal) ([]Action, error)
+}
+
 // Engine is the top-level action engine. It ties together the planner,
 // guardrails, and executor into a single RunCycle operation.
 type Engine struct {
 	goalEngine     *goals.GoalEngine
-	planner        *Planner
+	planner        ActionPlanner
 	guardrails     *Guardrails
 	executor       *Executor
 	auditor        audit.AuditRecorder
@@ -33,7 +39,7 @@ type Engine struct {
 // NewEngine creates an Engine.
 func NewEngine(
 	goalEngine *goals.GoalEngine,
-	planner *Planner,
+	planner ActionPlanner,
 	guardrails *Guardrails,
 	executor *Executor,
 	auditor audit.AuditRecorder,

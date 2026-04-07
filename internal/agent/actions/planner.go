@@ -149,3 +149,15 @@ func (p *Planner) logRecommendation(g goals.Goal) Action {
 		CreatedAt: time.Now().UTC(),
 	}
 }
+
+// FindRetryTargets returns concrete retry_job actions for retryable jobs.
+// Exported for use by the adaptive planning layer.
+func (p *Planner) FindRetryTargets(ctx context.Context, g goals.Goal) ([]Action, error) {
+	return p.planRetryActions(ctx, g)
+}
+
+// FindResyncTargets returns concrete trigger_resync actions for eligible source tasks.
+// Exported for use by the adaptive planning layer.
+func (p *Planner) FindResyncTargets(ctx context.Context, g goals.Goal) ([]Action, error) {
+	return p.planResyncActions(ctx, g)
+}
