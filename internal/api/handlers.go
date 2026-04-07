@@ -1162,8 +1162,8 @@ func (h *Handlers) AgentWeightedMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type weightedEntry struct {
-		ActionType    string                         `json:"action_type"`
-		Best          *actionmemory.WeightedFeedback `json:"best"`
+		ActionType    string                          `json:"action_type"`
+		Best          *actionmemory.WeightedFeedback  `json:"best"`
 		AllCandidates []actionmemory.WeightedFeedback `json:"all_candidates"`
 	}
 
