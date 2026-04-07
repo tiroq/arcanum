@@ -1,5 +1,7 @@
 package actionmemory
 
+import "time"
+
 // Feedback thresholds.
 const (
 	minSampleSize          = 5
@@ -24,6 +26,7 @@ type ActionFeedback struct {
 	FailureRate    float64        `json:"failure_rate"`
 	SampleSize     int            `json:"sample_size"`
 	Recommendation Recommendation `json:"recommendation"`
+	LastUpdated    time.Time      `json:"last_updated"`
 }
 
 // GenerateFeedback produces a deterministic feedback signal from a memory record.
@@ -40,6 +43,7 @@ func GenerateFeedback(record *ActionMemoryRecord) ActionFeedback {
 		SuccessRate: record.SuccessRate,
 		FailureRate: record.FailureRate,
 		SampleSize:  record.TotalRuns,
+		LastUpdated: record.LastUpdated,
 	}
 
 	switch {
