@@ -2,8 +2,11 @@ package causal
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 )
 
 // Analyze runs all deterministic causal rules against the input and returns
@@ -222,6 +225,26 @@ func analyzePlannerConditions(input AnalysisInput) []CausalAttribution {
 		"scheduler timing issues",
 	}
 
+	// Annotate evidence with recency quality if available.
+	if !input.Timestamp.IsZero() {
+		var staleCount int
+		for _, m := range input.ActionMemory {
+			if m.LastUpdated.IsZero() {
+				continue
+			}
+			rw := actionmemory.RecencyWeight(m.LastUpdated, input.Timestamp)
+			if rw <= 0.60 {
+				staleCount++
+			}
+		}
+		if staleCount > 0 {
+			a.Evidence["stale_memory_records"] = staleCount
+			a.CompetingExplanations = append(a.CompetingExplanations,
+				fmt.Sprintf("action memory degradation evidence is stale (%d records with low recency)", staleCount),
+			)
+		}
+	}
+
 	return []CausalAttribution{a}
 }
 
@@ -245,6 +268,7 @@ func analyzeProviderDegradation(input AnalysisInput) []CausalAttribution {
 		ProviderName string
 		TotalRuns    int
 		FailureRate  float64
+		LastUpdated  time.Time
 	}
 	byAction := make(map[string][]provStats)
 	for _, pc := range input.ProviderContextMemory {
@@ -255,6 +279,7 @@ func analyzeProviderDegradation(input AnalysisInput) []CausalAttribution {
 			ProviderName: pc.ProviderName,
 			TotalRuns:    pc.TotalRuns,
 			FailureRate:  pc.FailureRate,
+			LastUpdated:  pc.LastUpdated,
 		})
 	}
 
@@ -289,6 +314,43 @@ func analyzeProviderDegradation(input AnalysisInput) []CausalAttribution {
 			healthyNames = append(healthyNames, h.ProviderName)
 		}
 
+		// Compute evidence quality for providers driving this attribution.
+		// Only scale confidence when records have actual temporal data (non-zero LastUpdated).
+		var bestConfidence float64
+		var hasStaleEvidence bool
+		var hasTemporalData bool
+		if !input.Timestamp.IsZero() {
+			for _, d := range degraded {
+				if d.LastUpdated.IsZero() {
+					continue
+				}
+				hasTemporalData = true
+				rw := actionmemory.RecencyWeight(d.LastUpdated, input.Timestamp)
+				sw := actionmemory.SampleWeight(d.TotalRuns)
+				ec := actionmemory.EvidenceConfidence(rw, sw)
+				if ec > bestConfidence {
+					bestConfidence = ec
+				}
+				if rw <= 0.60 {
+					hasStaleEvidence = true
+				}
+			}
+		}
+
+		confidence := 0.70
+		if hasTemporalData && bestConfidence > 0 {
+			confidence *= bestConfidence
+		}
+
+		competing := []string{
+			"global action degradation that coincidentally affects one provider more",
+			"workload pattern shift that routes harder tasks to specific provider",
+			"provider-specific rate limits or model version changes",
+		}
+		if hasStaleEvidence {
+			competing = append(competing, "provider degradation evidence is stale — condition may have resolved")
+		}
+
 		a := CausalAttribution{
 			SubjectType: SubjectProviderDegradation,
 			SubjectID:   uuid.Nil,
@@ -297,11 +359,12 @@ func analyzeProviderDegradation(input AnalysisInput) []CausalAttribution {
 				actionType, degradedNames, healthyNames,
 			),
 			Attribution: AttributionExternal,
-			Confidence:  0.70,
+			Confidence:  confidence,
 			Evidence: map[string]any{
-				"action_type":        actionType,
-				"degraded_providers": degradedNames,
-				"healthy_providers":  healthyNames,
+				"action_type":         actionType,
+				"degraded_providers":  degradedNames,
+				"healthy_providers":   healthyNames,
+				"evidence_confidence": bestConfidence,
 				"degraded_failure_rates": func() map[string]float64 {
 					m := make(map[string]float64)
 					for _, d := range degraded {
@@ -310,12 +373,8 @@ func analyzeProviderDegradation(input AnalysisInput) []CausalAttribution {
 					return m
 				}(),
 			},
-			CompetingExplanations: []string{
-				"global action degradation that coincidentally affects one provider more",
-				"workload pattern shift that routes harder tasks to specific provider",
-				"provider-specific rate limits or model version changes",
-			},
-			CreatedAt: input.Timestamp,
+			CompetingExplanations: competing,
+			CreatedAt:             input.Timestamp,
 		}
 
 		out = append(out, a)

@@ -144,6 +144,7 @@ func (e *Engine) collectInput(ctx context.Context) (*AnalysisInput, error) {
 			TotalRuns:   m.TotalRuns,
 			SuccessRate: m.SuccessRate,
 			FailureRate: m.FailureRate,
+			LastUpdated: m.LastUpdated,
 		})
 	}
 
@@ -203,6 +204,9 @@ func (e *Engine) collectInput(ctx context.Context) (*AnalysisInput, error) {
 					prevFail := int(float64(s.TotalRuns-r.TotalRuns) * s.FailureRate)
 					s.FailureRate = float64(totalFail+prevFail) / float64(s.TotalRuns)
 				}
+				if r.LastUpdated.After(s.LastUpdated) {
+					s.LastUpdated = r.LastUpdated
+				}
 			} else {
 				agg[k] = &ProviderContextSummary{
 					ActionType:   r.ActionType,
@@ -210,6 +214,7 @@ func (e *Engine) collectInput(ctx context.Context) (*AnalysisInput, error) {
 					TotalRuns:    r.TotalRuns,
 					SuccessRate:  r.SuccessRate,
 					FailureRate:  r.FailureRate,
+					LastUpdated:  r.LastUpdated,
 				}
 			}
 		}

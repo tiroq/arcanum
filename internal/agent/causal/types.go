@@ -80,6 +80,7 @@ type ActionMemorySummary struct {
 	TotalRuns   int
 	SuccessRate float64
 	FailureRate float64
+	LastUpdated time.Time
 }
 
 // ProviderContextSummary is a simplified view of provider-context memory
@@ -90,6 +91,7 @@ type ProviderContextSummary struct {
 	TotalRuns    int
 	SuccessRate  float64
 	FailureRate  float64
+	LastUpdated  time.Time
 }
 
 // AnalysisResult is the output of one causal analysis pass.
