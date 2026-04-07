@@ -89,5 +89,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/stability/reset", chain(handlers.StabilityReset))
 	mux.Handle("/api/v1/agent/stability/evaluate", chain(handlers.StabilityEvaluate))
 
+	// Agent policy adaptation
+	mux.Handle("/api/v1/agent/policy", chain(handlers.PolicyState))
+	mux.Handle("/api/v1/agent/policy/changes", chain(handlers.PolicyChanges))
+	mux.Handle("/api/v1/agent/policy/evaluate", chain(handlers.PolicyEvaluate))
+
 	return requestIDMiddleware(mux)
 }

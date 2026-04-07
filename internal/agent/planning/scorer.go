@@ -58,10 +58,39 @@ const (
 	acceptanceRateLowThreshold = 0.40
 )
 
+// ScoringParams holds all tunable scoring parameters.
+// When populated from the policy store, the planner uses dynamic values.
+type ScoringParams struct {
+	FeedbackAvoidPenalty     float64
+	FeedbackPreferBoost      float64
+	HighBacklogResyncPenalty float64
+	HighRetryBoost           float64
+	SafetyPreferenceBoost    float64
+	NoopBasePenalty          float64
+}
+
+// DefaultScoringParams returns ScoringParams from the hardcoded defaults.
+func DefaultScoringParams() ScoringParams {
+	return ScoringParams{
+		FeedbackAvoidPenalty:     feedbackAvoidPenalty,
+		FeedbackPreferBoost:      feedbackPreferBoost,
+		HighBacklogResyncPenalty: highBacklogResyncPenalty,
+		HighRetryBoost:           highRetryBoost,
+		SafetyPreferenceBoost:    safetyPreferenceBoost,
+		NoopBasePenalty:          noopBasePenalty,
+	}
+}
+
 // ScoreCandidate computes the score for a single action candidate given
-// the goal context and planning context. The function is pure and deterministic.
+// the goal context and planning context. Uses default constant values.
 // It returns the updated candidate with Score, Confidence, and Reasoning populated.
 func ScoreCandidate(candidate PlannedActionCandidate, goalPriority, goalConfidence float64, pctx PlanningContext) PlannedActionCandidate {
+	return ScoreCandidateWithParams(candidate, goalPriority, goalConfidence, pctx, DefaultScoringParams())
+}
+
+// ScoreCandidateWithParams computes score using the provided ScoringParams.
+// This is the primary scoring function; ScoreCandidate is a convenience wrapper.
+func ScoreCandidateWithParams(candidate PlannedActionCandidate, goalPriority, goalConfidence float64, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
 	c := candidate
 	c.Reasoning = nil
 
@@ -72,28 +101,33 @@ func ScoreCandidate(candidate PlannedActionCandidate, goalPriority, goalConfiden
 
 	// noop always gets a penalty so it only wins when everything else is worse.
 	if c.ActionType == "noop" {
-		c.Score -= noopBasePenalty
-		c.Reasoning = append(c.Reasoning, fmt.Sprintf("noop penalty: -%.2f", noopBasePenalty))
+		c.Score -= params.NoopBasePenalty
+		c.Reasoning = append(c.Reasoning, fmt.Sprintf("noop penalty: -%.2f", params.NoopBasePenalty))
 		return c
 	}
 
 	// --- Historical feedback adjustments ---
-	c = applyFeedbackRules(c, pctx)
+	c = applyFeedbackRulesP(c, pctx, params)
 
 	// --- System context adjustments ---
-	c = applyContextRules(c, pctx)
+	c = applyContextRulesP(c, pctx, params)
 
 	// --- Safety preference ---
 	if c.ActionType == "log_recommendation" {
-		c.Score += safetyPreferenceBoost
-		c.Reasoning = append(c.Reasoning, fmt.Sprintf("safety preference (advisory): +%.2f", safetyPreferenceBoost))
+		c.Score += params.SafetyPreferenceBoost
+		c.Reasoning = append(c.Reasoning, fmt.Sprintf("safety preference (advisory): +%.2f", params.SafetyPreferenceBoost))
 	}
 
 	return c
 }
 
-// applyFeedbackRules adjusts score based on historical action feedback.
+// applyFeedbackRules adjusts score based on historical action feedback (uses defaults).
 func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedActionCandidate {
+	return applyFeedbackRulesP(c, pctx, DefaultScoringParams())
+}
+
+// applyFeedbackRulesP adjusts score using provided params.
+func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
 	fb, hasFeedback := pctx.RecentActionFeedback[c.ActionType]
 	if !hasFeedback {
 		c.Reasoning = append(c.Reasoning, "no historical feedback available")
@@ -102,16 +136,16 @@ func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedA
 
 	switch fb.Recommendation {
 	case actionmemory.RecommendAvoidAction:
-		c.Score -= feedbackAvoidPenalty
+		c.Score -= params.FeedbackAvoidPenalty
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 			"feedback avoid_action: -%.2f (success=%.2f, failure=%.2f, n=%d)",
-			feedbackAvoidPenalty, fb.SuccessRate, fb.FailureRate, fb.SampleSize,
+			params.FeedbackAvoidPenalty, fb.SuccessRate, fb.FailureRate, fb.SampleSize,
 		))
 	case actionmemory.RecommendPreferAction:
-		c.Score += feedbackPreferBoost
+		c.Score += params.FeedbackPreferBoost
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 			"feedback prefer_action: +%.2f (success=%.2f, failure=%.2f, n=%d)",
-			feedbackPreferBoost, fb.SuccessRate, fb.FailureRate, fb.SampleSize,
+			params.FeedbackPreferBoost, fb.SuccessRate, fb.FailureRate, fb.SampleSize,
 		))
 	case actionmemory.RecommendInsufficientData:
 		c.Reasoning = append(c.Reasoning, fmt.Sprintf(
@@ -128,15 +162,20 @@ func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedA
 	return c
 }
 
-// applyContextRules adjusts score based on current system conditions.
+// applyContextRules adjusts score based on current system conditions (uses defaults).
 func applyContextRules(c PlannedActionCandidate, pctx PlanningContext) PlannedActionCandidate {
+	return applyContextRulesP(c, pctx, DefaultScoringParams())
+}
+
+// applyContextRulesP adjusts score using provided params.
+func applyContextRulesP(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
 	// High queue backlog penalties.
 	if pctx.QueueBacklog > queueBacklogHighThreshold {
 		if c.ActionType == "trigger_resync" {
-			c.Score -= highBacklogResyncPenalty
+			c.Score -= params.HighBacklogResyncPenalty
 			c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 				"high backlog (%d > %d): trigger_resync penalty -%.2f",
-				pctx.QueueBacklog, queueBacklogHighThreshold, highBacklogResyncPenalty,
+				pctx.QueueBacklog, queueBacklogHighThreshold, params.HighBacklogResyncPenalty,
 			))
 		}
 		if c.ActionType == "retry_job" {
@@ -152,10 +191,10 @@ func applyContextRules(c PlannedActionCandidate, pctx PlanningContext) PlannedAc
 	if pctx.RetryScheduledCount > retryScheduledHighThreshold && c.ActionType == "retry_job" {
 		fb, hasFb := pctx.RecentActionFeedback[c.ActionType]
 		if !hasFb || fb.Recommendation != actionmemory.RecommendAvoidAction {
-			c.Score += highRetryBoost
+			c.Score += params.HighRetryBoost
 			c.Reasoning = append(c.Reasoning, fmt.Sprintf(
 				"high retry_scheduled (%d > %d) with healthy feedback: retry_job boost +%.2f",
-				pctx.RetryScheduledCount, retryScheduledHighThreshold, highRetryBoost,
+				pctx.RetryScheduledCount, retryScheduledHighThreshold, params.HighRetryBoost,
 			))
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
+	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/agent/stability"
@@ -44,6 +45,7 @@ type Handlers struct {
 	scheduler         *scheduler.Scheduler
 	schedulerEnabled  bool
 	stabilityEngine   *stability.Engine
+	policyEngine      *policy.Engine
 	logger            *zap.Logger
 }
 
@@ -105,6 +107,12 @@ func (h *Handlers) WithReflectionEngine(e *reflection.Engine, s *reflection.Stor
 // WithStabilityEngine attaches the self-stability engine.
 func (h *Handlers) WithStabilityEngine(se *stability.Engine) *Handlers {
 	h.stabilityEngine = se
+	return h
+}
+
+// WithPolicyEngine attaches the policy adaptation engine.
+func (h *Handlers) WithPolicyEngine(pe *policy.Engine) *Handlers {
+	h.policyEngine = pe
 	return h
 }
 
@@ -1185,6 +1193,72 @@ func (h *Handlers) StabilityEvaluate(w http.ResponseWriter, r *http.Request) {
 		"state":     st,
 		"detection": result,
 	})
+}
+
+// PolicyState returns the current active policy values (GET /api/v1/agent/policy).
+func (h *Handlers) PolicyState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.policyEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "policy engine not configured")
+		return
+	}
+
+	st, err := h.policyEngine.GetState(r.Context())
+	if err != nil {
+		h.logger.Error("policy_state_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// PolicyChanges returns the policy change history (GET /api/v1/agent/policy/changes).
+func (h *Handlers) PolicyChanges(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.policyEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "policy engine not configured")
+		return
+	}
+
+	pg := parsePagination(r)
+	changes, err := h.policyEngine.ListChanges(r.Context(), pg.PerPage)
+	if err != nil {
+		h.logger.Error("policy_changes_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"changes": changes,
+	})
+}
+
+// PolicyEvaluate triggers evaluation of past policy changes (POST /api/v1/agent/policy/evaluate).
+func (h *Handlers) PolicyEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.policyEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "policy engine not configured")
+		return
+	}
+
+	result, err := h.policyEngine.EvaluateChanges(r.Context())
+	if err != nil {
+		h.logger.Error("policy_evaluate_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "evaluate failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 // --- Helpers ---

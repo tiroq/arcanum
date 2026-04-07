@@ -16,6 +16,12 @@ import (
 	"github.com/tiroq/arcanum/internal/audit"
 )
 
+// PolicyProvider supplies dynamic scoring parameters.
+// Implemented by the policy package to avoid import cycles.
+type PolicyProvider interface {
+	GetScoringParams(ctx context.Context) ScoringParams
+}
+
 // AdaptivePlanner replaces static goal→action mapping with context-aware,
 // feedback-informed action selection. It is deterministic: same inputs
 // always produce the same outputs.
@@ -28,6 +34,9 @@ type AdaptivePlanner struct {
 	// journal is an optional durable store for planning decisions.
 	// When non-nil, decisions are persisted after each planning cycle.
 	journal *DecisionJournal
+
+	// policy provides dynamic scoring parameters. When nil, defaults are used.
+	policy PolicyProvider
 
 	// lastDecisions holds the most recent planning decisions for API visibility.
 	lastDecisions []PlanningDecision
@@ -51,6 +60,12 @@ func (ap *AdaptivePlanner) LastDecisions() []PlanningDecision {
 // WithJournal attaches a DecisionJournal for durable persistence.
 func (ap *AdaptivePlanner) WithJournal(j *DecisionJournal) *AdaptivePlanner {
 	ap.journal = j
+	return ap
+}
+
+// WithPolicy attaches a PolicyProvider for dynamic scoring parameters.
+func (ap *AdaptivePlanner) WithPolicy(p PolicyProvider) *AdaptivePlanner {
+	ap.policy = p
 	return ap
 }
 
@@ -114,12 +129,13 @@ func (ap *AdaptivePlanner) planForGoal(g goals.Goal, pctx PlanningContext) Plann
 	now := time.Now().UTC()
 
 	var candidates []PlannedActionCandidate
+	params := ap.scoringParams()
 	for _, at := range candidateTypes {
 		raw := PlannedActionCandidate{
 			ActionType: at,
 			GoalType:   g.Type,
 		}
-		scored := ScoreCandidate(raw, g.Priority, g.Confidence, pctx)
+		scored := ScoreCandidateWithParams(raw, g.Priority, g.Confidence, pctx, params)
 		candidates = append(candidates, scored)
 	}
 
@@ -152,6 +168,15 @@ func (ap *AdaptivePlanner) planForGoal(g goals.Goal, pctx PlanningContext) Plann
 		Explanation:        explanation,
 		PlannedAt:          now,
 	}
+}
+
+// scoringParams returns dynamic ScoringParams from the policy provider (if set)
+// or the hardcoded defaults.
+func (ap *AdaptivePlanner) scoringParams() ScoringParams {
+	if ap.policy != nil {
+		return ap.policy.GetScoringParams(context.Background())
+	}
+	return DefaultScoringParams()
 }
 
 // resolveActions converts a planning decision into concrete executable Action(s).
