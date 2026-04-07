@@ -25,6 +25,10 @@ type AdaptivePlanner struct {
 	auditor        audit.AuditRecorder
 	logger         *zap.Logger
 
+	// journal is an optional durable store for planning decisions.
+	// When non-nil, decisions are persisted after each planning cycle.
+	journal *DecisionJournal
+
 	// lastDecisions holds the most recent planning decisions for API visibility.
 	lastDecisions []PlanningDecision
 }
@@ -42,6 +46,12 @@ func NewAdaptivePlanner(collector *ContextCollector, targetResolver actions.Targ
 // LastDecisions returns the most recent set of planning decisions.
 func (ap *AdaptivePlanner) LastDecisions() []PlanningDecision {
 	return ap.lastDecisions
+}
+
+// WithJournal attaches a DecisionJournal for durable persistence.
+func (ap *AdaptivePlanner) WithJournal(j *DecisionJournal) *AdaptivePlanner {
+	ap.journal = j
+	return ap
 }
 
 // PlanActions implements the same signature as actions.Planner.PlanActions
@@ -86,6 +96,15 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 	}
 
 	ap.lastDecisions = decisions
+
+	// Best-effort persist to durable journal.
+	if ap.journal != nil && len(decisions) > 0 {
+		cycleID := uuid.New().String()
+		if err := ap.journal.Save(ctx, cycleID, decisions); err != nil {
+			ap.logger.Warn("planning_journal_persist_failed", zap.Error(err))
+		}
+	}
+
 	return allActions, nil
 }
 
