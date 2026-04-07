@@ -22,6 +22,7 @@ type Config struct {
 	Telegram    TelegramConfig
 	GoogleTasks GoogleTasksConfig
 	Routing     RoutingPolicyConfig
+	Scheduler   SchedulerConfig
 }
 
 type DatabaseConfig struct {
@@ -147,6 +148,13 @@ type GoogleTasksConfig struct {
 	PollIntervalSeconds int    `envconfig:"GOOGLE_TASKS_POLL_INTERVAL_SECONDS" default:"300"`
 }
 
+// SchedulerConfig holds configuration for the autonomous agent scheduling loop.
+type SchedulerConfig struct {
+	Enabled         bool `envconfig:"AGENT_SCHEDULER_ENABLED" default:"false"`
+	IntervalSeconds int  `envconfig:"AGENT_SCHEDULER_INTERVAL_SECONDS" default:"60"`
+	TimeoutSeconds  int  `envconfig:"AGENT_SCHEDULER_TIMEOUT_SECONDS" default:"45"`
+}
+
 // RoutingPolicyConfig holds the explicit routing policy for model/provider selection.
 // Per-role escalation levels control how far a role may escalate through provider tiers:
 // local (cheapest/fastest) → cloud → OpenRouter (most capable/costly).
@@ -248,6 +256,9 @@ func Load() (*Config, error) {
 	if err := envconfig.Process("", &cfg.Routing); err != nil {
 		return nil, fmt.Errorf("routing policy config: %w", err)
 	}
+	if err := envconfig.Process("", &cfg.Scheduler); err != nil {
+		return nil, fmt.Errorf("scheduler config: %w", err)
+	}
 
 	// Derive computed fields
 	cfg.Providers.OpenAI.Timeout = time.Duration(cfg.Providers.OpenAI.TimeoutSeconds) * time.Second
@@ -335,6 +346,19 @@ func (c *Config) validate() error {
 				"%s must be one of local_only, local_cloud, local_cloud_openrouter, local_openrouter; got %q",
 				envName, level,
 			))
+		}
+	}
+
+	// Scheduler validation.
+	if c.Scheduler.Enabled {
+		if c.Scheduler.IntervalSeconds <= 0 {
+			errs = append(errs, "AGENT_SCHEDULER_INTERVAL_SECONDS must be greater than 0")
+		}
+		if c.Scheduler.TimeoutSeconds <= 0 {
+			errs = append(errs, "AGENT_SCHEDULER_TIMEOUT_SECONDS must be greater than 0")
+		}
+		if c.Scheduler.TimeoutSeconds >= c.Scheduler.IntervalSeconds {
+			errs = append(errs, "AGENT_SCHEDULER_TIMEOUT_SECONDS must be less than AGENT_SCHEDULER_INTERVAL_SECONDS")
 		}
 	}
 
