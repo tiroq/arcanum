@@ -16,6 +16,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	"github.com/tiroq/arcanum/internal/agent/planning"
+	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -111,12 +112,22 @@ func run() error {
 		WithMemoryStore(memoryStore)
 	actionEngine.WithOutcomeVerification(outcomeHandler)
 
+	// Autonomous scheduler (Iteration 7).
+	agentScheduler := scheduler.New(
+		actionEngine,
+		time.Duration(cfg.Scheduler.IntervalSeconds)*time.Second,
+		time.Duration(cfg.Scheduler.TimeoutSeconds)*time.Second,
+		auditor,
+		logger,
+	)
+
 	handlers := api.NewHandlers(pool, publisher, m, logger).
 		WithGoalEngine(goalEngine).
 		WithActionEngine(actionEngine).
 		WithOutcomeStore(outcomeStore).
 		WithActionMemoryStore(memoryStore).
-		WithAdaptivePlanner(adaptivePlanner)
+		WithAdaptivePlanner(adaptivePlanner).
+		WithScheduler(agentScheduler, cfg.Scheduler.Enabled)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -127,6 +138,15 @@ func run() error {
 	}
 
 	logger.Info("starting api-gateway", zap.Int("port", cfg.HTTP.Port))
+
+	// Start scheduler if enabled in config.
+	if cfg.Scheduler.Enabled {
+		agentScheduler.Start()
+		logger.Info("agent scheduler started",
+			zap.Int("interval_seconds", cfg.Scheduler.IntervalSeconds),
+			zap.Int("timeout_seconds", cfg.Scheduler.TimeoutSeconds),
+		)
+	}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -139,6 +159,10 @@ func run() error {
 	<-quit
 
 	logger.Info("shutting down api-gateway")
+
+	// Stop scheduler before HTTP server shutdown.
+	agentScheduler.Stop()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
 	defer shutdownCancel()
 
