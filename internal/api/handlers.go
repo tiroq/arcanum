@@ -20,6 +20,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -42,6 +43,7 @@ type Handlers struct {
 	reflectionStore   *reflection.Store
 	scheduler         *scheduler.Scheduler
 	schedulerEnabled  bool
+	stabilityEngine   *stability.Engine
 	logger            *zap.Logger
 }
 
@@ -97,6 +99,12 @@ func (h *Handlers) WithDecisionJournal(j *planning.DecisionJournal) *Handlers {
 func (h *Handlers) WithReflectionEngine(e *reflection.Engine, s *reflection.Store) *Handlers {
 	h.reflectionEngine = e
 	h.reflectionStore = s
+	return h
+}
+
+// WithStabilityEngine attaches the self-stability engine.
+func (h *Handlers) WithStabilityEngine(se *stability.Engine) *Handlers {
+	h.stabilityEngine = se
 	return h
 }
 
@@ -1110,6 +1118,72 @@ func (h *Handlers) ListJournalDecisions(w http.ResponseWriter, r *http.Request) 
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"decisions": decisions,
+	})
+}
+
+// StabilityStatus returns the current stability state (GET /api/v1/agent/stability).
+func (h *Handlers) StabilityStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.stabilityEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "stability engine not configured")
+		return
+	}
+
+	st, err := h.stabilityEngine.GetState(r.Context())
+	if err != nil {
+		h.logger.Error("stability_status_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// StabilityReset resets stability to normal mode (POST /api/v1/agent/stability/reset).
+func (h *Handlers) StabilityReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.stabilityEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "stability engine not configured")
+		return
+	}
+
+	st, err := h.stabilityEngine.Reset(r.Context())
+	if err != nil {
+		h.logger.Error("stability_reset_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "reset failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// StabilityEvaluate forces one stability evaluation pass (POST /api/v1/agent/stability/evaluate).
+func (h *Handlers) StabilityEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.stabilityEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "stability engine not configured")
+		return
+	}
+
+	st, result, err := h.stabilityEngine.Evaluate(r.Context())
+	if err != nil {
+		h.logger.Error("stability_evaluate_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "evaluate failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"state":     st,
+		"detection": result,
 	})
 }
 

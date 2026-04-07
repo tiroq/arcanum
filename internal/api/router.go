@@ -84,5 +84,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	// Agent decision journal (durable planning history)
 	mux.Handle("/api/v1/agent/journal", chain(handlers.ListJournalDecisions))
 
+	// Agent stability controls (self-stability layer)
+	mux.Handle("/api/v1/agent/stability", chain(handlers.StabilityStatus))
+	mux.Handle("/api/v1/agent/stability/reset", chain(handlers.StabilityReset))
+	mux.Handle("/api/v1/agent/stability/evaluate", chain(handlers.StabilityEvaluate))
+
 	return requestIDMiddleware(mux)
 }
