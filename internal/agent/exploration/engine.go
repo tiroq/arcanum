@@ -185,9 +185,9 @@ func (e *Engine) auditEvent(ctx context.Context, eventType string, d Exploration
 	}
 
 	payload := map[string]any{
-		"enabled":        d.Enabled,
-		"chosen":         d.Chosen,
-		"budget_reason":  d.BudgetReason,
+		"enabled":         d.Enabled,
+		"chosen":          d.Chosen,
+		"budget_reason":   d.BudgetReason,
 		"decision_reason": d.DecisionReason,
 	}
 	if d.ChosenActionType != "" {

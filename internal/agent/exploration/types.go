@@ -17,9 +17,9 @@ type ExplorationBudget struct {
 // DefaultBudget returns safe defaults: 1 per cycle, 3 per hour.
 func DefaultBudget() ExplorationBudget {
 	return ExplorationBudget{
-		MaxPerCycle:  1,
-		MaxPerHour:   3,
-		WindowStart:  time.Now().UTC(),
+		MaxPerCycle: 1,
+		MaxPerHour:  3,
+		WindowStart: time.Now().UTC(),
 	}
 }
 
