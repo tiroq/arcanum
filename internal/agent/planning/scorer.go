@@ -127,9 +127,70 @@ func applyFeedbackRules(c PlannedActionCandidate, pctx PlanningContext) PlannedA
 }
 
 // applyFeedbackRulesP adjusts score using provided params.
-// Resolution order: provider-context → contextual → global (fallback chain).
-// When provider-context data is available, it blends with the next-best signal.
+// Resolution order: weighted evidence-based (when timestamps available) →
+// categorical fallback (provider-context → contextual → global).
 func applyFeedbackRulesP(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
+	// Weighted path: when timestamp is available and records have temporal data.
+	if !pctx.Timestamp.IsZero() && hasTemporalData(pctx) {
+		candidates := actionmemory.GatherWeightedCandidates(
+			pctx.ProviderContextRecords,
+			pctx.ContextRecords,
+			pctx.RecentActionFeedback,
+			c.ActionType, c.GoalType,
+			pctx.ProviderName, pctx.ModelRole,
+			pctx.FailureBucket, pctx.BacklogBucket,
+			pctx.Timestamp,
+		)
+
+		best, _ := actionmemory.ResolveWeightedFeedback(candidates)
+		if best != nil {
+			adj, reason := actionmemory.WeightedScoreAdjustment(
+				best, params.FeedbackAvoidPenalty, params.FeedbackPreferBoost,
+			)
+			if adj != 0 {
+				c.Score += adj
+			}
+			if reason != "" {
+				c.Reasoning = append(c.Reasoning, reason)
+			} else {
+				c.Reasoning = append(c.Reasoning, "weighted feedback: no bias applied")
+			}
+			return c
+		}
+
+		c.Reasoning = append(c.Reasoning, "no actionable weighted feedback available")
+		return c
+	}
+
+	// --- Categorical fallback (no temporal data) ---
+	return applyFeedbackRulesCategorical(c, pctx, params)
+}
+
+// hasTemporalData returns true if any memory record in the planning context
+// has a non-zero LastUpdated timestamp. When no temporal data exists, the
+// weighted path is skipped to preserve backward-compatible categorical behavior.
+func hasTemporalData(pctx PlanningContext) bool {
+	for i := range pctx.ProviderContextRecords {
+		if !pctx.ProviderContextRecords[i].LastUpdated.IsZero() {
+			return true
+		}
+	}
+	for i := range pctx.ContextRecords {
+		if !pctx.ContextRecords[i].LastUpdated.IsZero() {
+			return true
+		}
+	}
+	for _, fb := range pctx.RecentActionFeedback {
+		if !fb.LastUpdated.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+// applyFeedbackRulesCategorical is the legacy categorical fallback for
+// when no temporal context is available. Preserved for backward compatibility.
+func applyFeedbackRulesCategorical(c PlannedActionCandidate, pctx PlanningContext, params ScoringParams) PlannedActionCandidate {
 	// Resolve provider-context feedback if data exists.
 	var provFb *actionmemory.ContextualFeedback
 	if len(pctx.ProviderContextRecords) > 0 && pctx.ProviderName != "" {
