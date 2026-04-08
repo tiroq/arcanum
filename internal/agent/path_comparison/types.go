@@ -170,7 +170,7 @@ func DetectBetterAlternative(snapshot DecisionSnapshot, selectedOutcome string) 
 			continue
 		}
 		scoreDiff := snapshot.SelectedScore - c.Score
-		if scoreDiff < AlternativeScoreThreshold {
+		if scoreDiff+1e-9 < AlternativeScoreThreshold {
 			return true
 		}
 	}
@@ -185,6 +185,10 @@ func DetectBetterAlternative(snapshot DecisionSnapshot, selectedOutcome string) 
 func ClassifyWinLoss(selectedOutcome string, betterAlternativeExists bool) (win, loss bool) {
 	if selectedOutcome == OutcomeSuccess && !betterAlternativeExists {
 		win = true
+		return
+	}
+	if selectedOutcome == OutcomeSuccess && betterAlternativeExists {
+		// Success but a better alternative existed — neither win nor loss.
 		return
 	}
 	if selectedOutcome == OutcomeFailure || betterAlternativeExists {
