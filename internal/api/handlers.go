@@ -29,6 +29,7 @@ import (
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
+	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
@@ -81,6 +82,7 @@ type Handlers struct {
 	govController      *governance.Controller
 	govReplayBuilder   *governance.ReplayPackBuilder
 	resourceAdapter    *resourceopt.GraphAdapter
+	providerRouter     *providerrouting.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -242,6 +244,12 @@ func (h *Handlers) WithGovernance(gc *governance.Controller, rb *governance.Repl
 // WithResourceOptimization attaches the resource optimization adapter (Iteration 29).
 func (h *Handlers) WithResourceOptimization(ra *resourceopt.GraphAdapter) *Handlers {
 	h.resourceAdapter = ra
+	return h
+}
+
+// WithProviderRouting attaches the provider routing adapter (Iteration 31).
+func (h *Handlers) WithProviderRouting(pr *providerrouting.GraphAdapter) *Handlers {
+	h.providerRouter = pr
 	return h
 }
 
@@ -3125,6 +3133,108 @@ func (h *Handlers) ResourceDecisions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	decisions := resourceopt.GetRecentDecisions()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"decisions": decisions,
+	})
+}
+
+// ProviderStatus returns registered providers and their metadata.
+func (h *Handlers) ProviderStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.providerRouter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "provider routing not configured")
+		return
+	}
+
+	registry := h.providerRouter.GetRegistry()
+	if registry == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"providers": []any{}})
+		return
+	}
+
+	providers := registry.All()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": providers,
+		"count":     len(providers),
+	})
+}
+
+// ProviderUsage returns current quota usage for all providers.
+func (h *Handlers) ProviderUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.providerRouter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "provider routing not configured")
+		return
+	}
+
+	tracker := h.providerRouter.GetQuotaTracker()
+	if tracker == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"usage": []any{}})
+		return
+	}
+
+	usage := tracker.GetAllUsage()
+	registry := h.providerRouter.GetRegistry()
+
+	type usageWithBudget struct {
+		providerrouting.ProviderUsageState
+		RemainingRPM int `json:"remaining_rpm"`
+		RemainingTPM int `json:"remaining_tpm"`
+		RemainingRPD int `json:"remaining_rpd"`
+		RemainingTPD int `json:"remaining_tpd"`
+	}
+
+	result := make([]usageWithBudget, 0, len(usage))
+	for _, u := range usage {
+		entry := usageWithBudget{ProviderUsageState: u}
+		if registry != nil {
+			if p, ok := registry.Get(u.ProviderName); ok {
+				if p.Limits.RPM > 0 {
+					entry.RemainingRPM = p.Limits.RPM - u.RequestsThisMinute
+				}
+				if p.Limits.TPM > 0 {
+					entry.RemainingTPM = p.Limits.TPM - u.TokensThisMinute
+				}
+				if p.Limits.RPD > 0 {
+					entry.RemainingRPD = p.Limits.RPD - u.RequestsToday
+				}
+				if p.Limits.TPD > 0 {
+					entry.RemainingTPD = p.Limits.TPD - u.TokensToday
+				}
+			}
+		}
+		result = append(result, entry)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"usage": result,
+	})
+}
+
+// ProviderDecisions returns recent routing decisions.
+func (h *Handlers) ProviderDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.providerRouter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "provider routing not configured")
+		return
+	}
+
+	router := h.providerRouter.GetRouter()
+	if router == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"decisions": []any{}})
+		return
+	}
+
+	decisions := router.GetRecentDecisions()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"decisions": decisions,
 	})

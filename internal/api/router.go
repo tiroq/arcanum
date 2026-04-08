@@ -171,5 +171,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/governance/clear", chain(handlers.GovernanceClearOverride))
 	mux.Handle("/api/v1/agent/governance/replay/", chain(handlers.GovernanceReplay))
 
+	// Agent provider routing (quota-aware provider selection, Iteration 31)
+	mux.Handle("/api/v1/agent/providers/status", chain(handlers.ProviderStatus))
+	mux.Handle("/api/v1/agent/providers/usage", chain(handlers.ProviderUsage))
+	mux.Handle("/api/v1/agent/providers/decisions", chain(handlers.ProviderDecisions))
+
 	return requestIDMiddleware(mux)
 }
