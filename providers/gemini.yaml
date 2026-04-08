@@ -1,0 +1,46 @@
+provider:
+  name: gemini
+  kind: cloud
+  enabled: true
+
+connection:
+  base_url: https://generativelanguage.googleapis.com/v1beta/openai
+  api_key_env: GEMINI_API_KEY
+  timeout_seconds: 45
+
+limits:
+  rpm: 0
+  tpm: 0
+  rpd: 0
+  tpd: 0
+
+routing:
+  roles: [planner, reviewer, batch]
+  fallback_priority: 30
+  allow_external: true
+
+cost:
+  cost_class: free
+  relative_cost: 0.10
+
+models:
+  - name: gemini-2.5-flash
+    enabled: true
+    roles: [fast, reviewer]
+    capabilities: [json_mode, long_context]
+    preferred_for: [fast_reasoning, review]
+    max_output_tokens: 4096
+
+  - name: gemini-2.5-pro
+    enabled: true
+    roles: [planner]
+    capabilities: [json_mode, long_context]
+    preferred_for: [heavy_reasoning, planning]
+    max_output_tokens: 8192
+
+  - name: gemini-2.0-flash
+    enabled: true
+    roles: [fast]
+    capabilities: [low_latency, json_mode]
+    preferred_for: [cheap_fast_tasks]
+    max_output_tokens: 2048
