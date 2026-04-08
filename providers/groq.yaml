@@ -15,7 +15,7 @@ limits:
   tpd: 0
 
 routing:
-  roles: [fast, planner, reviewer]
+  roles: [fast, planner, reviewer, fallback]
   fallback_priority: 20
   allow_external: true
 
@@ -23,25 +23,44 @@ cost:
   cost_class: free
   relative_cost: 0.08
 
+health:
+  enabled: true
+  reachable: true
+  degraded: false
+
+model_defaults:
+  enabled: true
+  capabilities: [json_mode]
+  max_output_tokens: 4096
+  cost:
+    cost_class: free
+    relative_cost: 0.08
+
 models:
+  # --- FAST / LOW-LATENCY LAYER ---
   - name: llama-3.1-8b-instant
-    enabled: true
-    roles: [fast]
+    roles: [fast, fallback]
     capabilities: [low_latency, json_mode]
-    preferred_for: [fast_generation, classification, cheap_reasoning]
+    preferred_for: [fast_generation, classification, cheap_reasoning, low_latency_fallback]
     max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.06
     limits:
       rpm: 30
       tpm: 6000
       rpd: 14400
       tpd: 500000
 
+  # --- BALANCED REVIEW / PLANNING ---
   - name: llama-3.3-70b-versatile
-    enabled: true
     roles: [planner, reviewer]
-    capabilities: [json_mode, long_context]
-    preferred_for: [review, reasoning, planning]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [review, reasoning, planning, summarization]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.09
     limits:
       rpm: 30
       tpm: 12000
@@ -49,15 +68,31 @@ models:
       tpd: 100000
 
   - name: qwen/qwen3-32b
-    enabled: true
     roles: [planner, reviewer]
-    capabilities: [json_mode, long_context]
-    preferred_for: [reasoning, synthesis]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [reasoning, synthesis, structured_tasks]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.08
 
+  # --- HEAVY REASONING ---
   - name: openai/gpt-oss-120b
-    enabled: true
     roles: [planner]
-    capabilities: [json_mode, long_context]
-    preferred_for: [heavy_reasoning]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [heavy_reasoning, deep_synthesis, planning]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.12
+
+  # --- SAFETY / GENERIC FALLBACK ---
+  - name: groq-default
+    enabled: true
+    roles: [fallback]
+    capabilities: [json_mode]
+    preferred_for: [generic_fallback]
+    max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.07
