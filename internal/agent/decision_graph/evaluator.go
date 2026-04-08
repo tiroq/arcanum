@@ -243,12 +243,12 @@ func ApplyCounterfactualAdjustments(paths []DecisionPath, predictions *Counterfa
 
 // ArbitratedSignals bundles all signal sources for unified arbitration.
 type ArbitratedSignals struct {
-	PathLearning       *PathLearningSignals
-	ComparativeLearning *ComparativeLearningSignals
-	Counterfactual     *CounterfactualPredictions
-	StabilityMode      string
+	PathLearning         *PathLearningSignals
+	ComparativeLearning  *ComparativeLearningSignals
+	Counterfactual       *CounterfactualPredictions
+	StabilityMode        string
 	CalibratedConfidence float64
-	ExplorationActive  bool
+	ExplorationActive    bool
 }
 
 // ApplyArbitratedAdjustments replaces the sequential Apply* calls with a single
