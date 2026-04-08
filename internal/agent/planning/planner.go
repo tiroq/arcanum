@@ -53,6 +53,12 @@ type StrategyOverride struct {
 
 	// Decision ID (Iteration 22) — links to decision snapshot for comparative learning.
 	DecisionID string `json:"decision_id,omitempty"`
+
+	// MetaMode (Iteration 24) — which reasoning mode was used.
+	MetaMode string `json:"meta_mode,omitempty"`
+
+	// PredictedConfidence (Iteration 25) — confidence of the selected path for calibration tracking.
+	PredictedConfidence float64 `json:"predicted_confidence,omitempty"`
 }
 
 // StrategyProvider evaluates bounded multi-step strategies and may override
@@ -255,6 +261,16 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 				// Decision ID (Iteration 22) for comparative learning.
 				if strategyOverride.DecisionID != "" {
 					resolved[i].Params["_ctx_decision_id"] = strategyOverride.DecisionID
+				}
+
+				// Meta-reasoning mode (Iteration 24).
+				if strategyOverride.MetaMode != "" {
+					resolved[i].Params["_ctx_meta_mode"] = strategyOverride.MetaMode
+				}
+
+				// Predicted confidence (Iteration 25) for calibration tracking.
+				if strategyOverride.PredictedConfidence > 0 {
+					resolved[i].Params["_ctx_predicted_confidence"] = strategyOverride.PredictedConfidence
 				}
 			}
 		}
