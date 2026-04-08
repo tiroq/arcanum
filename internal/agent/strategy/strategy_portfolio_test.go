@@ -396,7 +396,7 @@ func TestPortfolio_ScoringFormula(t *testing.T) {
 
 func TestPortfolio_FinalScoreBounded(t *testing.T) {
 	tests := []struct {
-		name       string
+		name           string
 		ev, risk, conf float64
 	}{
 		{"all high", 1.0, 0.0, 1.0},

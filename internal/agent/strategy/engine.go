@@ -26,7 +26,7 @@ type Engine struct {
 	auditor   audit.AuditRecorder
 	logger    *zap.Logger
 
-	lastDecision          *StrategyDecision
+	lastDecision           *StrategyDecision
 	lastPortfolioSelection *PortfolioSelection
 }
 

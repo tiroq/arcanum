@@ -13,11 +13,11 @@ package strategy
 
 // PortfolioSelection captures the portfolio competition result.
 type PortfolioSelection struct {
-	Candidates       []StrategyCandidate `json:"candidates"`
-	Selected         *StrategyCandidate  `json:"selected,omitempty"`
-	ExplorationPick  *StrategyCandidate  `json:"exploration_pick,omitempty"`
-	Reason           string              `json:"reason"`
-	ExplorationUsed  bool                `json:"exploration_used"`
+	Candidates      []StrategyCandidate `json:"candidates"`
+	Selected        *StrategyCandidate  `json:"selected,omitempty"`
+	ExplorationPick *StrategyCandidate  `json:"exploration_pick,omitempty"`
+	Reason          string              `json:"reason"`
+	ExplorationUsed bool                `json:"exploration_used"`
 }
 
 // PortfolioSelectConfig controls selection behavior.

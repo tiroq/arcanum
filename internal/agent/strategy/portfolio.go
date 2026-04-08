@@ -27,11 +27,11 @@ type StrategyCandidate struct {
 	FinalScore    float64 `json:"final_score"`
 
 	// Signal contributions (for auditability).
-	StrategyMemorySignal    float64 `json:"strategy_memory_signal"`
-	ContinuationGainSignal  float64 `json:"continuation_gain_signal"`
-	ActionMemorySignal      float64 `json:"action_memory_signal"`
-	StabilitySignal         float64 `json:"stability_signal"`
-	PolicySignal            float64 `json:"policy_signal"`
+	StrategyMemorySignal   float64 `json:"strategy_memory_signal"`
+	ContinuationGainSignal float64 `json:"continuation_gain_signal"`
+	ActionMemorySignal     float64 `json:"action_memory_signal"`
+	StabilitySignal        float64 `json:"stability_signal"`
+	PolicySignal           float64 `json:"policy_signal"`
 
 	// Source plan reference.
 	Plan *StrategyPlan `json:"plan,omitempty"`
