@@ -15,11 +15,29 @@ import (
 // Handler implements actions.OutcomeHandler by evaluating, persisting,
 // and auditing the real-world outcome of each executed action.
 type Handler struct {
-	evaluator   *DBEvaluator
-	store       *Store
-	memoryStore *actionmemory.Store
-	auditor     audit.AuditRecorder
-	logger      *zap.Logger
+	evaluator        *DBEvaluator
+	store            *Store
+	memoryStore      *actionmemory.Store
+	pathOutcomeEval  PathOutcomeEvaluator
+	auditor          audit.AuditRecorder
+	logger           *zap.Logger
+}
+
+// PathOutcomeEvaluator evaluates path-level outcomes after action outcomes.
+// Defined here to avoid import cycles — implemented in path_learning package.
+type PathOutcomeEvaluator interface {
+	EvaluatePathOutcome(
+		ctx context.Context,
+		pathID string,
+		goalType string,
+		pathActionTypes []string,
+		firstStepStatus string,
+		continuationUsed bool,
+		step2Status string,
+		finalStatus string,
+		improvement bool,
+		executedTransitions int,
+	) error
 }
 
 // NewHandler creates an OutcomeHandler.
@@ -35,6 +53,12 @@ func NewHandler(evaluator *DBEvaluator, store *Store, auditor audit.AuditRecorde
 // WithMemoryStore attaches an action memory store for learning accumulation.
 func (h *Handler) WithMemoryStore(ms *actionmemory.Store) *Handler {
 	h.memoryStore = ms
+	return h
+}
+
+// WithPathOutcomeEvaluator attaches a path outcome evaluator for path-level learning.
+func (h *Handler) WithPathOutcomeEvaluator(pe PathOutcomeEvaluator) *Handler {
+	h.pathOutcomeEval = pe
 	return h
 }
 
@@ -99,6 +123,9 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 		// Update provider-context memory (best-effort).
 		h.updateProviderContextMemory(ctx, action, *o)
 	}
+
+	// Evaluate path outcome (Iteration 21, best-effort).
+	h.evaluatePathOutcome(ctx, action, *o)
 
 	return nil
 }
@@ -206,6 +233,81 @@ func (h *Handler) updateProviderContextMemory(ctx context.Context, action action
 			zap.String("provider_name", providerName),
 			zap.String("model_role", modelRole),
 			zap.String("outcome_status", string(o.OutcomeStatus)),
+		)
+	}
+}
+
+// evaluatePathOutcome extracts path metadata from Action.Params and evaluates
+// the path outcome. Only runs when path metadata is present (decision graph override)
+// and a PathOutcomeEvaluator is configured. Best-effort: failures are logged.
+func (h *Handler) evaluatePathOutcome(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.pathOutcomeEval == nil {
+		return
+	}
+
+	// Extract path metadata embedded by the adaptive planner (Iteration 21).
+	pathSig, _ := action.Params["_ctx_path_signature"].(string)
+	if pathSig == "" {
+		return // No path context — action was not from a decision graph override.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	strategyID, _ := action.Params["_ctx_strategy_id"].(string)
+
+	// Recover path action types.
+	var pathActionTypes []string
+	if raw, ok := action.Params["_ctx_path_action_types"]; ok {
+		switch v := raw.(type) {
+		case []string:
+			pathActionTypes = v
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					pathActionTypes = append(pathActionTypes, s)
+				}
+			}
+		}
+	}
+
+	if len(pathActionTypes) == 0 {
+		return // Cannot evaluate without path action types.
+	}
+
+	pathLengthRaw, _ := action.Params["_ctx_path_length"].(int)
+	if pathLengthRaw == 0 {
+		// Try float64 cast (JSON numbers are float64).
+		if f, ok := action.Params["_ctx_path_length"].(float64); ok {
+			pathLengthRaw = int(f)
+		}
+	}
+
+	// Determine first step status from the action outcome.
+	firstStepStatus := string(o.OutcomeStatus)
+
+	// Continuation: check if step 2 was executed.
+	// Step metadata from the params context.
+	continuationUsed := false
+	step2Status := ""
+	executedTransitions := 0
+	// Only the first step is executed by default; continuation requires separate logic.
+	// executedTransitions = 0 means only first step ran (no transitions actualized).
+
+	if err := h.pathOutcomeEval.EvaluatePathOutcome(
+		ctx,
+		strategyID,
+		goalType,
+		pathActionTypes,
+		firstStepStatus,
+		continuationUsed,
+		step2Status,
+		firstStepStatus, // finalStatus = firstStepStatus when only first step executed
+		o.Improvement,
+		executedTransitions,
+	); err != nil {
+		h.logger.Warn("path_outcome_evaluation_failed",
+			zap.String("action_id", action.ID),
+			zap.String("path_signature", pathSig),
+			zap.Error(err),
 		)
 	}
 }
