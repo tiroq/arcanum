@@ -144,10 +144,10 @@ func (ce *ContinuationEngine) EvaluateContinuation(
 	}
 
 	ce.auditEvent(ctx, "strategy.continuation_executed", now, map[string]any{
-		"strategy_id":        strategyID,
-		"strategy_type":      strategyType,
-		"goal_type":          goalType,
-		"step2_action":       step2Action,
+		"strategy_id":         strategyID,
+		"strategy_type":       strategyType,
+		"goal_type":           goalType,
+		"step2_action":        step2Action,
 		"strategy_confidence": strategyConfidence,
 	})
 

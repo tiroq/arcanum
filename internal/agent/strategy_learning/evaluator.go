@@ -84,13 +84,13 @@ func (e *Evaluator) EvaluateOutcome(
 
 	// Audit the outcome evaluation.
 	e.auditEvent(ctx, "strategy.outcome_evaluated", map[string]any{
-		"strategy_id":   strategyID.String(),
-		"strategy_type": strategyType,
-		"goal_type":     goalType,
-		"step1_action":  step1Action,
+		"strategy_id":    strategyID.String(),
+		"strategy_type":  strategyType,
+		"goal_type":      goalType,
+		"step1_action":   step1Action,
 		"step2_executed": step2Executed,
-		"final_status":  finalStatus,
-		"improvement":   improvement,
+		"final_status":   finalStatus,
+		"improvement":    improvement,
 	})
 
 	// Generate and audit feedback signal.

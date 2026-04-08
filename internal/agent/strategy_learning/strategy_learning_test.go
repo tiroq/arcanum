@@ -119,10 +119,10 @@ func TestContinuation_AllGatesPassed(t *testing.T) {
 		uuid.New().String(),
 		"escalate_first",
 		"reduce_retry_rate",
-		OutcomeNeutral,    // step1 neutral
-		"retry_job",       // has step 2
-		0.80,              // confidence >= 0.60
-		1,                 // currentStep == 1
+		OutcomeNeutral, // step1 neutral
+		"retry_job",    // has step 2
+		0.80,           // confidence >= 0.60
+		1,              // currentStep == 1
 	)
 
 	if !decision.ShouldContinue {
