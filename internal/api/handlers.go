@@ -2303,7 +2303,7 @@ func (h *Handlers) PathComparativeMemoryList(w http.ResponseWriter, r *http.Requ
 		fb := pathcomparison.GenerateComparativeFeedback(&rec)
 		result = append(result, recordWithFeedback{
 			ComparativeMemoryRecord: rec,
-			Recommendation:         string(fb.Recommendation),
+			Recommendation:          string(fb.Recommendation),
 		})
 	}
 
