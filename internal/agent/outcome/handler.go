@@ -15,12 +15,12 @@ import (
 // Handler implements actions.OutcomeHandler by evaluating, persisting,
 // and auditing the real-world outcome of each executed action.
 type Handler struct {
-	evaluator        *DBEvaluator
-	store            *Store
-	memoryStore      *actionmemory.Store
-	pathOutcomeEval  PathOutcomeEvaluator
-	auditor          audit.AuditRecorder
-	logger           *zap.Logger
+	evaluator       *DBEvaluator
+	store           *Store
+	memoryStore     *actionmemory.Store
+	pathOutcomeEval PathOutcomeEvaluator
+	auditor         audit.AuditRecorder
+	logger          *zap.Logger
 }
 
 // PathOutcomeEvaluator evaluates path-level outcomes after action outcomes.
