@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
+	"github.com/tiroq/arcanum/internal/agent/arbitration"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/audit"
 )
@@ -40,6 +41,21 @@ type SnapshotCapturer interface {
 // Defined here to avoid import cycles — implemented in calibration package.
 type CalibrationProvider interface {
 	CalibrateConfidence(ctx context.Context, rawConfidence float64) float64
+}
+
+// ContextualCalibrationProvider adjusts confidence values based on per-context
+// historical prediction accuracy. Defined here to avoid import cycles.
+// Uses primitive parameters to avoid type coupling across packages.
+type ContextualCalibrationProvider interface {
+	CalibrateConfidenceForContext(ctx context.Context, rawConfidence float64, goalType, providerName, strategyType string) float64
+}
+
+// ContextualCalibrationContext carries the context dimensions for calibration lookups.
+// Used internally within the planner adapter.
+type ContextualCalibrationContext struct {
+	GoalType     string
+	ProviderName string
+	StrategyType string
 }
 
 // CounterfactualSimulator runs counterfactual simulation before path selection.
@@ -103,8 +119,14 @@ type GraphPlannerAdapter struct {
 	// calibration adjusts confidence values based on historical accuracy (Iteration 25).
 	calibration CalibrationProvider
 
+	// contextCalibration adjusts confidence based on per-context accuracy (Iteration 26).
+	contextCalibration ContextualCalibrationProvider
+
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
+
+	// lastArbTraces stores the most recent arbitration traces for API visibility (Iteration 27).
+	lastArbTraces []arbitration.ArbitrationTrace
 }
 
 // NewGraphPlannerAdapter creates a GraphPlannerAdapter.
@@ -162,9 +184,21 @@ func (a *GraphPlannerAdapter) WithCalibration(cp CalibrationProvider) *GraphPlan
 	return a
 }
 
+// WithContextualCalibration sets the contextual calibration provider for
+// per-context confidence adjustment (Iteration 26).
+func (a *GraphPlannerAdapter) WithContextualCalibration(cp ContextualCalibrationProvider) *GraphPlannerAdapter {
+	a.contextCalibration = cp
+	return a
+}
+
 // LastSelection returns the most recent path selection for API visibility.
 func (a *GraphPlannerAdapter) LastSelection() *PathSelection {
 	return a.lastSelection
+}
+
+// LastArbTraces returns the most recent arbitration traces for API visibility (Iteration 27).
+func (a *GraphPlannerAdapter) LastArbTraces() []arbitration.ArbitrationTrace {
+	return a.lastArbTraces
 }
 
 // EvaluateForPlanner implements planning.StrategyProvider.
@@ -290,6 +324,16 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		}
 	}
 
+	// Apply contextual calibration to node confidence values (Iteration 26).
+	// Adjusts confidence based on per-context historical prediction accuracy.
+	// Fail-open: if contextCalibration is nil, confidence values are unchanged.
+	if a.contextCalibration != nil {
+		for action, sig := range signals {
+			sig.Confidence = a.contextCalibration.CalibrateConfidenceForContext(ctx, sig.Confidence, decision.GoalType, "", "")
+			signals[action] = sig
+		}
+	}
+
 	// Ensure at least noop if all candidates were filtered.
 	if len(candidateActions) == 0 {
 		candidateActions = []string{"noop"}
@@ -313,8 +357,11 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	paths := EnumeratePaths(graph)
 	scored := EvaluateAllPaths(paths, config)
 
-	// Apply path/transition learning adjustments (Iteration 21).
-	// Fail-open: if pathLearning is nil, scored paths are unchanged.
+	// --- Signal Arbitration (Iteration 27) ---
+	// Collect all learning signals and resolve via unified arbitration layer.
+	// Replaces sequential Apply{Path,Comparative,Counterfactual}Adjustments.
+	// Fail-open: if all providers are nil, scored paths are unchanged.
+
 	var learningSignals *PathLearningSignals
 	if a.pathLearning != nil {
 		learningSignals = &PathLearningSignals{
@@ -322,23 +369,16 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 			TransitionFeedback: a.pathLearning.GetAllTransitionFeedbackMap(ctx, decision.GoalType),
 		}
 	}
-	scored = ApplyPathLearningAdjustments(scored, learningSignals)
 
-	// Apply comparative learning adjustments (Iteration 22).
-	// Fail-open: if comparativeLearning is nil, scored paths are unchanged.
 	var comparativeSignals *ComparativeLearningSignals
 	if a.comparativeLearning != nil {
 		comparativeSignals = &ComparativeLearningSignals{
 			ComparativeFeedback: a.comparativeLearning.GetAllComparativeFeedbackMap(ctx, decision.GoalType),
 		}
 	}
-	scored = ApplyComparativeLearningAdjustments(scored, comparativeSignals)
 
-	// Apply counterfactual simulation adjustments (Iteration 23).
-	// Fail-open: if counterfactual is nil, scored paths are unchanged.
 	var cfPredictions *CounterfactualPredictions
 	if a.counterfactual != nil {
-		// Build path scores and lengths for simulation.
 		pathScores := make(map[string]float64, len(scored))
 		pathLengths := make(map[string]int, len(scored))
 		for _, sp := range scored {
@@ -346,7 +386,6 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 			pathScores[sig] = sp.FinalScore
 			pathLengths[sig] = len(sp.Nodes)
 		}
-		// Generate a provisional decision ID for the simulation.
 		provDecisionID := uuid.New().String()
 		cfExport := a.counterfactual.SimulateAndSave(ctx, provDecisionID, decision.GoalType, pathScores, pathLengths)
 		if len(cfExport.Predictions) > 0 {
@@ -354,10 +393,7 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 				Predictions: cfExport.Predictions,
 				Confidences: cfExport.Confidences,
 			}
-			// Apply calibration to counterfactual prediction confidences (Iteration 25).
-			// Low calibration → reduced confidence → reduced prediction weight.
-			// Fail-open: if calibration is nil, confidences are unchanged.
-			if a.calibration != nil && cfPredictions != nil {
+			if a.calibration != nil {
 				scaledConf := make(map[string]float64, len(cfPredictions.Confidences))
 				for sig, conf := range cfPredictions.Confidences {
 					scaledConf[sig] = a.calibration.CalibrateConfidence(ctx, conf)
@@ -366,7 +402,28 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 			}
 		}
 	}
-	scored = ApplyCounterfactualAdjustments(scored, cfPredictions)
+
+	// Compute calibrated confidence for arbitration suppression threshold.
+	calibratedConfidence := 0.8 // default: high confidence (no suppression)
+	if a.calibration != nil {
+		calibratedConfidence = a.calibration.CalibrateConfidence(ctx, 0.8)
+	}
+
+	arbSignals := &ArbitratedSignals{
+		PathLearning:         learningSignals,
+		ComparativeLearning:  comparativeSignals,
+		Counterfactual:       cfPredictions,
+		StabilityMode:        stabilityMode,
+		CalibratedConfidence: calibratedConfidence,
+		ExplorationActive:    shouldExplore,
+	}
+
+	var arbTraces []arbitration.ArbitrationTrace
+	scored, arbTraces = ApplyArbitratedAdjustments(scored, arbSignals)
+	a.lastArbTraces = arbTraces
+
+	// Emit arbitration audit events.
+	a.emitArbitrationAudit(ctx, decision.GoalID, decision.GoalType, arbTraces)
 
 	// Select best path.
 	selection := SelectBestPath(scored, config)
@@ -461,6 +518,53 @@ func (a *GraphPlannerAdapter) auditEvent(ctx context.Context, eventType string, 
 	}
 	_ = a.auditor.RecordEvent(ctx, "decision_graph", uuid.New(), eventType,
 		"system", "decision_graph_engine", payload)
+}
+
+// emitArbitrationAudit emits audit events based on arbitration trace results (Iteration 27).
+func (a *GraphPlannerAdapter) emitArbitrationAudit(ctx context.Context, goalID, goalType string, traces []arbitration.ArbitrationTrace) {
+	if a.auditor == nil || len(traces) == 0 {
+		return
+	}
+
+	for _, tr := range traces {
+		// Emit override events for suppressed signals.
+		if len(tr.SuppressedSignals) > 0 {
+			suppressedNames := make([]string, len(tr.SuppressedSignals))
+			for i, s := range tr.SuppressedSignals {
+				suppressedNames[i] = s.Signal.Type.String()
+			}
+			a.auditEvent(ctx, "arbitration.override_applied", map[string]any{
+				"goal_id":        goalID,
+				"goal_type":      goalType,
+				"path_signature": tr.PathSignature,
+				"suppressed":     suppressedNames,
+				"reason":         tr.Reason,
+			})
+		}
+
+		// Emit conflict detection events.
+		for _, rule := range tr.RulesApplied {
+			if rule == "conflict_neutralization" {
+				a.auditEvent(ctx, "arbitration.conflict_detected", map[string]any{
+					"goal_id":          goalID,
+					"goal_type":        goalType,
+					"path_signature":   tr.PathSignature,
+					"final_adjustment": tr.FinalAdjustment,
+					"reason":           tr.Reason,
+				})
+			}
+		}
+
+		// Emit resolved event.
+		a.auditEvent(ctx, "arbitration.resolved", map[string]any{
+			"goal_id":          goalID,
+			"goal_type":        goalType,
+			"path_signature":   tr.PathSignature,
+			"final_adjustment": tr.FinalAdjustment,
+			"rules_applied":    tr.RulesApplied,
+			"reason":           tr.Reason,
+		})
+	}
 }
 
 // --- Top-level orchestration function ---

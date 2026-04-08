@@ -1,6 +1,7 @@
 package decision_graph
 
 import (
+	"context"
 	"testing"
 )
 
@@ -1149,5 +1150,145 @@ func TestApplyCounterfactualAdjustments_UnpredictedPathUnchanged(t *testing.T) {
 	result := ApplyCounterfactualAdjustments(paths, preds)
 	if result[1].FinalScore != 0.30 {
 		t.Errorf("expected noop unchanged at 0.30, got %.4f", result[1].FinalScore)
+	}
+}
+
+// --- Contextual Calibration Integration Tests (Iteration 26) ---
+
+// mockContextualCalibrator implements ContextualCalibrationProvider for testing.
+type mockContextualCalibrator struct {
+	adjustments map[string]float64 // goal_type → calibration error to apply
+}
+
+func (m *mockContextualCalibrator) CalibrateConfidenceForContext(_ context.Context, rawConfidence float64, goalType, _, _ string) float64 {
+	calError, ok := m.adjustments[goalType]
+	if !ok {
+		return rawConfidence
+	}
+	delta := calError
+	if delta > 0.20 {
+		delta = 0.20
+	}
+	if delta < -0.20 {
+		delta = -0.20
+	}
+	adjusted := rawConfidence - delta
+	if adjusted < 0 {
+		return 0
+	}
+	if adjusted > 1 {
+		return 1
+	}
+	return adjusted
+}
+
+func TestContextualCalibration_WithContextCalibrationProvider(t *testing.T) {
+	adapter := NewGraphPlannerAdapter(nil, nil, nil)
+
+	mock := &mockContextualCalibrator{
+		adjustments: map[string]float64{
+			"overconfident_goal": 0.15, // system predicts 0.15 above actual
+		},
+	}
+	adapter.WithContextualCalibration(mock)
+
+	if adapter.contextCalibration == nil {
+		t.Fatal("contextCalibration should be wired")
+	}
+}
+
+func TestContextualCalibration_NilContextCalibrationNoChange(t *testing.T) {
+	adapter := NewGraphPlannerAdapter(nil, nil, nil)
+	// No contextual calibration wired — confidence should be unchanged.
+	if adapter.contextCalibration != nil {
+		t.Fatal("contextCalibration should be nil by default")
+	}
+}
+
+func TestContextualCalibration_OverconfidentReducesConfidence(t *testing.T) {
+	mock := &mockContextualCalibrator{
+		adjustments: map[string]float64{
+			"improve_code": 0.10, // overconfident by 0.10
+		},
+	}
+
+	raw := 0.80
+	adjusted := mock.CalibrateConfidenceForContext(nil, raw, "improve_code", "", "")
+	if adjusted >= raw {
+		t.Errorf("overconfident goal should reduce confidence: raw=%v, adjusted=%v", raw, adjusted)
+	}
+	expectedAdj := 0.70
+	if abs(adjusted-expectedAdj) > 1e-9 {
+		t.Errorf("expected ~%v, got %v", expectedAdj, adjusted)
+	}
+}
+
+func TestContextualCalibration_UnderconfidentIncreasesConfidence(t *testing.T) {
+	mock := &mockContextualCalibrator{
+		adjustments: map[string]float64{
+			"deploy": -0.12, // underconfident by 0.12
+		},
+	}
+
+	raw := 0.60
+	adjusted := mock.CalibrateConfidenceForContext(nil, raw, "deploy", "", "")
+	if adjusted <= raw {
+		t.Errorf("underconfident goal should increase confidence: raw=%v, adjusted=%v", raw, adjusted)
+	}
+	expectedAdj := 0.72
+	if adjusted != expectedAdj {
+		t.Errorf("expected %v, got %v", expectedAdj, adjusted)
+	}
+}
+
+func TestContextualCalibration_UnknownGoalNoChange(t *testing.T) {
+	mock := &mockContextualCalibrator{
+		adjustments: map[string]float64{
+			"known_goal": 0.10,
+		},
+	}
+
+	raw := 0.70
+	adjusted := mock.CalibrateConfidenceForContext(nil, raw, "unknown_goal", "", "")
+	if adjusted != raw {
+		t.Errorf("unknown goal should not change confidence: raw=%v, adjusted=%v", raw, adjusted)
+	}
+}
+
+func TestContextualCalibration_BoundedAt020(t *testing.T) {
+	mock := &mockContextualCalibrator{
+		adjustments: map[string]float64{
+			"extreme": 0.50, // very overconfident
+		},
+	}
+
+	raw := 0.90
+	adjusted := mock.CalibrateConfidenceForContext(nil, raw, "extreme", "", "")
+	expected := 0.70 // 0.90 - 0.20 (clamped)
+	if adjusted != expected {
+		t.Errorf("expected %v (bounded), got %v", expected, adjusted)
+	}
+}
+
+func TestContextualCalibration_DifferentGoalsDifferentAdjustments(t *testing.T) {
+	mock := &mockContextualCalibrator{
+		adjustments: map[string]float64{
+			"goal_a": 0.15,  // overconfident
+			"goal_b": -0.10, // underconfident
+		},
+	}
+
+	raw := 0.70
+	adjA := mock.CalibrateConfidenceForContext(nil, raw, "goal_a", "", "")
+	adjB := mock.CalibrateConfidenceForContext(nil, raw, "goal_b", "", "")
+
+	if adjA == adjB {
+		t.Error("different goals with different errors should produce different adjustment")
+	}
+	if adjA >= raw {
+		t.Error("overconfident goal should reduce confidence")
+	}
+	if adjB <= raw {
+		t.Error("underconfident goal should increase confidence")
 	}
 }
