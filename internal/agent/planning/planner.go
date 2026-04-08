@@ -50,7 +50,22 @@ type StrategyOverride struct {
 // StrategyProvider evaluates bounded multi-step strategies and may override
 // the tactical action selection with the first step of a selected strategy.
 type StrategyProvider interface {
-	EvaluateForPlanner(ctx context.Context, decision PlanningDecision, globalFeedback map[string]actionmemory.ActionFeedback) StrategyOverride
+	EvaluateForPlanner(ctx context.Context, decision PlanningDecision, globalFeedback map[string]actionmemory.ActionFeedback, strategyLearning map[string]StrategyLearningFeedback) StrategyOverride
+}
+
+// StrategyLearningFeedback carries strategy-level feedback signals
+// to the strategy scorer. Mirrors strategylearning types to avoid import cycles.
+type StrategyLearningFeedback struct {
+	StrategyType   string  `json:"strategy_type"`
+	SuccessRate    float64 `json:"success_rate"`
+	FailureRate    float64 `json:"failure_rate"`
+	SampleSize     int     `json:"sample_size"`
+	Recommendation string  `json:"recommendation"` // prefer_strategy | avoid_strategy | neutral | insufficient_data
+}
+
+// StrategyLearningProvider supplies strategy-level feedback for scoring.
+type StrategyLearningProvider interface {
+	GetStrategyFeedback(ctx context.Context, goalType string) map[string]StrategyLearningFeedback
 }
 
 // AdaptivePlanner replaces static goal→action mapping with context-aware,
@@ -76,6 +91,10 @@ type AdaptivePlanner struct {
 	// strategy provides bounded multi-step strategy evaluation.
 	// When nil, strategic planning is disabled and the system uses tactical only.
 	strategy StrategyProvider
+
+	// strategyLearning provides strategy-level feedback for scoring.
+	// When nil, strategy learning is disabled.
+	strategyLearning StrategyLearningProvider
 
 	// lastDecisions holds the most recent planning decisions for API visibility.
 	lastDecisions []PlanningDecision
@@ -120,6 +139,12 @@ func (ap *AdaptivePlanner) WithStrategy(s StrategyProvider) *AdaptivePlanner {
 	return ap
 }
 
+// WithStrategyLearning attaches a StrategyLearningProvider for strategy-level feedback.
+func (ap *AdaptivePlanner) WithStrategyLearning(sl StrategyLearningProvider) *AdaptivePlanner {
+	ap.strategyLearning = sl
+	return ap
+}
+
 // PlanActions implements the same signature as actions.Planner.PlanActions
 // but uses adaptive scoring instead of a static mapping.
 func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goal) ([]actions.Action, error) {
@@ -144,7 +169,12 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 		// with multi-step reasoning. Exploration can still override strategy.
 		var strategyOverride StrategyOverride
 		if ap.strategy != nil {
-			strategyOverride = ap.strategy.EvaluateForPlanner(ctx, decision, pctx.RecentActionFeedback)
+			// Collect strategy-level feedback if provider is wired.
+			var slFeedback map[string]StrategyLearningFeedback
+			if ap.strategyLearning != nil {
+				slFeedback = ap.strategyLearning.GetStrategyFeedback(ctx, g.Type)
+			}
+			strategyOverride = ap.strategy.EvaluateForPlanner(ctx, decision, pctx.RecentActionFeedback, slFeedback)
 			if strategyOverride.Applied && strategyOverride.ActionType != "" {
 				decision.SelectedActionType = strategyOverride.ActionType
 				decision.Explanation += fmt.Sprintf(" [strategy override: %s strategy=%s]", strategyOverride.Reason, strategyOverride.StrategyType)
