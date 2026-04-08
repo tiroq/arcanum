@@ -15,13 +15,16 @@ import (
 // Handler implements actions.OutcomeHandler by evaluating, persisting,
 // and auditing the real-world outcome of each executed action.
 type Handler struct {
-	evaluator            *DBEvaluator
-	store                *Store
-	memoryStore          *actionmemory.Store
-	pathOutcomeEval      PathOutcomeEvaluator
-	comparativeEvaluator ComparativeEvaluator
-	auditor              audit.AuditRecorder
-	logger               *zap.Logger
+	evaluator               *DBEvaluator
+	store                   *Store
+	memoryStore             *actionmemory.Store
+	pathOutcomeEval         PathOutcomeEvaluator
+	comparativeEvaluator    ComparativeEvaluator
+	counterfactualEvaluator CounterfactualPredictionEvaluator
+	metaOutcomeEval         MetaReasoningOutcomeEvaluator
+	calibrationRecorder     CalibrationRecorder
+	auditor                 audit.AuditRecorder
+	logger                  *zap.Logger
 }
 
 // PathOutcomeEvaluator evaluates path-level outcomes after action outcomes.
@@ -72,6 +75,42 @@ type ComparativeEvaluator interface {
 // WithComparativeEvaluator attaches a comparative evaluator for decision quality learning.
 func (h *Handler) WithComparativeEvaluator(ce ComparativeEvaluator) *Handler {
 	h.comparativeEvaluator = ce
+	return h
+}
+
+// CounterfactualPredictionEvaluator evaluates counterfactual prediction accuracy.
+// Defined here to avoid import cycles — implemented in counterfactual package.
+type CounterfactualPredictionEvaluator interface {
+	EvaluatePrediction(ctx context.Context, decisionID, pathSignature, goalType, actualOutcomeStatus string) error
+}
+
+// WithCounterfactualEvaluator attaches a counterfactual prediction evaluator.
+func (h *Handler) WithCounterfactualEvaluator(ce CounterfactualPredictionEvaluator) *Handler {
+	h.counterfactualEvaluator = ce
+	return h
+}
+
+// MetaReasoningOutcomeEvaluator updates mode memory after action outcomes.
+// Defined here to avoid import cycles — implemented in meta_reasoning package.
+type MetaReasoningOutcomeEvaluator interface {
+	RecordOutcome(ctx context.Context, mode string, goalType string, success bool)
+}
+
+// WithMetaReasoningEvaluator attaches a meta-reasoning evaluator for mode outcome learning.
+func (h *Handler) WithMetaReasoningEvaluator(mr MetaReasoningOutcomeEvaluator) *Handler {
+	h.metaOutcomeEval = mr
+	return h
+}
+
+// CalibrationRecorder records calibration data (predicted confidence vs actual outcome).
+// Defined here to avoid import cycles — implemented in calibration package.
+type CalibrationRecorder interface {
+	RecordCalibrationOutcome(ctx context.Context, decisionID string, predictedConfidence float64, actualOutcome string) error
+}
+
+// WithCalibrationRecorder attaches a calibration recorder for confidence tracking.
+func (h *Handler) WithCalibrationRecorder(cr CalibrationRecorder) *Handler {
+	h.calibrationRecorder = cr
 	return h
 }
 
@@ -142,6 +181,15 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 
 	// Evaluate comparative outcome (Iteration 22, best-effort).
 	h.evaluateComparativeOutcome(ctx, action, *o)
+
+	// Evaluate counterfactual prediction accuracy (Iteration 23, best-effort).
+	h.evaluateCounterfactualPrediction(ctx, action, *o)
+
+	// Evaluate meta-reasoning outcome (Iteration 24, best-effort).
+	h.evaluateMetaReasoningOutcome(ctx, action, *o)
+
+	// Record calibration data (Iteration 25, best-effort).
+	h.recordCalibration(ctx, action, *o)
 
 	return nil
 }
@@ -345,6 +393,89 @@ func (h *Handler) evaluateComparativeOutcome(ctx context.Context, action actions
 
 	if err := h.comparativeEvaluator.EvaluateComparison(ctx, decisionID, selectedOutcome); err != nil {
 		h.logger.Warn("comparative_evaluation_failed",
+			zap.String("action_id", action.ID),
+			zap.String("decision_id", decisionID),
+			zap.Error(err),
+		)
+	}
+}
+
+// evaluateCounterfactualPrediction extracts the decision ID and path signature from
+// Action.Params and evaluates the prediction accuracy. Only runs when decision ID
+// and path signature are present and a CounterfactualPredictionEvaluator is configured.
+// Best-effort: failures are logged.
+func (h *Handler) evaluateCounterfactualPrediction(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.counterfactualEvaluator == nil {
+		return
+	}
+
+	decisionID, _ := action.Params["_ctx_decision_id"].(string)
+	if decisionID == "" {
+		return // No decision context.
+	}
+
+	pathSig, _ := action.Params["_ctx_path_signature"].(string)
+	if pathSig == "" {
+		return // No path context.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	actualOutcome := string(o.OutcomeStatus)
+
+	if err := h.counterfactualEvaluator.EvaluatePrediction(ctx, decisionID, pathSig, goalType, actualOutcome); err != nil {
+		h.logger.Warn("counterfactual_evaluation_failed",
+			zap.String("action_id", action.ID),
+			zap.String("decision_id", decisionID),
+			zap.Error(err),
+		)
+	}
+}
+
+// evaluateMetaReasoningOutcome extracts meta mode from Action.Params and updates
+// mode memory. Only runs when meta mode is present and a MetaReasoningOutcomeEvaluator
+// is configured. Best-effort: failures are logged.
+func (h *Handler) evaluateMetaReasoningOutcome(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.metaOutcomeEval == nil {
+		return
+	}
+
+	metaMode, _ := action.Params["_ctx_meta_mode"].(string)
+	if metaMode == "" {
+		return // No meta-reasoning context.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	success := o.OutcomeStatus == "success"
+
+	h.metaOutcomeEval.RecordOutcome(ctx, metaMode, goalType, success)
+}
+
+// recordCalibration extracts predicted confidence and decision ID from Action.Params
+// and records a calibration data point. Only runs when a CalibrationRecorder is configured
+// and decision ID is present. Best-effort: failures are logged.
+func (h *Handler) recordCalibration(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.calibrationRecorder == nil {
+		return
+	}
+
+	decisionID, _ := action.Params["_ctx_decision_id"].(string)
+	if decisionID == "" {
+		return // No decision context — action was not from a decision graph override.
+	}
+
+	// Extract predicted confidence. This is the confidence of the selected path's first node,
+	// embedded by the planner. Fall back to checking float64 (JSON default).
+	predictedConfidence := 0.0
+	if v, ok := action.Params["_ctx_predicted_confidence"].(float64); ok {
+		predictedConfidence = v
+	} else {
+		return // No confidence data available.
+	}
+
+	actualOutcome := string(o.OutcomeStatus)
+
+	if err := h.calibrationRecorder.RecordCalibrationOutcome(ctx, decisionID, predictedConfidence, actualOutcome); err != nil {
+		h.logger.Warn("calibration_record_failed",
 			zap.String("action_id", action.ID),
 			zap.String("decision_id", decisionID),
 			zap.Error(err),
