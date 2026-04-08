@@ -16,6 +16,12 @@ type StabilityProvider interface {
 	GetBlockedActions(ctx context.Context) []string
 }
 
+// MemoryReader provides read-only access to strategy memory.
+// Extracted as an interface so the continuation engine is testable without a database.
+type MemoryReader interface {
+	GetMemory(ctx context.Context, strategyType, goalType string) (*StrategyMemoryRecord, error)
+}
+
 // ContinuationEngine evaluates whether step 2 of a strategy should be executed.
 // It enforces all safety gates and hard limits.
 //
@@ -25,7 +31,7 @@ type StabilityProvider interface {
 //   - no continuation in safe_mode or throttled mode
 //   - no continuation if system-wide failure_rate >= MaxContinuationFailureRate
 type ContinuationEngine struct {
-	store     *MemoryStore
+	store     MemoryReader
 	stability StabilityProvider
 	auditor   audit.AuditRecorder
 	logger    *zap.Logger
@@ -114,17 +120,25 @@ func (ce *ContinuationEngine) EvaluateContinuation(
 	}
 
 	// Gate 5: Strategy failure rate must be acceptable.
+	// Gate 8: Low continuation gain blocks continuation.
 	if ce.store != nil {
 		record, err := ce.store.GetMemory(ctx, strategyType, goalType)
 		if err != nil {
 			ce.logger.Warn("continuation_memory_lookup_failed", zap.Error(err))
-			return ce.skip(ctx, strategyID, strategyType, now,
-				"memory_error: "+err.Error())
-		}
-		if record != nil && record.TotalRuns >= MinSampleSize &&
-			record.FailureRate >= MaxContinuationFailureRate {
-			return ce.skip(ctx, strategyID, strategyType, now,
-				"high_failure_rate: "+formatFloat(record.FailureRate))
+			// Fail-open: on error, allow continuation.
+		} else if record != nil {
+			// Gate 5: overall failure rate check.
+			if record.TotalRuns >= MinSampleSize &&
+				record.FailureRate >= MaxContinuationFailureRate {
+				return ce.skip(ctx, strategyID, strategyType, now,
+					"high_failure_rate: "+formatFloat(record.FailureRate))
+			}
+			// Gate 8: learned continuation gain is too low.
+			if record.ContinuationUsedRuns >= MinContinuationSampleSize &&
+				record.ContinuationGainRate < AvoidContinuationGainRate {
+				return ce.skip(ctx, strategyID, strategyType, now,
+					"low_continuation_gain: "+formatFloat(record.ContinuationGainRate))
+			}
 		}
 	}
 

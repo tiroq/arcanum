@@ -33,11 +33,13 @@ func (a *PlannerAdapter) GetStrategyFeedback(ctx context.Context, goalType strin
 		}
 		fb := GenerateFeedback(&r)
 		result[r.StrategyType] = planning.StrategyLearningFeedback{
-			StrategyType:   r.StrategyType,
-			SuccessRate:    fb.SuccessRate,
-			FailureRate:    fb.FailureRate,
-			SampleSize:     fb.SampleSize,
-			Recommendation: string(fb.Recommendation),
+			StrategyType:       r.StrategyType,
+			SuccessRate:        fb.SuccessRate,
+			FailureRate:        fb.FailureRate,
+			SampleSize:         fb.SampleSize,
+			Recommendation:     string(fb.Recommendation),
+			PreferContinuation: fb.PreferContinuation,
+			AvoidContinuation:  fb.AvoidContinuation,
 		}
 	}
 	return result

@@ -29,21 +29,7 @@ func NewEvaluator(store *MemoryStore, auditor audit.AuditRecorder, logger *zap.L
 }
 
 // EvaluateOutcome determines the strategy-level outcome from an action outcome.
-//
-// Parameters:
-//   - strategyID: the UUID of the strategy plan that was executed
-//   - strategyType: the strategy type (e.g. "direct_retry")
-//   - goalType: the goal type this strategy addressed
-//   - step1Action: the action type executed as step 1
-//   - actionOutcomeStatus: the outcome of the executed action ("success", "neutral", "failure")
-//   - improvement: whether the action produced an improvement
-//   - step2Executed: whether step 2 was already executed
-//
-// This method:
-//  1. Creates a StrategyOutcome record
-//  2. Persists it
-//  3. Updates strategy memory counters
-//  4. Emits audit events
+// Backward-compatible: delegates to EvaluateOutcomeWithSteps with empty step-level fields.
 func (e *Evaluator) EvaluateOutcome(
 	ctx context.Context,
 	strategyID uuid.UUID,
@@ -54,55 +40,99 @@ func (e *Evaluator) EvaluateOutcome(
 	improvement bool,
 	step2Executed bool,
 ) (*StrategyOutcome, error) {
+	return e.EvaluateOutcomeWithSteps(ctx, strategyID, strategyType, goalType,
+		step1Action, actionOutcomeStatus, improvement, step2Executed,
+		"", "") // empty step1/step2 statuses → legacy path
+}
+
+// EvaluateOutcomeWithSteps determines the strategy-level outcome with
+// step-level granularity and continuation gain detection.
+//
+// Parameters:
+//   - step1Status: the outcome of step 1 ("success", "neutral", "failure")
+//   - step2Status: the outcome of step 2 ("success", "neutral", "failure", "")
+//     Empty string means step 2 was not executed.
+//
+// Continuation gain = step2 succeeded AND step1 did NOT succeed.
+// This captures "step 2 added value beyond step 1".
+func (e *Evaluator) EvaluateOutcomeWithSteps(
+	ctx context.Context,
+	strategyID uuid.UUID,
+	strategyType string,
+	goalType string,
+	step1Action string,
+	actionOutcomeStatus string,
+	improvement bool,
+	step2Executed bool,
+	step1Status string,
+	step2Status string,
+) (*StrategyOutcome, error) {
 	now := time.Now().UTC()
 
-	// Determine final strategy status from action outcome.
+	// Determine final strategy status from action outcome (backward compat).
 	finalStatus := classifyOutcome(actionOutcomeStatus)
 
+	// Compute continuation signals.
+	continuationUsed := step2Executed && step2Status != ""
+	continuationGain := continuationUsed &&
+		step2Status == OutcomeSuccess &&
+		step1Status != OutcomeSuccess
+
 	outcome := StrategyOutcome{
-		ID:            uuid.New(),
-		StrategyID:    strategyID,
-		StrategyType:  strategyType,
-		GoalType:      goalType,
-		Step1Action:   step1Action,
-		Step2Executed: step2Executed,
-		FinalStatus:   finalStatus,
-		Improvement:   improvement,
-		EvaluatedAt:   now,
+		ID:               uuid.New(),
+		StrategyID:       strategyID,
+		StrategyType:     strategyType,
+		GoalType:         goalType,
+		Step1Action:      step1Action,
+		Step2Executed:    step2Executed,
+		FinalStatus:      finalStatus,
+		Improvement:      improvement,
+		EvaluatedAt:      now,
+		Step1Status:      step1Status,
+		Step2Status:      step2Status,
+		ContinuationUsed: continuationUsed,
+		ContinuationGain: continuationGain,
 	}
 
 	// Persist outcome (best-effort).
 	if err := e.store.SaveOutcome(ctx, outcome); err != nil {
 		e.logger.Warn("strategy_outcome_persist_failed", zap.Error(err))
-		// Continue — memory update is more important.
 	}
 
-	// Update strategy memory counters.
-	if err := e.store.UpdateMemory(ctx, strategyType, goalType, finalStatus); err != nil {
+	// Update strategy memory counters with step-level data.
+	if err := e.store.UpdateMemoryWithContinuation(ctx, strategyType, goalType,
+		finalStatus, step1Status, step2Status,
+		continuationUsed, continuationGain); err != nil {
 		e.logger.Warn("strategy_memory_update_failed", zap.Error(err))
 	}
 
 	// Audit the outcome evaluation.
 	e.auditEvent(ctx, "strategy.outcome_evaluated", map[string]any{
-		"strategy_id":    strategyID.String(),
-		"strategy_type":  strategyType,
-		"goal_type":      goalType,
-		"step1_action":   step1Action,
-		"step2_executed": step2Executed,
-		"final_status":   finalStatus,
-		"improvement":    improvement,
+		"strategy_id":       strategyID.String(),
+		"strategy_type":     strategyType,
+		"goal_type":         goalType,
+		"step1_action":      step1Action,
+		"step2_executed":    step2Executed,
+		"final_status":      finalStatus,
+		"improvement":       improvement,
+		"step1_status":      step1Status,
+		"step2_status":      step2Status,
+		"continuation_used": continuationUsed,
+		"continuation_gain": continuationGain,
 	})
 
 	// Generate and audit feedback signal.
 	fb := e.generateFeedback(ctx, strategyType, goalType)
 	if fb != nil {
 		e.auditEvent(ctx, "strategy.feedback_generated", map[string]any{
-			"strategy_type":  fb.StrategyType,
-			"goal_type":      fb.GoalType,
-			"recommendation": string(fb.Recommendation),
-			"success_rate":   fb.SuccessRate,
-			"failure_rate":   fb.FailureRate,
-			"sample_size":    fb.SampleSize,
+			"strategy_type":       fb.StrategyType,
+			"goal_type":           fb.GoalType,
+			"recommendation":      string(fb.Recommendation),
+			"success_rate":        fb.SuccessRate,
+			"failure_rate":        fb.FailureRate,
+			"sample_size":         fb.SampleSize,
+			"prefer_continuation": fb.PreferContinuation,
+			"avoid_continuation":  fb.AvoidContinuation,
 		})
 	}
 
@@ -168,6 +198,16 @@ func GenerateFeedback(record *StrategyMemoryRecord) StrategyFeedback {
 		fb.Recommendation = RecommendPreferStrategy
 	default:
 		fb.Recommendation = RecommendNeutralStrategy
+	}
+
+	// Continuation signals (Iteration 18.1).
+	// Only emit signals when we have enough continuation samples.
+	if record.ContinuationUsedRuns >= MinContinuationSampleSize {
+		if record.ContinuationGainRate >= PreferContinuationGainRate {
+			fb.PreferContinuation = true
+		} else if record.ContinuationGainRate <= AvoidContinuationGainRate {
+			fb.AvoidContinuation = true
+		}
 	}
 
 	return fb
