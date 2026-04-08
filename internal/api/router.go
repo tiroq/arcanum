@@ -144,5 +144,11 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/calibration/buckets", chain(handlers.CalibrationBuckets))
 	mux.Handle("/api/v1/agent/calibration/errors", chain(handlers.CalibrationErrors))
 
+	// Agent contextual calibration (context-aware calibration, Iteration 26)
+	mux.Handle("/api/v1/agent/calibration/context", chain(handlers.CalibrationContextList))
+
+	// Agent signal arbitration (Iteration 27)
+	mux.Handle("/api/v1/agent/arbitration/trace", chain(handlers.ArbitrationTrace))
+
 	return requestIDMiddleware(mux)
 }

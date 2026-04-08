@@ -23,6 +23,7 @@ type Handler struct {
 	counterfactualEvaluator CounterfactualPredictionEvaluator
 	metaOutcomeEval         MetaReasoningOutcomeEvaluator
 	calibrationRecorder     CalibrationRecorder
+	contextCalibrationRecorder ContextualCalibrationRecorder
 	auditor                 audit.AuditRecorder
 	logger                  *zap.Logger
 }
@@ -114,6 +115,18 @@ func (h *Handler) WithCalibrationRecorder(cr CalibrationRecorder) *Handler {
 	return h
 }
 
+// ContextualCalibrationRecorder records per-context calibration data after outcomes.
+// Defined here to avoid import cycles — implemented in calibration package.
+type ContextualCalibrationRecorder interface {
+	RecordContextCalibrationOutcome(ctx context.Context, goalType, providerName, strategyType string, predictedConfidence float64, actualOutcome string) error
+}
+
+// WithContextualCalibrationRecorder attaches a contextual calibration recorder (Iteration 26).
+func (h *Handler) WithContextualCalibrationRecorder(cr ContextualCalibrationRecorder) *Handler {
+	h.contextCalibrationRecorder = cr
+	return h
+}
+
 // HandleOutcome evaluates the action's real-world impact, persists the
 // outcome, updates action memory, and emits audit events.
 func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, result actions.ActionResult) error {
@@ -190,6 +203,9 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 
 	// Record calibration data (Iteration 25, best-effort).
 	h.recordCalibration(ctx, action, *o)
+
+	// Record contextual calibration data (Iteration 26, best-effort).
+	h.recordContextCalibration(ctx, action, *o)
 
 	return nil
 }
@@ -478,6 +494,37 @@ func (h *Handler) recordCalibration(ctx context.Context, action actions.Action, 
 		h.logger.Warn("calibration_record_failed",
 			zap.String("action_id", action.ID),
 			zap.String("decision_id", decisionID),
+			zap.Error(err),
+		)
+	}
+}
+
+// recordContextCalibration records per-context calibration data for contextual
+// confidence adjustment (Iteration 26). Extracts goal_type, provider_name,
+// strategy_type, and predicted_confidence from Action.Params.
+// Best-effort: failures are logged but do not block outcome processing.
+func (h *Handler) recordContextCalibration(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.contextCalibrationRecorder == nil {
+		return
+	}
+
+	predictedConfidence := 0.0
+	if v, ok := action.Params["_ctx_predicted_confidence"].(float64); ok {
+		predictedConfidence = v
+	} else {
+		return // No confidence data available.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	providerName, _ := action.Params["_ctx_provider_name"].(string)
+	strategyType, _ := action.Params["_ctx_strategy_type"].(string)
+
+	actualOutcome := string(o.OutcomeStatus)
+
+	if err := h.contextCalibrationRecorder.RecordContextCalibrationOutcome(ctx, goalType, providerName, strategyType, predictedConfidence, actualOutcome); err != nil {
+		h.logger.Warn("context_calibration_record_failed",
+			zap.String("action_id", action.ID),
+			zap.String("goal_type", goalType),
 			zap.Error(err),
 		)
 	}

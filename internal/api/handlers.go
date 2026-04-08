@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/arbitration"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
 	"github.com/tiroq/arcanum/internal/agent/causal"
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
@@ -72,6 +73,7 @@ type Handlers struct {
 	metaEngine         *meta_reasoning.Engine
 	calibrator         *calibration.Calibrator
 	calibrationTracker *calibration.Tracker
+	contextCalStore    *calibration.ContextStore
 	logger             *zap.Logger
 }
 
@@ -205,6 +207,13 @@ func (h *Handlers) WithMetaReasoning(me *meta_reasoning.Engine) *Handlers {
 func (h *Handlers) WithCalibration(c *calibration.Calibrator, t *calibration.Tracker) *Handlers {
 	h.calibrator = c
 	h.calibrationTracker = t
+	return h
+}
+
+// WithContextCalibration attaches the contextual calibration store for the
+// contextual confidence calibration API (Iteration 26).
+func (h *Handlers) WithContextCalibration(cs *calibration.ContextStore) *Handlers {
+	h.contextCalStore = cs
 	return h
 }
 
@@ -2634,5 +2643,64 @@ func (h *Handlers) CalibrationErrors(w http.ResponseWriter, r *http.Request) {
 		"overconfidence_score":       over,
 		"underconfidence_score":      under,
 		"total_records":              len(records),
+	})
+}
+
+// --- Contextual Calibration (Iteration 26) ---
+
+// CalibrationContextList returns contextual calibration records.
+// Supports optional ?goal_type= query parameter for filtering.
+func (h *Handlers) CalibrationContextList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.contextCalStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "contextual calibration not configured")
+		return
+	}
+
+	goalType := r.URL.Query().Get("goal_type")
+
+	var records []calibration.CalibrationContextRecord
+	var err error
+	if goalType != "" {
+		records, err = h.contextCalStore.GetByGoalType(r.Context(), goalType)
+	} else {
+		records, err = h.contextCalStore.GetAll(r.Context())
+	}
+	if err != nil {
+		h.logger.Error("calibration_context_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if records == nil {
+		records = []calibration.CalibrationContextRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": records,
+	})
+}
+
+// ArbitrationTrace returns the most recent arbitration traces (Iteration 27).
+func (h *Handlers) ArbitrationTrace(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.decisionGraph == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "arbitration not configured")
+		return
+	}
+
+	traces := h.decisionGraph.LastArbTraces()
+	if traces == nil {
+		traces = []arbitration.ArbitrationTrace{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"traces": traces,
 	})
 }
