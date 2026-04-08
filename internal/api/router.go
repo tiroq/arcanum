@@ -124,5 +124,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/transition-memory", chain(handlers.TransitionMemoryList))
 	mux.Handle("/api/v1/agent/path-outcomes", chain(handlers.PathOutcomesList))
 
+	// Agent path comparison (comparative path selection learning, Iteration 22)
+	mux.Handle("/api/v1/agent/path-snapshots", chain(handlers.PathSnapshotsList))
+	mux.Handle("/api/v1/agent/path-comparative", chain(handlers.PathComparativeList))
+	mux.Handle("/api/v1/agent/path-comparative-memory", chain(handlers.PathComparativeMemoryList))
+
 	return requestIDMiddleware(mux)
 }

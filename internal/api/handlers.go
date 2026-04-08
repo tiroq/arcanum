@@ -20,6 +20,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
@@ -59,6 +60,9 @@ type Handlers struct {
 	decisionGraph     *decision_graph.GraphPlannerAdapter
 	pathMemoryStore   *pathlearning.MemoryStore
 	transitionStore   *pathlearning.TransitionStore
+	compSnapshotStore *pathcomparison.SnapshotStore
+	compOutcomeStore  *pathcomparison.OutcomeStore
+	compMemoryStore   *pathcomparison.MemoryStore
 	logger            *zap.Logger
 }
 
@@ -163,6 +167,14 @@ func (h *Handlers) WithDecisionGraph(dg *decision_graph.GraphPlannerAdapter) *Ha
 func (h *Handlers) WithPathLearning(ms *pathlearning.MemoryStore, ts *pathlearning.TransitionStore) *Handlers {
 	h.pathMemoryStore = ms
 	h.transitionStore = ts
+	return h
+}
+
+// WithPathComparison attaches the path comparison stores.
+func (h *Handlers) WithPathComparison(ss *pathcomparison.SnapshotStore, os *pathcomparison.OutcomeStore, ms *pathcomparison.MemoryStore) *Handlers {
+	h.compSnapshotStore = ss
+	h.compOutcomeStore = os
+	h.compMemoryStore = ms
 	return h
 }
 
@@ -2174,5 +2186,128 @@ func (h *Handlers) PathOutcomesList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"outcomes": outcomes,
 		"page":     p.Page,
+	})
+}
+
+// --- Path Comparison handlers (Iteration 22) ---
+
+// PathSnapshotsList returns decision snapshots.
+func (h *Handlers) PathSnapshotsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.compSnapshotStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "path comparison not configured")
+		return
+	}
+
+	p := parsePagination(r)
+	goalType := r.URL.Query().Get("goal_type")
+
+	var snapshots []pathcomparison.DecisionSnapshot
+	var err error
+
+	if goalType != "" {
+		snapshots, err = h.compSnapshotStore.ListSnapshotsByGoalType(r.Context(), goalType, p.PerPage, p.Offset)
+	} else {
+		snapshots, err = h.compSnapshotStore.ListSnapshots(r.Context(), p.PerPage, p.Offset)
+	}
+	if err != nil {
+		h.logger.Error("path_snapshots_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if snapshots == nil {
+		snapshots = []pathcomparison.DecisionSnapshot{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"snapshots": snapshots,
+		"page":      p.Page,
+	})
+}
+
+// PathComparativeList returns comparative outcomes.
+func (h *Handlers) PathComparativeList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.compOutcomeStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "path comparison not configured")
+		return
+	}
+
+	p := parsePagination(r)
+	goalType := r.URL.Query().Get("goal_type")
+
+	var outcomes []pathcomparison.ComparativeOutcome
+	var err error
+
+	if goalType != "" {
+		outcomes, err = h.compOutcomeStore.ListOutcomesByGoalType(r.Context(), goalType, p.PerPage, p.Offset)
+	} else {
+		outcomes, err = h.compOutcomeStore.ListOutcomes(r.Context(), p.PerPage, p.Offset)
+	}
+	if err != nil {
+		h.logger.Error("path_comparative_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if outcomes == nil {
+		outcomes = []pathcomparison.ComparativeOutcome{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"outcomes": outcomes,
+		"page":     p.Page,
+	})
+}
+
+// PathComparativeMemoryList returns comparative memory records with recommendations.
+func (h *Handlers) PathComparativeMemoryList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.compMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "path comparison not configured")
+		return
+	}
+
+	goalType := r.URL.Query().Get("goal_type")
+
+	var records []pathcomparison.ComparativeMemoryRecord
+	var err error
+
+	if goalType != "" {
+		records, err = h.compMemoryStore.ListMemoryByGoalType(r.Context(), goalType)
+	} else {
+		records, err = h.compMemoryStore.ListMemory(r.Context())
+	}
+	if err != nil {
+		h.logger.Error("path_comparative_memory_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	type recordWithFeedback struct {
+		pathcomparison.ComparativeMemoryRecord
+		Recommendation string `json:"recommendation"`
+	}
+	result := make([]recordWithFeedback, 0, len(records))
+	for _, rec := range records {
+		fb := pathcomparison.GenerateComparativeFeedback(&rec)
+		result = append(result, recordWithFeedback{
+			ComparativeMemoryRecord: rec,
+			Recommendation:         string(fb.Recommendation),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": result,
 	})
 }
