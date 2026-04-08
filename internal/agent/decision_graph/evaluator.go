@@ -1,6 +1,10 @@
 package decision_graph
 
-import "math"
+import (
+	"math"
+
+	"github.com/tiroq/arcanum/internal/agent/arbitration"
+)
 
 // EvaluatePath computes the aggregate scores for a decision path.
 //
@@ -233,6 +237,188 @@ func ApplyCounterfactualAdjustments(paths []DecisionPath, predictions *Counterfa
 	}
 
 	return adjusted
+}
+
+// --- Signal Arbitration (Iteration 27) ---
+
+// ArbitratedSignals bundles all signal sources for unified arbitration.
+type ArbitratedSignals struct {
+	PathLearning       *PathLearningSignals
+	ComparativeLearning *ComparativeLearningSignals
+	Counterfactual     *CounterfactualPredictions
+	StabilityMode      string
+	CalibratedConfidence float64
+	ExplorationActive  bool
+}
+
+// ApplyArbitratedAdjustments replaces the sequential Apply* calls with a single
+// arbitrated pass. For each path, it collects all signals, resolves conflicts
+// via the arbitration layer, and applies a single deterministic adjustment.
+// If signals is nil, returns paths unchanged (fail-open).
+func ApplyArbitratedAdjustments(paths []DecisionPath, signals *ArbitratedSignals) ([]DecisionPath, []arbitration.ArbitrationTrace) {
+	if signals == nil {
+		return paths, nil
+	}
+
+	adjusted := make([]DecisionPath, len(paths))
+	traces := make([]arbitration.ArbitrationTrace, len(paths))
+
+	for i, p := range paths {
+		sig := pathSignatureFromNodes(p.Nodes)
+		collected := collectSignals(p, sig, signals)
+		result := arbitration.ResolveSignals(sig, collected, signals.CalibratedConfidence)
+		p.FinalScore = clamp01(p.FinalScore + result.FinalAdjustment)
+		adjusted[i] = p
+		traces[i] = result.Trace
+	}
+
+	return adjusted, traces
+}
+
+// collectSignals builds a list of arbitration signals for a single path from all sources.
+func collectSignals(path DecisionPath, sig string, signals *ArbitratedSignals) []arbitration.Signal {
+	var out []arbitration.Signal
+
+	// Stability signal: derived from stability mode.
+	if signals.StabilityMode == "safe_mode" || signals.StabilityMode == "throttled" {
+		out = append(out, arbitration.Signal{
+			Type:           arbitration.SignalStability,
+			Recommendation: arbitration.RecommendAvoid,
+			Adjustment:     -0.10,
+			Confidence:     1.0,
+			Source:         "stability_mode:" + signals.StabilityMode,
+		})
+	}
+
+	// Calibration signal: derived from calibrated confidence level.
+	if signals.CalibratedConfidence < arbitration.ConfidenceSuppressionThreshold {
+		out = append(out, arbitration.Signal{
+			Type:           arbitration.SignalCalibration,
+			Recommendation: arbitration.RecommendAvoid,
+			Adjustment:     -0.05,
+			Confidence:     1.0 - signals.CalibratedConfidence,
+			Source:         "low_calibrated_confidence",
+		})
+	}
+
+	// Path learning signals.
+	if signals.PathLearning != nil {
+		if rec, ok := signals.PathLearning.PathFeedback[sig]; ok {
+			s := arbitration.Signal{
+				Type:       arbitration.SignalPathLearning,
+				Confidence: 0.8,
+				Source:     "path_feedback",
+			}
+			switch rec {
+			case "prefer_path":
+				s.Recommendation = arbitration.RecommendPrefer
+				s.Adjustment = pathPreferAdjustment
+			case "avoid_path":
+				s.Recommendation = arbitration.RecommendAvoid
+				s.Adjustment = pathAvoidAdjustment
+			default:
+				s.Recommendation = arbitration.RecommendNeutral
+			}
+			if s.Recommendation != arbitration.RecommendNeutral {
+				out = append(out, s)
+			}
+		}
+
+		// Transition learning signals.
+		if len(path.Nodes) > 1 {
+			for j := 0; j < len(path.Nodes)-1; j++ {
+				tKey := path.Nodes[j].ActionType + "->" + path.Nodes[j+1].ActionType
+				if rec, ok := signals.PathLearning.TransitionFeedback[tKey]; ok {
+					s := arbitration.Signal{
+						Type:       arbitration.SignalTransitionLearning,
+						Confidence: 0.7,
+						Source:     "transition_feedback:" + tKey,
+					}
+					switch rec {
+					case "prefer_transition":
+						s.Recommendation = arbitration.RecommendPrefer
+						s.Adjustment = transitionPreferAdjustment
+					case "avoid_transition":
+						s.Recommendation = arbitration.RecommendAvoid
+						s.Adjustment = transitionAvoidAdjustment
+					default:
+						s.Recommendation = arbitration.RecommendNeutral
+					}
+					if s.Recommendation != arbitration.RecommendNeutral {
+						out = append(out, s)
+					}
+				}
+			}
+		}
+	}
+
+	// Comparative learning signals.
+	if signals.ComparativeLearning != nil {
+		if rec, ok := signals.ComparativeLearning.ComparativeFeedback[sig]; ok {
+			s := arbitration.Signal{
+				Type:       arbitration.SignalComparative,
+				Confidence: 0.6,
+				Source:     "comparative_feedback",
+			}
+			switch rec {
+			case "prefer_path":
+				s.Recommendation = arbitration.RecommendPrefer
+				s.Adjustment = comparativePreferAdjustment
+			case "avoid_path":
+				s.Recommendation = arbitration.RecommendAvoid
+				s.Adjustment = comparativeAvoidAdjustment
+			case "underexplored_path":
+				s.Recommendation = arbitration.RecommendPrefer
+				s.Adjustment = comparativeUnderexploredAdjustment
+			default:
+				s.Recommendation = arbitration.RecommendNeutral
+			}
+			if s.Recommendation != arbitration.RecommendNeutral {
+				out = append(out, s)
+			}
+		}
+	}
+
+	// Counterfactual signal: use prediction delta as a causal signal.
+	if signals.Counterfactual != nil {
+		if predValue, ok := signals.Counterfactual.Predictions[sig]; ok {
+			conf := 0.0
+			if c, cok := signals.Counterfactual.Confidences[sig]; cok {
+				conf = c
+			}
+			if conf > counterfactualMinConfidence {
+				delta := (predValue - path.FinalScore) * counterfactualPredictionWeight
+				rec := arbitration.RecommendNeutral
+				if delta > 0.01 {
+					rec = arbitration.RecommendPrefer
+				} else if delta < -0.01 {
+					rec = arbitration.RecommendAvoid
+				}
+				if rec != arbitration.RecommendNeutral {
+					out = append(out, arbitration.Signal{
+						Type:           arbitration.SignalCausal,
+						Recommendation: rec,
+						Adjustment:     delta,
+						Confidence:     conf,
+						Source:         "counterfactual_prediction",
+					})
+				}
+			}
+		}
+	}
+
+	// Exploration signal.
+	if signals.ExplorationActive {
+		out = append(out, arbitration.Signal{
+			Type:           arbitration.SignalExploration,
+			Recommendation: arbitration.RecommendPrefer,
+			Adjustment:     comparativeUnderexploredAdjustment,
+			Confidence:     0.5,
+			Source:         "exploration_active",
+		})
+	}
+
+	return out
 }
 
 // clamp01 restricts a value to [0, 1].
