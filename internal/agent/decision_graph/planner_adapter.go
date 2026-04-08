@@ -138,15 +138,15 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 
 	// Audit the graph evaluation.
 	a.auditEvent(ctx, "decision_graph.evaluated", map[string]any{
-		"goal_id":         decision.GoalID,
-		"goal_type":       decision.GoalType,
-		"node_count":      len(graph.Nodes),
-		"edge_count":      len(graph.Edges),
-		"path_count":      len(scored),
-		"stability_mode":  stabilityMode,
-		"should_explore":  shouldExplore,
+		"goal_id":          decision.GoalID,
+		"goal_type":        decision.GoalType,
+		"node_count":       len(graph.Nodes),
+		"edge_count":       len(graph.Edges),
+		"path_count":       len(scored),
+		"stability_mode":   stabilityMode,
+		"should_explore":   shouldExplore,
 		"exploration_used": selection.ExplorationUsed,
-		"reason":          selection.Reason,
+		"reason":           selection.Reason,
 	})
 
 	if selection.Selected == nil || len(selection.Selected.Nodes) == 0 {
@@ -175,13 +175,13 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 
 	// Audit the override.
 	a.auditEvent(ctx, "decision_graph.override", map[string]any{
-		"goal_id":          decision.GoalID,
-		"goal_type":        decision.GoalType,
-		"tactical_action":  decision.SelectedActionType,
-		"graph_action":     firstAction,
-		"path_length":      len(selection.Selected.Nodes),
-		"final_score":      selection.Selected.FinalScore,
-		"reason":           override.Reason,
+		"goal_id":         decision.GoalID,
+		"goal_type":       decision.GoalType,
+		"tactical_action": decision.SelectedActionType,
+		"graph_action":    firstAction,
+		"path_length":     len(selection.Selected.Nodes),
+		"final_score":     selection.Selected.FinalScore,
+		"reason":          override.Reason,
 	})
 
 	return override

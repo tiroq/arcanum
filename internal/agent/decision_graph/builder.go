@@ -232,15 +232,15 @@ func defaultTransitions(goalType string) map[string][]string {
 	switch goalType {
 	case "reduce_retry_rate", "investigate_failed_jobs":
 		return map[string][]string{
-			"retry_job":           {"log_recommendation"},
-			"log_recommendation":  {"retry_job"},
-			"noop":                {},
+			"retry_job":          {"log_recommendation"},
+			"log_recommendation": {"retry_job"},
+			"noop":               {},
 		}
 	case "resolve_queue_backlog":
 		return map[string][]string{
-			"trigger_resync":      {"log_recommendation"},
-			"log_recommendation":  {"trigger_resync"},
-			"noop":                {},
+			"trigger_resync":     {"log_recommendation"},
+			"log_recommendation": {"trigger_resync"},
+			"noop":               {},
 		}
 	default:
 		return map[string][]string{
