@@ -15,12 +15,13 @@ import (
 // Handler implements actions.OutcomeHandler by evaluating, persisting,
 // and auditing the real-world outcome of each executed action.
 type Handler struct {
-	evaluator       *DBEvaluator
-	store           *Store
-	memoryStore     *actionmemory.Store
-	pathOutcomeEval PathOutcomeEvaluator
-	auditor         audit.AuditRecorder
-	logger          *zap.Logger
+	evaluator            *DBEvaluator
+	store                *Store
+	memoryStore          *actionmemory.Store
+	pathOutcomeEval      PathOutcomeEvaluator
+	comparativeEvaluator ComparativeEvaluator
+	auditor              audit.AuditRecorder
+	logger               *zap.Logger
 }
 
 // PathOutcomeEvaluator evaluates path-level outcomes after action outcomes.
@@ -59,6 +60,18 @@ func (h *Handler) WithMemoryStore(ms *actionmemory.Store) *Handler {
 // WithPathOutcomeEvaluator attaches a path outcome evaluator for path-level learning.
 func (h *Handler) WithPathOutcomeEvaluator(pe PathOutcomeEvaluator) *Handler {
 	h.pathOutcomeEval = pe
+	return h
+}
+
+// ComparativeEvaluator evaluates comparative path selection outcomes.
+// Defined here to avoid import cycles — implemented in path_comparison package.
+type ComparativeEvaluator interface {
+	EvaluateComparison(ctx context.Context, decisionID string, selectedOutcome string) error
+}
+
+// WithComparativeEvaluator attaches a comparative evaluator for decision quality learning.
+func (h *Handler) WithComparativeEvaluator(ce ComparativeEvaluator) *Handler {
+	h.comparativeEvaluator = ce
 	return h
 }
 
@@ -126,6 +139,9 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 
 	// Evaluate path outcome (Iteration 21, best-effort).
 	h.evaluatePathOutcome(ctx, action, *o)
+
+	// Evaluate comparative outcome (Iteration 22, best-effort).
+	h.evaluateComparativeOutcome(ctx, action, *o)
 
 	return nil
 }
@@ -307,6 +323,30 @@ func (h *Handler) evaluatePathOutcome(ctx context.Context, action actions.Action
 		h.logger.Warn("path_outcome_evaluation_failed",
 			zap.String("action_id", action.ID),
 			zap.String("path_signature", pathSig),
+			zap.Error(err),
+		)
+	}
+}
+
+// evaluateComparativeOutcome extracts the decision ID from Action.Params and evaluates
+// the comparative outcome. Only runs when decision ID is present (decision graph override)
+// and a ComparativeEvaluator is configured. Best-effort: failures are logged.
+func (h *Handler) evaluateComparativeOutcome(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.comparativeEvaluator == nil {
+		return
+	}
+
+	decisionID, _ := action.Params["_ctx_decision_id"].(string)
+	if decisionID == "" {
+		return // No decision context — action was not from a decision graph override.
+	}
+
+	selectedOutcome := string(o.OutcomeStatus)
+
+	if err := h.comparativeEvaluator.EvaluateComparison(ctx, decisionID, selectedOutcome); err != nil {
+		h.logger.Warn("comparative_evaluation_failed",
+			zap.String("action_id", action.ID),
+			zap.String("decision_id", decisionID),
 			zap.Error(err),
 		)
 	}
