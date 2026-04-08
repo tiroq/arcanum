@@ -10,28 +10,54 @@ connection:
 
 limits:
   rpm: 30
-  tpm: 6000
-  rpd: 1000
-  tpd: 500000
+  tpm: 0
+  rpd: 0
+  tpd: 0
 
 routing:
-  roles: [planner, reviewer, fast]
+  roles: [fast, planner, reviewer]
   fallback_priority: 20
   allow_external: true
 
+cost:
+  cost_class: free
+  relative_cost: 0.08
+
 models:
-  - name: llama-3.3-70b
+  - name: llama-3.1-8b-instant
+    enabled: true
+    roles: [fast]
+    capabilities: [low_latency, json_mode]
+    preferred_for: [fast_generation, classification, cheap_reasoning]
+    max_output_tokens: 2048
+    limits:
+      rpm: 30
+      tpm: 6000
+      rpd: 14400
+      tpd: 500000
+
+  - name: llama-3.3-70b-versatile
     enabled: true
     roles: [planner, reviewer]
     capabilities: [json_mode, long_context]
-    cost_class: free
-    relative_cost: 0.1
+    preferred_for: [review, reasoning, planning]
+    max_output_tokens: 4096
+    limits:
+      rpm: 30
+      tpm: 12000
+      rpd: 1000
+      tpd: 100000
+
+  - name: qwen/qwen3-32b
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode, long_context]
+    preferred_for: [reasoning, synthesis]
     max_output_tokens: 4096
 
-  - name: llama-3.1-8b
+  - name: openai/gpt-oss-120b
     enabled: true
-    roles: [fast]
-    capabilities: [json_mode]
-    cost_class: free
-    relative_cost: 0.05
+    roles: [planner]
+    capabilities: [json_mode, long_context]
+    preferred_for: [heavy_reasoning]
     max_output_tokens: 4096

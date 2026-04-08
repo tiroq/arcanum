@@ -1,0 +1,46 @@
+provider:
+  name: sambanova
+  kind: cloud
+  enabled: true
+
+connection:
+  base_url: https://api.sambanova.ai/v1
+  api_key_env: SAMBANOVA_API_KEY
+  timeout_seconds: 45
+
+limits:
+  rpm: 20
+  tpm: 0
+  rpd: 20
+  tpd: 200000
+
+routing:
+  roles: [planner, reviewer, batch]
+  fallback_priority: 25
+  allow_external: true
+
+cost:
+  cost_class: free
+  relative_cost: 0.12
+
+models:
+  - name: deepseek
+    enabled: true
+    roles: [planner, batch]
+    capabilities: [json_mode, long_context]
+    preferred_for: [reasoning, batch]
+    max_output_tokens: 4096
+
+  - name: llama-3.3-70b
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode]
+    preferred_for: [review, planning]
+    max_output_tokens: 4096
+
+  - name: llama-3.1-8b
+    enabled: true
+    roles: [fast]
+    capabilities: [low_latency]
+    preferred_for: [fast_tasks]
+    max_output_tokens: 2048

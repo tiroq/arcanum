@@ -1,0 +1,45 @@
+catalog:
+  version: 1
+
+defaults:
+  connection:
+    timeout_seconds: 30
+
+  routing:
+    allow_external: true
+    fallback_priority: 100
+    max_fallback_chain: 3
+
+  limits:
+    rpm: 0
+    tpm: 0
+    rpd: 0
+    tpd: 0
+
+  cost:
+    cost_class: unknown
+    relative_cost: 0.50
+
+  model_defaults:
+    enabled: true
+    max_output_tokens: 2048
+    roles: []
+    capabilities: []
+    preferred_for: []
+
+role_defaults:
+  fast:
+    preferred_capabilities: [low_latency]
+  planner:
+    preferred_capabilities: [json_mode, long_context]
+  reviewer:
+    preferred_capabilities: [json_mode]
+  batch:
+    preferred_capabilities: [long_context]
+
+capability_weights:
+  json_mode: 1.0
+  long_context: 0.8
+  low_latency: 0.7
+  tool_calling: 0.8
+  structured_output: 1.0

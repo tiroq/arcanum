@@ -1,0 +1,58 @@
+provider:
+  name: cerebras
+  kind: cloud
+  enabled: true
+
+connection:
+  base_url: https://api.cerebras.ai/v1
+  api_key_env: CEREBRAS_API_KEY
+  timeout_seconds: 45
+
+limits:
+  rpm: 30
+  tpm: 0
+  rpd: 0
+  tpd: 0
+
+routing:
+  roles: [planner, reviewer, batch]
+  fallback_priority: 15
+  allow_external: true
+
+cost:
+  cost_class: free
+  relative_cost: 0.07
+
+models:
+  - name: gpt-oss-120b
+    enabled: true
+    roles: [planner, reviewer, batch]
+    capabilities: [json_mode, long_context]
+    preferred_for: [heavy_reasoning, batch_reasoning]
+    max_output_tokens: 4096
+    limits:
+      rpm: 30
+      tpm: 64000
+      rpd: 14400
+      tpd: 1000000
+
+  - name: llama3.1-8b
+    enabled: true
+    roles: [fast, reviewer]
+    capabilities: [json_mode]
+    preferred_for: [cheap_review, light_reasoning]
+    max_output_tokens: 2048
+
+  - name: qwen-3-235b-a22b-instruct-2507
+    enabled: true
+    roles: [planner, batch]
+    capabilities: [json_mode, long_context]
+    preferred_for: [large_reasoning, synthesis]
+    max_output_tokens: 4096
+
+  - name: zai-glm-4.7
+    enabled: true
+    roles: [planner]
+    capabilities: [json_mode, long_context]
+    preferred_for: [experimental_reasoning]
+    max_output_tokens: 4096

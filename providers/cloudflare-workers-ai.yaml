@@ -1,0 +1,51 @@
+provider:
+  name: cloudflare-workers-ai
+  kind: cloud
+  enabled: true
+
+connection:
+  base_url: https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1
+  api_key_env: CLOUDFLARE_API_TOKEN
+  timeout_seconds: 30
+
+limits:
+  rpm: 300
+  tpm: 0
+  rpd: 0
+  tpd: 0
+
+routing:
+  roles: [fast, reviewer]
+  fallback_priority: 10
+  allow_external: true
+
+cost:
+  cost_class: free
+  relative_cost: 0.05
+
+models:
+  - name: "@cf/microsoft/phi-2"
+    enabled: true
+    roles: [fast]
+    capabilities: [low_latency]
+    preferred_for: [fast_generation, lightweight_tasks]
+    max_output_tokens: 1024
+    limits:
+      rpm: 720
+      tpm: 0
+      rpd: 0
+      tpd: 0
+
+  - name: "@cf/qwen/qwen1.5-14b-chat-awq"
+    enabled: true
+    roles: [reviewer, fast]
+    capabilities: [json_mode]
+    preferred_for: [short_review, lightweight_reasoning]
+    max_output_tokens: 2048
+
+  - name: "@cf/meta/llama-3.1-8b-instruct"
+    enabled: true
+    roles: [reviewer]
+    capabilities: [json_mode]
+    preferred_for: [review, summarization]
+    max_output_tokens: 2048
