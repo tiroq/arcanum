@@ -192,6 +192,49 @@ func ApplyComparativeLearningAdjustments(paths []DecisionPath, signals *Comparat
 	return adjusted
 }
 
+// --- Counterfactual Simulation Adjustments (Iteration 23) ---
+
+// CounterfactualPredictions holds predicted values for scoring adjustments.
+type CounterfactualPredictions struct {
+	// Predictions: map[pathSignature] → predicted expected value
+	Predictions map[string]float64
+	// Confidences: map[pathSignature] → prediction confidence
+	Confidences map[string]float64
+}
+
+// Counterfactual adjustment constant.
+const (
+	counterfactualPredictionWeight = 0.20
+	counterfactualMinConfidence    = 0.01
+)
+
+// ApplyCounterfactualAdjustments adjusts scored paths based on counterfactual predictions.
+// AdjustedScore = OriginalScore + (PredictedValue - OriginalScore) × PredictionWeight
+// If predictions is nil, returns paths unchanged (fail-open).
+func ApplyCounterfactualAdjustments(paths []DecisionPath, predictions *CounterfactualPredictions) []DecisionPath {
+	if predictions == nil || len(predictions.Predictions) == 0 {
+		return paths
+	}
+
+	adjusted := make([]DecisionPath, len(paths))
+	for i, p := range paths {
+		sig := pathSignatureFromNodes(p.Nodes)
+		if predValue, ok := predictions.Predictions[sig]; ok {
+			conf := 0.0
+			if c, cok := predictions.Confidences[sig]; cok {
+				conf = c
+			}
+			if conf > counterfactualMinConfidence {
+				delta := (predValue - p.FinalScore) * counterfactualPredictionWeight
+				p.FinalScore = clamp01(p.FinalScore + delta)
+			}
+		}
+		adjusted[i] = p
+	}
+
+	return adjusted
+}
+
 // clamp01 restricts a value to [0, 1].
 func clamp01(v float64) float64 {
 	if v < 0 {

@@ -1050,3 +1050,104 @@ func TestComparativeAdjustments_CombinedWithPathLearning(t *testing.T) {
 		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
 	}
 }
+
+// --- Counterfactual Adjustment Tests ---
+
+func TestApplyCounterfactualAdjustments_Nil(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.50},
+	}
+	result := ApplyCounterfactualAdjustments(paths, nil)
+	if result[0].FinalScore != 0.50 {
+		t.Errorf("expected unchanged score 0.50, got %.4f", result[0].FinalScore)
+	}
+}
+
+func TestApplyCounterfactualAdjustments_Empty(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.50},
+	}
+	preds := &CounterfactualPredictions{
+		Predictions: map[string]float64{},
+		Confidences: map[string]float64{},
+	}
+	result := ApplyCounterfactualAdjustments(paths, preds)
+	if result[0].FinalScore != 0.50 {
+		t.Errorf("expected unchanged score 0.50, got %.4f", result[0].FinalScore)
+	}
+}
+
+func TestApplyCounterfactualAdjustments_HighPrediction(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.50},
+	}
+	preds := &CounterfactualPredictions{
+		Predictions: map[string]float64{"retry_job": 0.80},
+		Confidences: map[string]float64{"retry_job": 0.50},
+	}
+	result := ApplyCounterfactualAdjustments(paths, preds)
+	// AdjustedScore = 0.50 + (0.80 - 0.50) * 0.20 = 0.50 + 0.06 = 0.56
+	expected := 0.56
+	if abs(result[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, result[0].FinalScore)
+	}
+}
+
+func TestApplyCounterfactualAdjustments_LowPrediction(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "log_recommendation"}}, FinalScore: 0.70},
+	}
+	preds := &CounterfactualPredictions{
+		Predictions: map[string]float64{"log_recommendation": 0.20},
+		Confidences: map[string]float64{"log_recommendation": 0.50},
+	}
+	result := ApplyCounterfactualAdjustments(paths, preds)
+	// AdjustedScore = 0.70 + (0.20 - 0.70) * 0.20 = 0.70 - 0.10 = 0.60
+	expected := 0.60
+	if abs(result[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, result[0].FinalScore)
+	}
+}
+
+func TestApplyCounterfactualAdjustments_LowConfidenceIgnored(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.50},
+	}
+	preds := &CounterfactualPredictions{
+		Predictions: map[string]float64{"retry_job": 0.90},
+		Confidences: map[string]float64{"retry_job": 0.005}, // below threshold
+	}
+	result := ApplyCounterfactualAdjustments(paths, preds)
+	if result[0].FinalScore != 0.50 {
+		t.Errorf("expected unchanged score 0.50, got %.4f", result[0].FinalScore)
+	}
+}
+
+func TestApplyCounterfactualAdjustments_ClampedToZeroOne(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.98},
+	}
+	preds := &CounterfactualPredictions{
+		Predictions: map[string]float64{"retry_job": 1.50}, // artificially high
+		Confidences: map[string]float64{"retry_job": 0.50},
+	}
+	result := ApplyCounterfactualAdjustments(paths, preds)
+	if result[0].FinalScore > 1.0 {
+		t.Errorf("expected clamped to 1.0, got %.4f", result[0].FinalScore)
+	}
+}
+
+func TestApplyCounterfactualAdjustments_UnpredictedPathUnchanged(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.50},
+		{Nodes: []DecisionNode{{ActionType: "noop"}}, FinalScore: 0.30},
+	}
+	preds := &CounterfactualPredictions{
+		Predictions: map[string]float64{"retry_job": 0.80},
+		Confidences: map[string]float64{"retry_job": 0.50},
+	}
+	result := ApplyCounterfactualAdjustments(paths, preds)
+	if result[1].FinalScore != 0.30 {
+		t.Errorf("expected noop unchanged at 0.30, got %.4f", result[1].FinalScore)
+	}
+}

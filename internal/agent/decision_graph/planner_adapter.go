@@ -36,10 +36,41 @@ type SnapshotCapturer interface {
 	CaptureAndSave(ctx context.Context, decisionID, goalType string, scoredPaths []ScoredPathExport, selectedSignature string, selectedScore float64) error
 }
 
+// CalibrationProvider adjusts raw confidence values based on calibration data.
+// Defined here to avoid import cycles — implemented in calibration package.
+type CalibrationProvider interface {
+	CalibrateConfidence(ctx context.Context, rawConfidence float64) float64
+}
+
+// CounterfactualSimulator runs counterfactual simulation before path selection.
+// Defined here to avoid import cycles — implemented in counterfactual package.
+type CounterfactualSimulator interface {
+	// SimulateAndSave runs simulation for top paths and returns predictions.
+	// Returns map[pathSignature] → predicted expected value + confidence.
+	// Empty map on failure (fail-open).
+	SimulateAndSave(ctx context.Context, decisionID, goalType string, pathScores map[string]float64, pathLengths map[string]int) CounterfactualPredictionExport
+}
+
+// CounterfactualPredictionExport carries prediction results from the simulation.
+type CounterfactualPredictionExport struct {
+	Predictions map[string]float64 // map[pathSignature] → predicted value
+	Confidences map[string]float64 // map[pathSignature] → confidence
+}
+
 // ScoredPathExport carries a path signature and score for snapshot capture.
 type ScoredPathExport struct {
 	PathSignature string
 	Score         float64
+}
+
+// MetaReasoningProvider selects a reasoning mode before graph evaluation.
+// Defined here to avoid import cycles — implemented in meta_reasoning package.
+type MetaReasoningProvider interface {
+	// SelectMode chooses a reasoning mode based on current signals.
+	// Returns: mode string, confidence float64, reason string.
+	SelectMode(ctx context.Context, goalType string, failureRate, confidence, risk float64, stabilityMode string, missedWinCount int, noopRate, lowValueRate float64) (mode string, conf float64, reason string)
+	// RecordOutcome updates mode memory after outcome evaluation.
+	RecordOutcome(ctx context.Context, mode string, goalType string, success bool)
 }
 
 // GraphPlannerAdapter adapts the decision graph layer to the
@@ -62,6 +93,15 @@ type GraphPlannerAdapter struct {
 
 	// snapshotCapturer captures decision snapshots at selection time.
 	snapshotCapturer SnapshotCapturer
+
+	// counterfactual runs counterfactual simulation before path selection.
+	counterfactual CounterfactualSimulator
+
+	// metaReasoning selects a reasoning mode before graph evaluation (Iteration 24).
+	metaReasoning MetaReasoningProvider
+
+	// calibration adjusts confidence values based on historical accuracy (Iteration 25).
+	calibration CalibrationProvider
 
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
@@ -104,6 +144,24 @@ func (a *GraphPlannerAdapter) WithSnapshotCapturer(sc SnapshotCapturer) *GraphPl
 	return a
 }
 
+// WithCounterfactual sets the counterfactual simulator for prediction-guided selection.
+func (a *GraphPlannerAdapter) WithCounterfactual(cf CounterfactualSimulator) *GraphPlannerAdapter {
+	a.counterfactual = cf
+	return a
+}
+
+// WithMetaReasoning sets the meta-reasoning provider for mode selection (Iteration 24).
+func (a *GraphPlannerAdapter) WithMetaReasoning(mr MetaReasoningProvider) *GraphPlannerAdapter {
+	a.metaReasoning = mr
+	return a
+}
+
+// WithCalibration sets the calibration provider for confidence adjustment (Iteration 25).
+func (a *GraphPlannerAdapter) WithCalibration(cp CalibrationProvider) *GraphPlannerAdapter {
+	a.calibration = cp
+	return a
+}
+
 // LastSelection returns the most recent path selection for API visibility.
 func (a *GraphPlannerAdapter) LastSelection() *PathSelection {
 	return a.lastSelection
@@ -132,6 +190,38 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		shouldExplore = a.explorationTrigger(decision.GoalType)
 	}
 
+	// --- Meta-reasoning mode selection (Iteration 24) ---
+	// Selects HOW to reason before choosing WHAT to do.
+	// Fail-open: defaults to graph mode if meta-reasoning is nil or fails.
+	metaMode := "graph"
+	if a.metaReasoning != nil {
+		// Build meta-reasoning input from current signals.
+		avgConfidence, avgRisk, failureRate := computeSignalAverages(decision.Candidates, globalFeedback)
+		missedWinCount := 0
+		if a.comparativeLearning != nil {
+			fbMap := a.comparativeLearning.GetAllComparativeFeedbackMap(ctx, decision.GoalType)
+			for _, rec := range fbMap {
+				if rec == "underexplored_path" {
+					missedWinCount++
+				}
+			}
+		}
+		noopRate, lowValueRate := computeStagnationSignals(decision.Candidates)
+
+		// Apply calibration to meta-reasoning confidence input (Iteration 25).
+		// If system is overconfident, reduces confidence → less likely to use direct mode.
+		// If underconfident, increases confidence → allows more aggressive strategies.
+		// Fail-open: if calibration is nil, avgConfidence is unchanged.
+		if a.calibration != nil {
+			avgConfidence = a.calibration.CalibrateConfidence(ctx, avgConfidence)
+		}
+
+		metaMode, _, _ = a.metaReasoning.SelectMode(ctx,
+			decision.GoalType, failureRate, avgConfidence, avgRisk,
+			stabilityMode, missedWinCount, noopRate, lowValueRate)
+	}
+
+	// Apply mode-specific configuration.
 	config := GraphConfig{
 		MaxDepth:        3,
 		StabilityMode:   stabilityMode,
@@ -139,11 +229,30 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		LongPathPenalty: 0.15,
 	}
 
+	switch metaMode {
+	case "direct":
+		// Fast path: depth-1 only, skip graph expansion.
+		config.MaxDepth = 1
+	case "conservative":
+		// Restrict to safe actions only (noop, log_recommendation).
+		config.MaxDepth = 1
+		config.StabilityMode = "safe_mode"
+	case "exploratory":
+		// Force exploration: always select second-best path.
+		config.ShouldExplore = true
+	default:
+		// "graph" — full decision graph evaluation (default).
+	}
+
 	// Build action signals from the tactical decision + feedback.
 	candidateActions := make([]string, 0, len(decision.Candidates))
 	signals := make(map[string]ActionSignals, len(decision.Candidates))
 
 	for _, c := range decision.Candidates {
+		// Conservative mode: filter to safe actions only.
+		if metaMode == "conservative" && !isSafeAction(c.ActionType) {
+			continue
+		}
 		candidateActions = append(candidateActions, c.ActionType)
 		sig := ActionSignals{
 			ExpectedValue: c.Score,
@@ -169,6 +278,26 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 			}
 		}
 		signals[c.ActionType] = sig
+	}
+
+	// Apply calibration to node confidence values (Iteration 25).
+	// Adjusts raw confidence based on historical accuracy tracking.
+	// Fail-open: if calibration is nil, confidence values are unchanged.
+	if a.calibration != nil {
+		for action, sig := range signals {
+			sig.Confidence = a.calibration.CalibrateConfidence(ctx, sig.Confidence)
+			signals[action] = sig
+		}
+	}
+
+	// Ensure at least noop if all candidates were filtered.
+	if len(candidateActions) == 0 {
+		candidateActions = []string{"noop"}
+		signals["noop"] = ActionSignals{
+			ExpectedValue: 0.01,
+			Risk:          0.0,
+			Confidence:    1.0,
+		}
 	}
 
 	// Build graph.
@@ -205,6 +334,40 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	}
 	scored = ApplyComparativeLearningAdjustments(scored, comparativeSignals)
 
+	// Apply counterfactual simulation adjustments (Iteration 23).
+	// Fail-open: if counterfactual is nil, scored paths are unchanged.
+	var cfPredictions *CounterfactualPredictions
+	if a.counterfactual != nil {
+		// Build path scores and lengths for simulation.
+		pathScores := make(map[string]float64, len(scored))
+		pathLengths := make(map[string]int, len(scored))
+		for _, sp := range scored {
+			sig := pathSignatureFromNodes(sp.Nodes)
+			pathScores[sig] = sp.FinalScore
+			pathLengths[sig] = len(sp.Nodes)
+		}
+		// Generate a provisional decision ID for the simulation.
+		provDecisionID := uuid.New().String()
+		cfExport := a.counterfactual.SimulateAndSave(ctx, provDecisionID, decision.GoalType, pathScores, pathLengths)
+		if len(cfExport.Predictions) > 0 {
+			cfPredictions = &CounterfactualPredictions{
+				Predictions: cfExport.Predictions,
+				Confidences: cfExport.Confidences,
+			}
+			// Apply calibration to counterfactual prediction confidences (Iteration 25).
+			// Low calibration → reduced confidence → reduced prediction weight.
+			// Fail-open: if calibration is nil, confidences are unchanged.
+			if a.calibration != nil && cfPredictions != nil {
+				scaledConf := make(map[string]float64, len(cfPredictions.Confidences))
+				for sig, conf := range cfPredictions.Confidences {
+					scaledConf[sig] = a.calibration.CalibrateConfidence(ctx, conf)
+				}
+				cfPredictions.Confidences = scaledConf
+			}
+		}
+	}
+	scored = ApplyCounterfactualAdjustments(scored, cfPredictions)
+
 	// Select best path.
 	selection := SelectBestPath(scored, config)
 	a.lastSelection = &selection
@@ -219,6 +382,7 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		"stability_mode":   stabilityMode,
 		"should_explore":   shouldExplore,
 		"exploration_used": selection.ExplorationUsed,
+		"meta_mode":        metaMode,
 		"reason":           selection.Reason,
 	})
 
@@ -246,6 +410,8 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	override.StrategyType = "decision_graph"
 	override.Reason = "graph_path: " + selection.Reason
 	override.DecisionID = override.StrategyID
+	override.MetaMode = metaMode
+	override.PredictedConfidence = selection.Selected.TotalConfidence
 
 	// Populate path metadata (Iteration 21) for path learning.
 	pathActions := make([]string, len(selection.Selected.Nodes))
@@ -319,4 +485,59 @@ func Evaluate(input BuildInput) (PathSelection, string) {
 // Timestamp returns the current time for audit events. Exported for testing.
 func Timestamp() time.Time {
 	return time.Now().UTC()
+}
+
+// --- Meta-reasoning helpers (Iteration 24) ---
+
+// isSafeAction returns true for actions allowed in conservative mode.
+func isSafeAction(actionType string) bool {
+	return actionType == "noop" || actionType == "log_recommendation"
+}
+
+// computeSignalAverages computes weighted averages of confidence/risk and failure rate
+// from the candidates and their feedback.
+func computeSignalAverages(candidates []planning.PlannedActionCandidate, feedback map[string]actionmemory.ActionFeedback) (avgConfidence, avgRisk, failureRate float64) {
+	if len(candidates) == 0 {
+		return 0.5, 0.1, 0
+	}
+	totalConf := 0.0
+	totalRisk := 0.0
+	totalFailureRate := 0.0
+	failureCount := 0
+	for _, c := range candidates {
+		totalConf += c.Confidence
+		totalRisk += 0.1 // default base risk
+		if fb, ok := feedback[c.ActionType]; ok {
+			totalFailureRate += fb.FailureRate
+			failureCount++
+		}
+	}
+	n := float64(len(candidates))
+	avgConfidence = totalConf / n
+	avgRisk = totalRisk / n
+	if failureCount > 0 {
+		failureRate = totalFailureRate / float64(failureCount)
+	}
+	return
+}
+
+// computeStagnationSignals extracts noop and low-value rates from candidates.
+func computeStagnationSignals(candidates []planning.PlannedActionCandidate) (noopRate, lowValueRate float64) {
+	if len(candidates) == 0 {
+		return 0, 0
+	}
+	noopCount := 0
+	lowValueCount := 0
+	for _, c := range candidates {
+		if c.ActionType == "noop" {
+			noopCount++
+		}
+		if c.Score < 0.2 {
+			lowValueCount++
+		}
+	}
+	n := float64(len(candidates))
+	noopRate = float64(noopCount) / n
+	lowValueRate = float64(lowValueCount) / n
+	return
 }
