@@ -14,6 +14,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/causal"
+	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
@@ -192,7 +193,12 @@ func run() error {
 	strategyStabilityAdapter := stability.NewStrategyStabilityAdapter(stabilityEngine)
 	strategyEngine := strategy.NewEngine(strategyStore, strategyStabilityAdapter, auditor, logger)
 	strategyPlannerAdapter := strategy.NewPlannerAdapter(strategyEngine)
-	adaptivePlanner.WithStrategy(strategyPlannerAdapter)
+	_ = strategyPlannerAdapter // retained for backward compat; decision graph replaces portfolio
+
+	// Decision graph layer (Iteration 20) — replaces strategy portfolio competition.
+	graphStabilityAdapter := stability.NewStrategyStabilityAdapter(stabilityEngine)
+	graphAdapter := decision_graph.NewGraphPlannerAdapter(graphStabilityAdapter, auditor, logger)
+	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
 	strategyLearningMemory := strategylearning.NewMemoryStore(pool)
@@ -213,7 +219,8 @@ func run() error {
 		WithCausalEngine(causalEngine).
 		WithExplorationEngine(explorationEngine).
 		WithStrategyEngine(strategyEngine).
-		WithStrategyLearning(strategyLearningMemory)
+		WithStrategyLearning(strategyLearningMemory).
+		WithDecisionGraph(graphAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{

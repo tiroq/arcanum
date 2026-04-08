@@ -116,5 +116,8 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/strategy-memory", chain(handlers.StrategyMemoryList))
 	mux.Handle("/api/v1/agent/strategy-outcomes", chain(handlers.StrategyOutcomesList))
 
+	// Agent decision graph (graph-based decision evaluation)
+	mux.Handle("/api/v1/agent/decision-graph/status", chain(handlers.DecisionGraphStatus))
+
 	return requestIDMiddleware(mux)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/causal"
+	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
@@ -54,6 +55,7 @@ type Handlers struct {
 	explorationEngine *exploration.Engine
 	strategyEngine    *strategy.Engine
 	strategyLearning  *strategylearning.MemoryStore
+	decisionGraph     *decision_graph.GraphPlannerAdapter
 	logger            *zap.Logger
 }
 
@@ -145,6 +147,12 @@ func (h *Handlers) WithStrategyEngine(se *strategy.Engine) *Handlers {
 // WithStrategyLearning attaches the strategy learning memory store.
 func (h *Handlers) WithStrategyLearning(sl *strategylearning.MemoryStore) *Handlers {
 	h.strategyLearning = sl
+	return h
+}
+
+// WithDecisionGraph attaches the decision graph planner adapter.
+func (h *Handlers) WithDecisionGraph(dg *decision_graph.GraphPlannerAdapter) *Handlers {
+	h.decisionGraph = dg
 	return h
 }
 
@@ -1969,4 +1977,36 @@ func parseIDFromPath(r *http.Request, prefix string) (uuid.UUID, bool) {
 	path = strings.TrimSuffix(path, "/")
 	id, err := uuid.Parse(path)
 	return id, err == nil
+}
+
+// --- Decision Graph handlers ---
+
+// DecisionGraphStatus returns the last decision graph path selection.
+func (h *Handlers) DecisionGraphStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	if h.decisionGraph == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "not_configured",
+			"message": "decision graph engine not wired",
+		})
+		return
+	}
+
+	selection := h.decisionGraph.LastSelection()
+	if selection == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "no_evaluation",
+			"message": "no decision graph evaluation yet",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"selection": selection,
+	})
 }
