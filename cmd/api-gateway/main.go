@@ -26,6 +26,7 @@ import (
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
+	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
@@ -307,6 +308,49 @@ func run() error {
 	// Wire governance learning guard into outcome handler.
 	outcomeHandler.WithGovernanceLearningGuard(govAdapter)
 
+	// Provider policy + quota-aware routing layer (Iteration 31).
+	providerRegistry := providerrouting.NewRegistry()
+	// Register default local provider (always available).
+	providerRegistry.Register(providerrouting.Provider{
+		Name:         "ollama",
+		Kind:         providerrouting.KindLocal,
+		Roles:        []string{providerrouting.RoleFast, providerrouting.RolePlanner, providerrouting.RoleReviewer, providerrouting.RoleBatch, providerrouting.RoleFallback},
+		Capabilities: []string{"json_mode", "low_latency"},
+		Limits:       providerrouting.ProviderLimits{}, // local = no external limits
+		Cost:         providerrouting.ProviderCostModel{CostClass: providerrouting.CostLocal, RelativeCost: 0.0},
+		Health:       providerrouting.ProviderHealth{Enabled: true, Reachable: true},
+	})
+	// Register cloud providers if configured.
+	if cfg.Providers.OpenRouter.Enabled {
+		providerRegistry.Register(providerrouting.Provider{
+			Name:         "openrouter",
+			Kind:         providerrouting.KindRouter,
+			Roles:        []string{providerrouting.RolePlanner, providerrouting.RoleReviewer, providerrouting.RoleFallback},
+			Capabilities: []string{"json_mode", "long_context", "tool_calling"},
+			Limits:       providerrouting.ProviderLimits{RPM: 20, RPD: 200},
+			Cost:         providerrouting.ProviderCostModel{CostClass: providerrouting.CostFree, RelativeCost: 0.1},
+			Health:       providerrouting.ProviderHealth{Enabled: true, Reachable: true},
+		})
+	}
+	if cfg.Providers.OllamaCloud.Enabled {
+		providerRegistry.Register(providerrouting.Provider{
+			Name:         "ollama-cloud",
+			Kind:         providerrouting.KindCloud,
+			Roles:        []string{providerrouting.RolePlanner, providerrouting.RoleReviewer, providerrouting.RoleBatch},
+			Capabilities: []string{"json_mode"},
+			Limits:       providerrouting.ProviderLimits{},
+			Cost:         providerrouting.ProviderCostModel{CostClass: providerrouting.CostCheap, RelativeCost: 0.2},
+			Health:       providerrouting.ProviderHealth{Enabled: true, Reachable: true},
+		})
+	}
+
+	quotaTracker := providerrouting.NewQuotaTracker(pool)
+	if err := quotaTracker.LoadFromDB(ctx); err != nil {
+		logger.Warn("failed to load provider usage from DB", zap.Error(err))
+	}
+	providerRouter := providerrouting.NewRouter(providerRegistry, quotaTracker, auditor, logger)
+	providerRoutingAdapter := providerrouting.NewGraphAdapter(providerRouter, auditor, logger)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -338,7 +382,8 @@ func run() error {
 		WithContextCalibration(contextCalStore).
 		WithModeCalibration(modeCalibrator, modeCalTracker).
 		WithResourceOptimization(resourceAdapter).
-		WithGovernance(govController, govReplayBuilder)
+		WithGovernance(govController, govReplayBuilder).
+		WithProviderRouting(providerRoutingAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
