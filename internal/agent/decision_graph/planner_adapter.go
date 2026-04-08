@@ -377,10 +377,10 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 				zap.String("governance_mode", a.governance.GetMode(ctx)),
 			)
 			a.auditEvent(ctx, "governance.override_applied", map[string]any{
-				"goal_type":      decision.GoalType,
-				"original_mode":  metaMode,
-				"forced_mode":    forcedMode,
-				"override_type":  "reasoning_mode",
+				"goal_type":       decision.GoalType,
+				"original_mode":   metaMode,
+				"forced_mode":     forcedMode,
+				"override_type":   "reasoning_mode",
 				"governance_mode": a.governance.GetMode(ctx),
 			})
 			metaMode = forcedMode
@@ -706,12 +706,12 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	if a.governance != nil && a.governance.RequiresHumanReview(ctx) {
 		override.Reason = "governance_review_required: " + override.Reason
 		a.auditEvent(ctx, "governance.review_required", map[string]any{
-			"goal_id":       decision.GoalID,
-			"goal_type":     decision.GoalType,
-			"decision_id":   override.DecisionID,
-			"graph_action":  firstAction,
+			"goal_id":        decision.GoalID,
+			"goal_type":      decision.GoalType,
+			"decision_id":    override.DecisionID,
+			"graph_action":   firstAction,
 			"path_signature": override.PathSignature,
-			"meta_mode":     metaMode,
+			"meta_mode":      metaMode,
 		})
 	}
 
