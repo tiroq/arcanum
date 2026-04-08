@@ -50,6 +50,9 @@ type StrategyOverride struct {
 	PathSignature   string   `json:"path_signature,omitempty"`
 	PathActionTypes []string `json:"path_action_types,omitempty"`
 	PathLength      int      `json:"path_length,omitempty"`
+
+	// Decision ID (Iteration 22) — links to decision snapshot for comparative learning.
+	DecisionID string `json:"decision_id,omitempty"`
 }
 
 // StrategyProvider evaluates bounded multi-step strategies and may override
@@ -247,6 +250,11 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 					resolved[i].Params["_ctx_path_signature"] = strategyOverride.PathSignature
 					resolved[i].Params["_ctx_path_action_types"] = strategyOverride.PathActionTypes
 					resolved[i].Params["_ctx_path_length"] = strategyOverride.PathLength
+				}
+
+				// Decision ID (Iteration 22) for comparative learning.
+				if strategyOverride.DecisionID != "" {
+					resolved[i].Params["_ctx_decision_id"] = strategyOverride.DecisionID
 				}
 			}
 		}
