@@ -65,6 +65,7 @@ func (e *Engine) Evaluate(
 	actionFeedback map[string]actionmemory.ActionFeedback,
 	candidateScores map[string]float64,
 	candidateConf map[string]float64,
+	strategyFeedback map[string]StrategyFeedbackSignal,
 	now time.Time,
 ) StrategyDecision {
 	// 1. Generate bounded candidates.
@@ -72,10 +73,11 @@ func (e *Engine) Evaluate(
 
 	// 2. Build scoring input.
 	input := ScoreInput{
-		ActionFeedback:  actionFeedback,
-		CandidateScores: candidateScores,
-		CandidateConf:   candidateConf,
-		StabilityMode:   "normal",
+		ActionFeedback:   actionFeedback,
+		CandidateScores:  candidateScores,
+		CandidateConf:    candidateConf,
+		StrategyFeedback: strategyFeedback,
+		StabilityMode:    "normal",
 	}
 	if e.stability != nil {
 		input.StabilityMode = e.stability.GetMode(ctx)

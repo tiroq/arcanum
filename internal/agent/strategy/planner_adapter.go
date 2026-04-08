@@ -25,6 +25,7 @@ func (a *PlannerAdapter) EvaluateForPlanner(
 	ctx context.Context,
 	decision planning.PlanningDecision,
 	globalFeedback map[string]actionmemory.ActionFeedback,
+	strategyLearning map[string]planning.StrategyLearningFeedback,
 ) planning.StrategyOverride {
 	now := time.Now().UTC()
 
@@ -42,8 +43,22 @@ func (a *PlannerAdapter) EvaluateForPlanner(
 		feedbackMap[k] = v
 	}
 
+	// Convert strategy learning feedback to engine signal type.
+	var sfMap map[string]StrategyFeedbackSignal
+	if len(strategyLearning) > 0 {
+		sfMap = make(map[string]StrategyFeedbackSignal, len(strategyLearning))
+		for k, v := range strategyLearning {
+			sfMap[k] = StrategyFeedbackSignal{
+				Recommendation: v.Recommendation,
+				SuccessRate:    v.SuccessRate,
+				FailureRate:    v.FailureRate,
+				SampleSize:     v.SampleSize,
+			}
+		}
+	}
+
 	sd := a.engine.Evaluate(ctx, decision.GoalID, decision.GoalType,
-		feedbackMap, candidateScores, candidateConf, now)
+		feedbackMap, candidateScores, candidateConf, sfMap, now)
 
 	// Determine if strategy wants to override the tactical action.
 	override := planning.StrategyOverride{

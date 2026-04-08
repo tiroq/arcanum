@@ -153,6 +153,12 @@ const (
 	// ExploratoryUtilityDiscount: exploratory strategies get this
 	// discount to their expected utility score.
 	ExploratoryUtilityDiscount = 0.10
+
+	// StrategyPreferBoost: scoring boost for strategies with prefer_strategy feedback.
+	StrategyPreferBoost = 0.15
+
+	// StrategyAvoidPenalty: scoring penalty for strategies with avoid_strategy feedback.
+	StrategyAvoidPenalty = -0.30
 )
 
 // ExecutionMode documents how strategy steps are executed.

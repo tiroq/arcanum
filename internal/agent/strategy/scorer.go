@@ -11,6 +11,19 @@ type ScoreInput struct {
 	CandidateConf   map[string]float64 // action_type -> planner confidence
 	StabilityMode   string             // "normal", "throttled", "safe_mode"
 	BlockedActions  []string
+
+	// StrategyFeedback holds per-strategy_type learning signals.
+	// Keys are strategy type names. Values encode recommendation as a string.
+	// When set, prefer_strategy boosts utility and avoid_strategy penalizes it.
+	StrategyFeedback map[string]StrategyFeedbackSignal
+}
+
+// StrategyFeedbackSignal carries strategy-level learning signal.
+type StrategyFeedbackSignal struct {
+	Recommendation string  // "prefer_strategy", "avoid_strategy", "neutral", "insufficient_data"
+	SuccessRate    float64
+	FailureRate    float64
+	SampleSize     int
 }
 
 // ScoreStrategies assigns expected utility, risk, and confidence to each
@@ -82,6 +95,18 @@ func scorePlan(plan *StrategyPlan, input ScoreInput, blocked map[string]bool) {
 	// E. Exploration discount.
 	if plan.Exploratory {
 		avgQuality -= ExploratoryUtilityDiscount
+	}
+
+	// F. Strategy-level feedback bias (Iteration 18).
+	if input.StrategyFeedback != nil {
+		if fb, ok := input.StrategyFeedback[string(plan.StrategyType)]; ok {
+			switch fb.Recommendation {
+			case "prefer_strategy":
+				avgQuality += StrategyPreferBoost
+			case "avoid_strategy":
+				avgQuality += StrategyAvoidPenalty
+			}
+		}
 	}
 
 	// Noop has a fixed baseline utility.
