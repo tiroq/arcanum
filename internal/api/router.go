@@ -112,5 +112,9 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/strategy/history", chain(handlers.StrategyHistory))
 	mux.Handle("/api/v1/agent/strategy/plans", chain(handlers.StrategyPlans))
 
+	// Agent strategy learning (strategy-level feedback + outcomes)
+	mux.Handle("/api/v1/agent/strategy-memory", chain(handlers.StrategyMemoryList))
+	mux.Handle("/api/v1/agent/strategy-outcomes", chain(handlers.StrategyOutcomesList))
+
 	return requestIDMiddleware(mux)
 }

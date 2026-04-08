@@ -25,6 +25,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
+	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -52,6 +53,7 @@ type Handlers struct {
 	causalEngine      *causal.Engine
 	explorationEngine *exploration.Engine
 	strategyEngine    *strategy.Engine
+	strategyLearning  *strategylearning.MemoryStore
 	logger            *zap.Logger
 }
 
@@ -137,6 +139,12 @@ func (h *Handlers) WithExplorationEngine(ee *exploration.Engine) *Handlers {
 // WithStrategyEngine attaches the strategy engine.
 func (h *Handlers) WithStrategyEngine(se *strategy.Engine) *Handlers {
 	h.strategyEngine = se
+	return h
+}
+
+// WithStrategyLearning attaches the strategy learning memory store.
+func (h *Handlers) WithStrategyLearning(sl *strategylearning.MemoryStore) *Handlers {
+	h.strategyLearning = sl
 	return h
 }
 
@@ -1884,6 +1892,73 @@ func (h *Handlers) StrategyPlans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"plans": plans,
 		"page":  p.Page,
+	})
+}
+
+// StrategyMemoryList returns strategy memory records with recommendations.
+func (h *Handlers) StrategyMemoryList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.strategyLearning == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "strategy learning not configured")
+		return
+	}
+
+	records, err := h.strategyLearning.ListMemory(r.Context())
+	if err != nil {
+		h.logger.Error("strategy_memory_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	// Attach feedback recommendation to each record.
+	type recordWithFeedback struct {
+		strategylearning.StrategyMemoryRecord
+		Recommendation string `json:"recommendation"`
+	}
+	result := make([]recordWithFeedback, 0, len(records))
+	for _, rec := range records {
+		fb := strategylearning.GenerateFeedback(&rec)
+		result = append(result, recordWithFeedback{
+			StrategyMemoryRecord: rec,
+			Recommendation:       string(fb.Recommendation),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": result,
+	})
+}
+
+// StrategyOutcomesList returns recent strategy outcomes.
+func (h *Handlers) StrategyOutcomesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.strategyLearning == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "strategy learning not configured")
+		return
+	}
+
+	p := parsePagination(r)
+
+	outcomes, err := h.strategyLearning.ListOutcomes(r.Context(), p.PerPage, p.Offset)
+	if err != nil {
+		h.logger.Error("strategy_outcomes_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if outcomes == nil {
+		outcomes = []strategylearning.StrategyOutcome{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"outcomes": outcomes,
+		"page":     p.Page,
 	})
 }
 
