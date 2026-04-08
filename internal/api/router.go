@@ -129,5 +129,20 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/path-comparative", chain(handlers.PathComparativeList))
 	mux.Handle("/api/v1/agent/path-comparative-memory", chain(handlers.PathComparativeMemoryList))
 
+	// Agent counterfactual simulation (predictive intelligence, Iteration 23)
+	mux.Handle("/api/v1/agent/counterfactual/predictions", chain(handlers.CounterfactualPredictionsList))
+	mux.Handle("/api/v1/agent/counterfactual/memory", chain(handlers.CounterfactualMemoryList))
+	mux.Handle("/api/v1/agent/counterfactual/errors", chain(handlers.CounterfactualErrorsList))
+
+	// Agent meta-reasoning (mode selection + learning, Iteration 24)
+	mux.Handle("/api/v1/agent/meta-reasoning/status", chain(handlers.MetaReasoningStatus))
+	mux.Handle("/api/v1/agent/meta-reasoning/memory", chain(handlers.MetaReasoningMemory))
+	mux.Handle("/api/v1/agent/meta-reasoning/history", chain(handlers.MetaReasoningHistory))
+
+	// Agent calibration (self-calibration layer, Iteration 25)
+	mux.Handle("/api/v1/agent/calibration/summary", chain(handlers.CalibrationSummary))
+	mux.Handle("/api/v1/agent/calibration/buckets", chain(handlers.CalibrationBuckets))
+	mux.Handle("/api/v1/agent/calibration/errors", chain(handlers.CalibrationErrors))
+
 	return requestIDMiddleware(mux)
 }

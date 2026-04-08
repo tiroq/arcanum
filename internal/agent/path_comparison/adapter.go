@@ -60,6 +60,44 @@ func (a *GraphAdapter) GetAllComparativeFeedbackMap(ctx context.Context, goalTyp
 	return result
 }
 
+// GetAllComparativeWinRates returns win rates per path signature for counterfactual simulation.
+// Fail-open: returns empty map if data is unavailable.
+func (a *GraphAdapter) GetAllComparativeWinRates(ctx context.Context, goalType string) map[string]float64 {
+	result := make(map[string]float64)
+	if a.memoryStore == nil {
+		return result
+	}
+
+	records, err := a.memoryStore.ListMemoryByGoalType(ctx, goalType)
+	if err != nil {
+		return result
+	}
+
+	for _, r := range records {
+		result[r.PathSignature] = r.WinRate
+	}
+	return result
+}
+
+// GetAllComparativeLossRates returns loss rates per path signature for counterfactual simulation.
+// Fail-open: returns empty map if data is unavailable.
+func (a *GraphAdapter) GetAllComparativeLossRates(ctx context.Context, goalType string) map[string]float64 {
+	result := make(map[string]float64)
+	if a.memoryStore == nil {
+		return result
+	}
+
+	records, err := a.memoryStore.ListMemoryByGoalType(ctx, goalType)
+	if err != nil {
+		return result
+	}
+
+	for _, r := range records {
+		result[r.PathSignature] = r.LossRate
+	}
+	return result
+}
+
 // --- Snapshot Capturer ---
 
 // SnapshotCapturerAdapter implements decision_graph.SnapshotCapturer.

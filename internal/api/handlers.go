@@ -16,10 +16,13 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/causal"
+	"github.com/tiroq/arcanum/internal/agent/calibration"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	"github.com/tiroq/arcanum/internal/agent/counterfactual"
+	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
@@ -63,6 +66,12 @@ type Handlers struct {
 	compSnapshotStore *pathcomparison.SnapshotStore
 	compOutcomeStore  *pathcomparison.OutcomeStore
 	compMemoryStore   *pathcomparison.MemoryStore
+	cfSimStore        *counterfactual.SimulationStore
+	cfOutcomeStore    *counterfactual.PredictionOutcomeStore
+	cfMemoryStore     *counterfactual.PredictionMemoryStore
+	metaEngine        *meta_reasoning.Engine
+	calibrator        *calibration.Calibrator
+	calibrationTracker *calibration.Tracker
 	logger            *zap.Logger
 }
 
@@ -175,6 +184,27 @@ func (h *Handlers) WithPathComparison(ss *pathcomparison.SnapshotStore, os *path
 	h.compSnapshotStore = ss
 	h.compOutcomeStore = os
 	h.compMemoryStore = ms
+	return h
+}
+
+// WithCounterfactual attaches the counterfactual simulation stores.
+func (h *Handlers) WithCounterfactual(ss *counterfactual.SimulationStore, os *counterfactual.PredictionOutcomeStore, ms *counterfactual.PredictionMemoryStore) *Handlers {
+	h.cfSimStore = ss
+	h.cfOutcomeStore = os
+	h.cfMemoryStore = ms
+	return h
+}
+
+// WithMetaReasoning attaches the meta-reasoning engine.
+func (h *Handlers) WithMetaReasoning(me *meta_reasoning.Engine) *Handlers {
+	h.metaEngine = me
+	return h
+}
+
+// WithCalibration attaches the calibration engine for self-calibration API (Iteration 25).
+func (h *Handlers) WithCalibration(c *calibration.Calibrator, t *calibration.Tracker) *Handlers {
+	h.calibrator = c
+	h.calibrationTracker = t
 	return h
 }
 
@@ -2309,5 +2339,300 @@ func (h *Handlers) PathComparativeMemoryList(w http.ResponseWriter, r *http.Requ
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"records": result,
+	})
+}
+
+// --- Counterfactual Simulation handlers (Iteration 23) ---
+
+// CounterfactualPredictionsList returns counterfactual simulation results.
+func (h *Handlers) CounterfactualPredictionsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.cfSimStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "counterfactual not configured")
+		return
+	}
+
+	p := parsePagination(r)
+	goalType := r.URL.Query().Get("goal_type")
+
+	var results []counterfactual.SimulationResult
+	var err error
+
+	if goalType != "" {
+		results, err = h.cfSimStore.ListSimulationsByGoalType(r.Context(), goalType, p.PerPage, p.Offset)
+	} else {
+		results, err = h.cfSimStore.ListSimulations(r.Context(), p.PerPage, p.Offset)
+	}
+	if err != nil {
+		h.logger.Error("counterfactual_predictions_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if results == nil {
+		results = []counterfactual.SimulationResult{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"predictions": results,
+		"page":        p.Page,
+	})
+}
+
+// CounterfactualMemoryList returns prediction accuracy memory records.
+func (h *Handlers) CounterfactualMemoryList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.cfMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "counterfactual not configured")
+		return
+	}
+
+	goalType := r.URL.Query().Get("goal_type")
+
+	var records []counterfactual.PredictionMemoryRecord
+	var err error
+
+	if goalType != "" {
+		records, err = h.cfMemoryStore.ListMemoryByGoalType(r.Context(), goalType)
+	} else {
+		records, err = h.cfMemoryStore.ListMemory(r.Context())
+	}
+	if err != nil {
+		h.logger.Error("counterfactual_memory_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if records == nil {
+		records = []counterfactual.PredictionMemoryRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": records,
+	})
+}
+
+// CounterfactualErrorsList returns prediction outcome errors.
+func (h *Handlers) CounterfactualErrorsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.cfOutcomeStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "counterfactual not configured")
+		return
+	}
+
+	p := parsePagination(r)
+	goalType := r.URL.Query().Get("goal_type")
+
+	var outcomes []counterfactual.PredictionOutcome
+	var err error
+
+	if goalType != "" {
+		outcomes, err = h.cfOutcomeStore.ListOutcomesByGoalType(r.Context(), goalType, p.PerPage, p.Offset)
+	} else {
+		outcomes, err = h.cfOutcomeStore.ListOutcomes(r.Context(), p.PerPage, p.Offset)
+	}
+	if err != nil {
+		h.logger.Error("counterfactual_errors_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if outcomes == nil {
+		outcomes = []counterfactual.PredictionOutcome{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"errors": outcomes,
+		"page":   p.Page,
+	})
+}
+
+// --- Meta-Reasoning Handlers (Iteration 24) ---
+
+// MetaReasoningStatus returns the current meta-reasoning state.
+func (h *Handlers) MetaReasoningStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.metaEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "meta-reasoning not configured")
+		return
+	}
+
+	lastDecision := h.metaEngine.LastDecision()
+
+	result := map[string]any{
+		"configured": true,
+	}
+	if lastDecision != nil {
+		result["last_decision"] = lastDecision
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// MetaReasoningMemory returns mode memory records.
+func (h *Handlers) MetaReasoningMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.metaEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "meta-reasoning not configured")
+		return
+	}
+
+	ms := h.metaEngine.MemoryStoreRef()
+	if ms == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"records": []any{}})
+		return
+	}
+
+	records, err := ms.ListMemory(r.Context())
+	if err != nil {
+		h.logger.Error("meta_reasoning_memory_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if records == nil {
+		records = []meta_reasoning.ModeMemoryRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": records,
+	})
+}
+
+// MetaReasoningHistory returns mode selection history.
+func (h *Handlers) MetaReasoningHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.metaEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "meta-reasoning not configured")
+		return
+	}
+
+	hs := h.metaEngine.HistoryStoreRef()
+	if hs == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"records": []any{}})
+		return
+	}
+
+	goalType := r.URL.Query().Get("goal_type")
+
+	records, err := hs.ListHistory(r.Context(), goalType, 50)
+	if err != nil {
+		h.logger.Error("meta_reasoning_history_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if records == nil {
+		records = []meta_reasoning.ModeHistoryRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": records,
+	})
+}
+
+// --- Calibration (Iteration 25) ---
+
+// CalibrationSummary returns the current calibration summary with buckets.
+func (h *Handlers) CalibrationSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.calibrator == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "calibration not configured")
+		return
+	}
+
+	summary, err := h.calibrator.GetSummary(r.Context())
+	if err != nil {
+		h.logger.Error("calibration_summary_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if summary == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"summary": calibration.CalibrationSummary{
+				Buckets: calibration.BuildBuckets(nil),
+			},
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary": summary,
+	})
+}
+
+// CalibrationBuckets returns the current calibration buckets.
+func (h *Handlers) CalibrationBuckets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.calibrationTracker == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "calibration not configured")
+		return
+	}
+
+	records, err := h.calibrationTracker.GetAllRecords(r.Context())
+	if err != nil {
+		h.logger.Error("calibration_buckets_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	buckets := calibration.BuildBuckets(records)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"buckets": buckets,
+	})
+}
+
+// CalibrationErrors returns ECE, overconfidence, and underconfidence scores.
+func (h *Handlers) CalibrationErrors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.calibrationTracker == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "calibration not configured")
+		return
+	}
+
+	records, err := h.calibrationTracker.GetAllRecords(r.Context())
+	if err != nil {
+		h.logger.Error("calibration_errors_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	buckets := calibration.BuildBuckets(records)
+	ece := calibration.ComputeECE(buckets)
+	over, under := calibration.ComputeCalibrationScores(buckets)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"expected_calibration_error": ece,
+		"overconfidence_score":       over,
+		"underconfidence_score":      under,
+		"total_records":              len(records),
 	})
 }

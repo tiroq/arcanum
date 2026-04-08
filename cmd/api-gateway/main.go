@@ -13,10 +13,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/calibration"
 	"github.com/tiroq/arcanum/internal/agent/causal"
+	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
+	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
@@ -226,6 +229,37 @@ func run() error {
 	compEvaluator := pathcomparison.NewEvaluator(compSnapshotStore, compOutcomeStore, compMemoryStore, auditor, logger)
 	outcomeHandler.WithComparativeEvaluator(compEvaluator)
 
+	// Counterfactual simulation layer (Iteration 23).
+	cfSimStore := counterfactual.NewSimulationStore(pool)
+	cfOutcomeStore := counterfactual.NewPredictionOutcomeStore(pool)
+	cfMemoryStore := counterfactual.NewPredictionMemoryStore(pool)
+	cfAdapter := counterfactual.NewGraphAdapter(cfSimStore, cfMemoryStore, pathLearningAdapter, compGraphAdapter, auditor, logger)
+	graphAdapter.WithCounterfactual(cfAdapter)
+
+	// Wire counterfactual prediction evaluator into outcome handler.
+	cfPredictor := counterfactual.NewPredictor(cfSimStore, cfOutcomeStore, cfMemoryStore, auditor, logger)
+	outcomeHandler.WithCounterfactualEvaluator(cfPredictor)
+
+	// Meta-reasoning layer (Iteration 24).
+	metaMemoryStore := meta_reasoning.NewMemoryStore(pool)
+	metaHistoryStore := meta_reasoning.NewHistoryStore(pool)
+	metaEngine := meta_reasoning.NewEngine(metaMemoryStore, metaHistoryStore, auditor, logger)
+	metaGraphAdapter := meta_reasoning.NewGraphAdapter(metaEngine)
+	graphAdapter.WithMetaReasoning(metaGraphAdapter)
+
+	// Wire meta-reasoning outcome evaluator into outcome handler.
+	outcomeHandler.WithMetaReasoningEvaluator(metaEngine)
+
+	// Self-calibration layer (Iteration 25).
+	calibrationTracker := calibration.NewTracker(pool)
+	calibrator := calibration.NewCalibrator(calibrationTracker, auditor, logger)
+	calibrationGraphAdapter := calibration.NewGraphAdapter(calibrator, logger)
+	graphAdapter.WithCalibration(calibrationGraphAdapter)
+
+	// Wire calibration recorder into outcome handler.
+	calibrationOutcomeAdapter := calibration.NewOutcomeAdapter(calibrator, logger)
+	outcomeHandler.WithCalibrationRecorder(calibrationOutcomeAdapter)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -250,7 +284,10 @@ func run() error {
 		WithStrategyLearning(strategyLearningMemory).
 		WithDecisionGraph(graphAdapter).
 		WithPathLearning(pathMemStore, pathTransStore).
-		WithPathComparison(compSnapshotStore, compOutcomeStore, compMemoryStore)
+		WithPathComparison(compSnapshotStore, compOutcomeStore, compMemoryStore).
+		WithCounterfactual(cfSimStore, cfOutcomeStore, cfMemoryStore).
+		WithMetaReasoning(metaEngine).
+		WithCalibration(calibrator, calibrationTracker)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
