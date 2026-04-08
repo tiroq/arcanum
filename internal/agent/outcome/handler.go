@@ -15,17 +15,20 @@ import (
 // Handler implements actions.OutcomeHandler by evaluating, persisting,
 // and auditing the real-world outcome of each executed action.
 type Handler struct {
-	evaluator               *DBEvaluator
-	store                   *Store
-	memoryStore             *actionmemory.Store
-	pathOutcomeEval         PathOutcomeEvaluator
-	comparativeEvaluator    ComparativeEvaluator
-	counterfactualEvaluator CounterfactualPredictionEvaluator
-	metaOutcomeEval         MetaReasoningOutcomeEvaluator
-	calibrationRecorder     CalibrationRecorder
+	evaluator                  *DBEvaluator
+	store                      *Store
+	memoryStore                *actionmemory.Store
+	pathOutcomeEval            PathOutcomeEvaluator
+	comparativeEvaluator       ComparativeEvaluator
+	counterfactualEvaluator    CounterfactualPredictionEvaluator
+	metaOutcomeEval            MetaReasoningOutcomeEvaluator
+	calibrationRecorder        CalibrationRecorder
 	contextCalibrationRecorder ContextualCalibrationRecorder
-	auditor                 audit.AuditRecorder
-	logger                  *zap.Logger
+	modeCalibrationRecorder    ModeCalibrationRecorder
+	resourceOutcomeRecorder    ResourceOutcomeRecorder
+	governanceLearningGuard    GovernanceLearningGuard
+	auditor                    audit.AuditRecorder
+	logger                     *zap.Logger
 }
 
 // PathOutcomeEvaluator evaluates path-level outcomes after action outcomes.
@@ -121,9 +124,45 @@ type ContextualCalibrationRecorder interface {
 	RecordContextCalibrationOutcome(ctx context.Context, goalType, providerName, strategyType string, predictedConfidence float64, actualOutcome string) error
 }
 
+// GovernanceLearningGuard checks whether learning writes are allowed.
+// Defined here to avoid import cycles — implemented in governance package.
+type GovernanceLearningGuard interface {
+	IsLearningBlocked(ctx context.Context) bool
+}
+
 // WithContextualCalibrationRecorder attaches a contextual calibration recorder (Iteration 26).
 func (h *Handler) WithContextualCalibrationRecorder(cr ContextualCalibrationRecorder) *Handler {
 	h.contextCalibrationRecorder = cr
+	return h
+}
+
+// WithGovernanceLearningGuard attaches a governance learning guard (Iteration 30).
+func (h *Handler) WithGovernanceLearningGuard(g GovernanceLearningGuard) *Handler {
+	h.governanceLearningGuard = g
+	return h
+}
+
+// ModeCalibrationRecorder records per-mode calibration data after outcomes.
+// Defined here to avoid import cycles — implemented in calibration package.
+type ModeCalibrationRecorder interface {
+	RecordModeCalibrationOutcome(ctx context.Context, decisionID, goalType, mode string, predictedConfidence float64, actualOutcome string) error
+}
+
+// WithModeCalibrationRecorder attaches a mode-specific calibration recorder (Iteration 28).
+func (h *Handler) WithModeCalibrationRecorder(mr ModeCalibrationRecorder) *Handler {
+	h.modeCalibrationRecorder = mr
+	return h
+}
+
+// ResourceOutcomeRecorder records resource metrics (latency, cost, depth) after outcomes.
+// Defined here to avoid import cycles — implemented in resource_optimization package.
+type ResourceOutcomeRecorder interface {
+	RecordResourceOutcome(ctx context.Context, mode, goalType string, latencyMs, reasoningDepth, pathLength, tokenCost, executionCost float64)
+}
+
+// WithResourceOutcomeRecorder attaches a resource outcome recorder (Iteration 29).
+func (h *Handler) WithResourceOutcomeRecorder(rr ResourceOutcomeRecorder) *Handler {
+	h.resourceOutcomeRecorder = rr
 	return h
 }
 
@@ -190,6 +229,14 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 	}
 
 	// Evaluate path outcome (Iteration 21, best-effort).
+	// --- Governance: skip learning writes if blocked (Iteration 30) ---
+	if h.governanceLearningGuard != nil && h.governanceLearningGuard.IsLearningBlocked(ctx) {
+		h.logger.Info("governance_learning_blocked_skipping_evaluations",
+			zap.String("action_id", action.ID),
+		)
+		return nil
+	}
+
 	h.evaluatePathOutcome(ctx, action, *o)
 
 	// Evaluate comparative outcome (Iteration 22, best-effort).
@@ -206,6 +253,12 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 
 	// Record contextual calibration data (Iteration 26, best-effort).
 	h.recordContextCalibration(ctx, action, *o)
+
+	// Record mode-specific calibration data (Iteration 28, best-effort).
+	h.recordModeCalibration(ctx, action, *o)
+
+	// Record resource outcome metrics (Iteration 29, best-effort).
+	h.recordResourceOutcome(ctx, action, *o)
 
 	return nil
 }
@@ -528,4 +581,75 @@ func (h *Handler) recordContextCalibration(ctx context.Context, action actions.A
 			zap.Error(err),
 		)
 	}
+}
+
+// recordModeCalibration records per-mode calibration data for mode-specific
+// confidence adjustment (Iteration 28). Extracts decision_id, meta_mode,
+// goal_type, and predicted_confidence from Action.Params.
+// Best-effort: failures are logged but do not block outcome processing.
+func (h *Handler) recordModeCalibration(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.modeCalibrationRecorder == nil {
+		return
+	}
+
+	decisionID, _ := action.Params["_ctx_decision_id"].(string)
+	if decisionID == "" {
+		return // No decision context.
+	}
+
+	metaMode, _ := action.Params["_ctx_meta_mode"].(string)
+	if metaMode == "" {
+		return // No meta-reasoning mode.
+	}
+
+	predictedConfidence := 0.0
+	if v, ok := action.Params["_ctx_predicted_confidence"].(float64); ok {
+		predictedConfidence = v
+	} else {
+		return // No confidence data available.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	actualOutcome := string(o.OutcomeStatus)
+
+	if err := h.modeCalibrationRecorder.RecordModeCalibrationOutcome(ctx, decisionID, goalType, metaMode, predictedConfidence, actualOutcome); err != nil {
+		h.logger.Warn("mode_calibration_record_failed",
+			zap.String("action_id", action.ID),
+			zap.String("decision_id", decisionID),
+			zap.String("mode", metaMode),
+			zap.Error(err),
+		)
+	}
+}
+
+// recordResourceOutcome extracts resource metrics from Action.Params and records
+// them for resource optimization learning. Only runs when a ResourceOutcomeRecorder
+// is configured and meta mode is present. Best-effort: failures are logged.
+func (h *Handler) recordResourceOutcome(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.resourceOutcomeRecorder == nil {
+		return
+	}
+
+	metaMode, _ := action.Params["_ctx_meta_mode"].(string)
+	if metaMode == "" {
+		return // No meta-reasoning context — action was not from a decision graph override.
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+
+	// Extract path length.
+	var pathLength float64
+	if v, ok := action.Params["_ctx_path_length"].(float64); ok {
+		pathLength = v
+	} else if v, ok := action.Params["_ctx_path_length"].(int); ok {
+		pathLength = float64(v)
+	} else {
+		pathLength = 1.0 // default for single-step actions
+	}
+
+	// Latency, token cost, and execution cost are recorded at decision time
+	// by the planner adapter. Here we record again from outcome side with
+	// the outcome's measured latency if available.
+	// Use 0 for unmeasured values — tracker will compute proxies.
+	h.resourceOutcomeRecorder.RecordResourceOutcome(ctx, metaMode, goalType, 0, 1.0, pathLength, 0, 0)
 }
