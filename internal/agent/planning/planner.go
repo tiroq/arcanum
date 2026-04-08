@@ -45,6 +45,11 @@ type StrategyOverride struct {
 	StrategyID   string `json:"strategy_id,omitempty"`
 	StrategyType string `json:"strategy_type,omitempty"`
 	Reason       string `json:"reason"`
+
+	// Path metadata (Iteration 21) — populated by decision graph when path learning is active.
+	PathSignature  string   `json:"path_signature,omitempty"`
+	PathActionTypes []string `json:"path_action_types,omitempty"`
+	PathLength     int      `json:"path_length,omitempty"`
 }
 
 // StrategyProvider evaluates bounded multi-step strategies and may override
@@ -236,6 +241,13 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 				resolved[i].Params["_ctx_strategy_id"] = strategyOverride.StrategyID
 				resolved[i].Params["_ctx_strategy_type"] = strategyOverride.StrategyType
 				resolved[i].Params["_ctx_strategy_step"] = 1
+
+				// Path metadata (Iteration 21).
+				if strategyOverride.PathSignature != "" {
+					resolved[i].Params["_ctx_path_signature"] = strategyOverride.PathSignature
+					resolved[i].Params["_ctx_path_action_types"] = strategyOverride.PathActionTypes
+					resolved[i].Params["_ctx_path_length"] = strategyOverride.PathLength
+				}
 			}
 		}
 		allActions = append(allActions, resolved...)
