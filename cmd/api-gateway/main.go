@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
@@ -209,6 +210,21 @@ func run() error {
 	// Wire path learning evaluator into outcome handler for path-level outcome evaluation.
 	pathLearningEvaluator := pathlearning.NewEvaluator(pathMemStore, pathTransStore, auditor, logger)
 	outcomeHandler.WithPathOutcomeEvaluator(pathLearningEvaluator)
+
+	// Comparative path selection learning (Iteration 22).
+	compSnapshotStore := pathcomparison.NewSnapshotStore(pool)
+	compOutcomeStore := pathcomparison.NewOutcomeStore(pool)
+	compMemoryStore := pathcomparison.NewMemoryStore(pool)
+	compGraphAdapter := pathcomparison.NewGraphAdapter(compMemoryStore, logger)
+	graphAdapter.WithComparativeLearning(compGraphAdapter)
+
+	// Wire snapshot capturer for decision snapshots.
+	snapshotCapturer := pathcomparison.NewSnapshotCapturerAdapter(compSnapshotStore, auditor, logger)
+	graphAdapter.WithSnapshotCapturer(snapshotCapturer)
+
+	// Wire comparative evaluator into outcome handler to evaluate decision quality.
+	compEvaluator := pathcomparison.NewEvaluator(compSnapshotStore, compOutcomeStore, compMemoryStore, auditor, logger)
+	outcomeHandler.WithComparativeEvaluator(compEvaluator)
 
 	adaptivePlanner.WithStrategy(graphAdapter)
 
