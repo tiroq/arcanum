@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
@@ -198,6 +199,17 @@ func run() error {
 	// Decision graph layer (Iteration 20) — replaces strategy portfolio competition.
 	graphStabilityAdapter := stability.NewStrategyStabilityAdapter(stabilityEngine)
 	graphAdapter := decision_graph.NewGraphPlannerAdapter(graphStabilityAdapter, auditor, logger)
+
+	// Path learning layer (Iteration 21) — path memory + transition learning.
+	pathMemStore := pathlearning.NewMemoryStore(pool)
+	pathTransStore := pathlearning.NewTransitionStore(pool)
+	pathLearningAdapter := pathlearning.NewGraphAdapter(pathMemStore, pathTransStore, logger)
+	graphAdapter.WithPathLearning(pathLearningAdapter)
+
+	// Wire path learning evaluator into outcome handler for path-level outcome evaluation.
+	pathLearningEvaluator := pathlearning.NewEvaluator(pathMemStore, pathTransStore, auditor, logger)
+	outcomeHandler.WithPathOutcomeEvaluator(pathLearningEvaluator)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -220,7 +232,8 @@ func run() error {
 		WithExplorationEngine(explorationEngine).
 		WithStrategyEngine(strategyEngine).
 		WithStrategyLearning(strategyLearningMemory).
-		WithDecisionGraph(graphAdapter)
+		WithDecisionGraph(graphAdapter).
+		WithPathLearning(pathMemStore, pathTransStore)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
