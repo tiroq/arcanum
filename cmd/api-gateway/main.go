@@ -249,7 +249,8 @@ func run() error {
 		WithStrategyEngine(strategyEngine).
 		WithStrategyLearning(strategyLearningMemory).
 		WithDecisionGraph(graphAdapter).
-		WithPathLearning(pathMemStore, pathTransStore)
+		WithPathLearning(pathMemStore, pathTransStore).
+		WithPathComparison(compSnapshotStore, compOutcomeStore, compMemoryStore)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
