@@ -15,14 +15,14 @@ import (
 
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
-	"github.com/tiroq/arcanum/internal/agent/causal"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
+	"github.com/tiroq/arcanum/internal/agent/causal"
+	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
-	"github.com/tiroq/arcanum/internal/agent/outcome"
-	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
+	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
@@ -41,38 +41,38 @@ import (
 
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
-	db                *pgxpool.Pool
-	publisher         *messaging.Publisher
-	metrics           *metrics.Metrics
-	goalEngine        *goals.GoalEngine
-	actionEngine      *actions.Engine
-	outcomeStore      *outcome.Store
-	actionMemoryStore *actionmemory.Store
-	adaptivePlanner   *planning.AdaptivePlanner
-	decisionJournal   *planning.DecisionJournal
-	reflectionEngine  *reflection.Engine
-	reflectionStore   *reflection.Store
-	scheduler         *scheduler.Scheduler
-	schedulerEnabled  bool
-	stabilityEngine   *stability.Engine
-	policyEngine      *policy.Engine
-	causalEngine      *causal.Engine
-	explorationEngine *exploration.Engine
-	strategyEngine    *strategy.Engine
-	strategyLearning  *strategylearning.MemoryStore
-	decisionGraph     *decision_graph.GraphPlannerAdapter
-	pathMemoryStore   *pathlearning.MemoryStore
-	transitionStore   *pathlearning.TransitionStore
-	compSnapshotStore *pathcomparison.SnapshotStore
-	compOutcomeStore  *pathcomparison.OutcomeStore
-	compMemoryStore   *pathcomparison.MemoryStore
-	cfSimStore        *counterfactual.SimulationStore
-	cfOutcomeStore    *counterfactual.PredictionOutcomeStore
-	cfMemoryStore     *counterfactual.PredictionMemoryStore
-	metaEngine        *meta_reasoning.Engine
-	calibrator        *calibration.Calibrator
+	db                 *pgxpool.Pool
+	publisher          *messaging.Publisher
+	metrics            *metrics.Metrics
+	goalEngine         *goals.GoalEngine
+	actionEngine       *actions.Engine
+	outcomeStore       *outcome.Store
+	actionMemoryStore  *actionmemory.Store
+	adaptivePlanner    *planning.AdaptivePlanner
+	decisionJournal    *planning.DecisionJournal
+	reflectionEngine   *reflection.Engine
+	reflectionStore    *reflection.Store
+	scheduler          *scheduler.Scheduler
+	schedulerEnabled   bool
+	stabilityEngine    *stability.Engine
+	policyEngine       *policy.Engine
+	causalEngine       *causal.Engine
+	explorationEngine  *exploration.Engine
+	strategyEngine     *strategy.Engine
+	strategyLearning   *strategylearning.MemoryStore
+	decisionGraph      *decision_graph.GraphPlannerAdapter
+	pathMemoryStore    *pathlearning.MemoryStore
+	transitionStore    *pathlearning.TransitionStore
+	compSnapshotStore  *pathcomparison.SnapshotStore
+	compOutcomeStore   *pathcomparison.OutcomeStore
+	compMemoryStore    *pathcomparison.MemoryStore
+	cfSimStore         *counterfactual.SimulationStore
+	cfOutcomeStore     *counterfactual.PredictionOutcomeStore
+	cfMemoryStore      *counterfactual.PredictionMemoryStore
+	metaEngine         *meta_reasoning.Engine
+	calibrator         *calibration.Calibrator
 	calibrationTracker *calibration.Tracker
-	logger            *zap.Logger
+	logger             *zap.Logger
 }
 
 // NewHandlers creates Handlers with required dependencies.
