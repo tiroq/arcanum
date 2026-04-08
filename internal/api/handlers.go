@@ -29,6 +29,7 @@ import (
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
+	providercatalog "github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
@@ -83,6 +84,7 @@ type Handlers struct {
 	govReplayBuilder   *governance.ReplayPackBuilder
 	resourceAdapter    *resourceopt.GraphAdapter
 	providerRouter     *providerrouting.GraphAdapter
+	catalogRegistry    *providercatalog.CatalogRegistry
 	logger             *zap.Logger
 }
 
@@ -250,6 +252,12 @@ func (h *Handlers) WithResourceOptimization(ra *resourceopt.GraphAdapter) *Handl
 // WithProviderRouting attaches the provider routing adapter (Iteration 31).
 func (h *Handlers) WithProviderRouting(pr *providerrouting.GraphAdapter) *Handlers {
 	h.providerRouter = pr
+	return h
+}
+
+// WithProviderCatalog attaches the provider catalog registry (Iteration 32).
+func (h *Handlers) WithProviderCatalog(cr *providercatalog.CatalogRegistry) *Handlers {
+	h.catalogRegistry = cr
 	return h
 }
 
@@ -3237,5 +3245,73 @@ func (h *Handlers) ProviderDecisions(w http.ResponseWriter, r *http.Request) {
 	decisions := router.GetRecentDecisions()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"decisions": decisions,
+	})
+}
+
+// ProviderCatalog returns the full provider catalog loaded from YAML (Iteration 32).
+func (h *Handlers) ProviderCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.catalogRegistry == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"providers": []any{},
+			"source":    "no catalog loaded",
+		})
+		return
+	}
+
+	catalogs := h.catalogRegistry.RawCatalogs()
+	type catalogEntry struct {
+		Name   string `json:"name"`
+		Kind   string `json:"kind"`
+		Models []struct {
+			Name    string   `json:"name"`
+			Roles   []string `json:"roles"`
+			Enabled bool     `json:"enabled"`
+		} `json:"models"`
+	}
+
+	var entries []catalogEntry
+	for _, cat := range catalogs {
+		entry := catalogEntry{
+			Name: cat.Provider.Name,
+			Kind: cat.Provider.Kind,
+		}
+		for _, m := range cat.Models {
+			entry.Models = append(entry.Models, struct {
+				Name    string   `json:"name"`
+				Roles   []string `json:"roles"`
+				Enabled bool     `json:"enabled"`
+			}{
+				Name:    m.Name,
+				Roles:   m.Roles,
+				Enabled: m.Enabled,
+			})
+		}
+		entries = append(entries, entry)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": entries,
+	})
+}
+
+// ProviderTargets returns a flattened list of provider+model targets (Iteration 32).
+func (h *Handlers) ProviderTargets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.catalogRegistry == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"targets": []any{}})
+		return
+	}
+
+	targets := h.catalogRegistry.Targets()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"targets": targets,
+		"count":   len(targets),
 	})
 }

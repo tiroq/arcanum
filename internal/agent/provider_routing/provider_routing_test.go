@@ -781,10 +781,13 @@ func TestMaxFallbackChainLength(t *testing.T) {
 
 func TestGraphAdapterNilSafety(t *testing.T) {
 	var adapter *GraphAdapter
-	selected, chain, reason := adapter.RouteForTask(context.Background(), "test", "test", RolePlanner, 100, 1000, 0.8, true)
+	selected, model, chain, reason := adapter.RouteForTask(context.Background(), "test", "test", RolePlanner, 100, 1000, 0.8, true)
 
 	if selected != "" {
 		t.Errorf("nil adapter should return empty selected, got %q", selected)
+	}
+	if model != "" {
+		t.Errorf("nil adapter should return empty model, got %q", model)
 	}
 	if chain != nil {
 		t.Errorf("nil adapter should return nil chain, got %v", chain)

@@ -176,5 +176,9 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/providers/usage", chain(handlers.ProviderUsage))
 	mux.Handle("/api/v1/agent/providers/decisions", chain(handlers.ProviderDecisions))
 
+	// Agent provider catalog + model-aware targets (Iteration 32)
+	mux.Handle("/api/v1/agent/providers/catalog", chain(handlers.ProviderCatalog))
+	mux.Handle("/api/v1/agent/providers/targets", chain(handlers.ProviderTargets))
+
 	return requestIDMiddleware(mux)
 }

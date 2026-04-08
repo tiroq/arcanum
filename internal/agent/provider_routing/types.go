@@ -28,10 +28,11 @@ const (
 
 // Scoring weights — must sum to 1.0.
 const (
-	WeightLatencyFit     = 0.30
-	WeightQuotaHeadroom  = 0.30
-	WeightReliability    = 0.20
-	WeightCostEfficiency = 0.20
+	WeightLatencyFit      = 0.30
+	WeightQuotaHeadroom   = 0.25
+	WeightReliability     = 0.20
+	WeightCostEfficiency  = 0.15
+	WeightModelCapability = 0.10
 )
 
 // MaxFallbackChainLength is the maximum number of providers in a fallback chain (excluding primary).
@@ -107,21 +108,48 @@ type ProviderHealth struct {
 
 // RoutingInput describes what the system needs from a provider for this task.
 type RoutingInput struct {
-	GoalType           string  `json:"goal_type"`
-	TaskType           string  `json:"task_type"`
-	PreferredRole      string  `json:"preferred_role"` // fast | planner | reviewer | batch
-	EstimatedTokens    int     `json:"estimated_tokens"`
-	LatencyBudgetMs    int     `json:"latency_budget_ms"`
-	ConfidenceRequired float64 `json:"confidence_required"`
-	AllowExternal      bool    `json:"allow_external"`
+	GoalType             string   `json:"goal_type"`
+	TaskType             string   `json:"task_type"`
+	PreferredRole        string   `json:"preferred_role"` // fast | planner | reviewer | batch
+	EstimatedTokens      int      `json:"estimated_tokens"`
+	LatencyBudgetMs      int      `json:"latency_budget_ms"`
+	ConfidenceRequired   float64  `json:"confidence_required"`
+	AllowExternal        bool     `json:"allow_external"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"` // Iteration 32: optional capability requirements
 }
 
 // RoutingDecision is the final output of the routing engine.
 type RoutingDecision struct {
 	SelectedProvider string       `json:"selected_provider"`
+	SelectedModel    string       `json:"selected_model,omitempty"` // Iteration 32: model-level selection
 	FallbackChain    []string     `json:"fallback_chain"`
 	Reason           string       `json:"reason"`
 	Trace            RoutingTrace `json:"trace"`
+}
+
+// SelectedTarget returns a RoutingTarget for the selected provider+model.
+func (d RoutingDecision) SelectedTarget() RoutingTarget {
+	return RoutingTarget{Provider: d.SelectedProvider, Model: d.SelectedModel}
+}
+
+// RoutingTarget represents a selected provider+model pair.
+// Backward compatible: Model may be empty for provider-only routing.
+type RoutingTarget struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model,omitempty"`
+}
+
+// String returns a deterministic string representation.
+func (t RoutingTarget) String() string {
+	if t.Model == "" {
+		return t.Provider
+	}
+	return t.Provider + "/" + t.Model
+}
+
+// IsEmpty returns true if no provider is selected.
+func (t RoutingTarget) IsEmpty() bool {
+	return t.Provider == ""
 }
 
 // RoutingTrace records the full decision-making process for observability.
@@ -135,12 +163,14 @@ type RoutingTrace struct {
 // RejectedProvider records why a provider was filtered out.
 type RejectedProvider struct {
 	Provider string `json:"provider"`
+	Model    string `json:"model,omitempty"` // Iteration 32: model-level rejection
 	Reason   string `json:"reason"`
 }
 
 // RankedProvider records a provider's score and scoring rationale.
 type RankedProvider struct {
 	Provider string  `json:"provider"`
+	Model    string  `json:"model,omitempty"` // Iteration 32: model-level ranking
 	Score    float64 `json:"score"`
 	Reason   string  `json:"reason"`
 }
@@ -164,6 +194,7 @@ type RoutingRecord struct {
 	GoalType         string    `json:"goal_type"`
 	TaskType         string    `json:"task_type"`
 	SelectedProvider string    `json:"selected_provider"`
+	SelectedModel    string    `json:"selected_model,omitempty"` // Iteration 32
 	FallbackChain    []string  `json:"fallback_chain"`
 	Reason           string    `json:"reason"`
 	CreatedAt        time.Time `json:"created_at"`

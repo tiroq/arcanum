@@ -12,12 +12,12 @@ import (
 // Defined with primitive parameters to avoid import cycles.
 // Fail-open: if provider is nil, routing defaults to existing behavior.
 type ProviderRoutingProvider interface {
-	// RouteForTask selects the best provider for the given task parameters.
-	// Returns selected provider name, fallback chain, and routing reason.
-	// Returns ("", nil, "no router") if routing is unavailable (fail-open).
+	// RouteForTask selects the best provider+model for the given task parameters.
+	// Returns selected provider name, selected model name, fallback chain, and routing reason.
+	// Returns ("", "", nil, "no router") if routing is unavailable (fail-open).
 	RouteForTask(ctx context.Context, goalType, taskType, preferredRole string,
 		estimatedTokens, latencyBudgetMs int, confidenceRequired float64,
-		allowExternal bool) (selected string, fallbackChain []string, reason string)
+		allowExternal bool) (selected string, selectedModel string, fallbackChain []string, reason string)
 }
 
 // GraphAdapter implements ProviderRoutingProvider, bridging the Router
@@ -43,9 +43,9 @@ func NewGraphAdapter(router *Router, auditor audit.AuditRecorder, logger *zap.Lo
 // RouteForTask implements ProviderRoutingProvider.
 func (a *GraphAdapter) RouteForTask(ctx context.Context, goalType, taskType, preferredRole string,
 	estimatedTokens, latencyBudgetMs int, confidenceRequired float64,
-	allowExternal bool) (string, []string, string) {
+	allowExternal bool) (string, string, []string, string) {
 	if a == nil || a.router == nil {
-		return "", nil, "provider router not configured"
+		return "", "", nil, "provider router not configured"
 	}
 
 	input := RoutingInput{
@@ -59,7 +59,7 @@ func (a *GraphAdapter) RouteForTask(ctx context.Context, goalType, taskType, pre
 	}
 
 	decision := a.router.Route(ctx, input)
-	return decision.SelectedProvider, decision.FallbackChain, decision.Reason
+	return decision.SelectedProvider, decision.SelectedModel, decision.FallbackChain, decision.Reason
 }
 
 // GetRouter returns the underlying router for direct access (API handlers).

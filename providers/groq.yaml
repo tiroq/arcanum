@@ -1,0 +1,37 @@
+provider:
+  name: groq
+  kind: cloud
+  enabled: true
+
+connection:
+  base_url: https://api.groq.com/openai/v1
+  api_key_env: GROQ_API_KEY
+  timeout_seconds: 30
+
+limits:
+  rpm: 30
+  tpm: 6000
+  rpd: 1000
+  tpd: 500000
+
+routing:
+  roles: [planner, reviewer, fast]
+  fallback_priority: 20
+  allow_external: true
+
+models:
+  - name: llama-3.3-70b
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode, long_context]
+    cost_class: free
+    relative_cost: 0.1
+    max_output_tokens: 4096
+
+  - name: llama-3.1-8b
+    enabled: true
+    roles: [fast]
+    capabilities: [json_mode]
+    cost_class: free
+    relative_cost: 0.05
+    max_output_tokens: 4096

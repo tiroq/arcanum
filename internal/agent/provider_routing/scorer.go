@@ -4,11 +4,12 @@ import "fmt"
 
 // ScoreComponents holds the decomposed scoring signals for a provider.
 type ScoreComponents struct {
-	LatencyFit     float64 `json:"latency_fit"`
-	QuotaHeadroom  float64 `json:"quota_headroom"`
-	ReliabilityFit float64 `json:"reliability_fit"`
-	CostEfficiency float64 `json:"cost_efficiency"`
-	FinalScore     float64 `json:"final_score"`
+	LatencyFit      float64 `json:"latency_fit"`
+	QuotaHeadroom   float64 `json:"quota_headroom"`
+	ReliabilityFit  float64 `json:"reliability_fit"`
+	CostEfficiency  float64 `json:"cost_efficiency"`
+	ModelCapability float64 `json:"model_capability"` // Iteration 32: capability fit
+	FinalScore      float64 `json:"final_score"`
 }
 
 // ScoreProvider computes a deterministic score for a given provider against a routing input.
@@ -18,26 +19,29 @@ func ScoreProvider(p Provider, input RoutingInput, usage ProviderUsageState) Sco
 	quota := ComputeHeadroom(p.Limits, usage, input.EstimatedTokens)
 	reliability := computeReliabilityFit(p)
 	cost := computeCostEfficiency(p, input)
+	capability := computeModelCapabilityFit(p, input)
 
 	final := latency*WeightLatencyFit +
 		quota*WeightQuotaHeadroom +
 		reliability*WeightReliability +
-		cost*WeightCostEfficiency
+		cost*WeightCostEfficiency +
+		capability*WeightModelCapability
 
 	return ScoreComponents{
-		LatencyFit:     latency,
-		QuotaHeadroom:  quota,
-		ReliabilityFit: reliability,
-		CostEfficiency: cost,
-		FinalScore:     clamp01(final),
+		LatencyFit:      latency,
+		QuotaHeadroom:   quota,
+		ReliabilityFit:  reliability,
+		CostEfficiency:  cost,
+		ModelCapability: capability,
+		FinalScore:      clamp01(final),
 	}
 }
 
 // FormatScoreReason builds a human-readable explanation of the score components.
 func FormatScoreReason(c ScoreComponents) string {
 	return fmt.Sprintf(
-		"latency=%.2f quota=%.2f reliability=%.2f cost=%.2f → score=%.3f",
-		c.LatencyFit, c.QuotaHeadroom, c.ReliabilityFit, c.CostEfficiency, c.FinalScore,
+		"latency=%.2f quota=%.2f reliability=%.2f cost=%.2f capability=%.2f → score=%.3f",
+		c.LatencyFit, c.QuotaHeadroom, c.ReliabilityFit, c.CostEfficiency, c.ModelCapability, c.FinalScore,
 	)
 }
 
@@ -107,4 +111,24 @@ func computeCostEfficiency(p Provider, input RoutingInput) float64 {
 		// Use relative cost as inverse score.
 		return clamp01(1.0 - p.Cost.RelativeCost)
 	}
+}
+
+// computeModelCapabilityFit returns a [0,1] score based on how well
+// a provider's capabilities match the required capabilities (Iteration 32).
+//   - no required capabilities → 1.0 (neutral)
+//   - exact match (all required present) → 1.0
+//   - partial match → fraction matched
+//   - no match → 0.0
+func computeModelCapabilityFit(p Provider, input RoutingInput) float64 {
+	if len(input.RequiredCapabilities) == 0 {
+		return 1.0 // no requirements → neutral
+	}
+
+	matched := 0
+	for _, req := range input.RequiredCapabilities {
+		if p.HasCapability(req) {
+			matched++
+		}
+	}
+	return float64(matched) / float64(len(input.RequiredCapabilities))
 }

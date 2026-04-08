@@ -59,6 +59,11 @@ type StrategyOverride struct {
 
 	// PredictedConfidence (Iteration 25) — confidence of the selected path for calibration tracking.
 	PredictedConfidence float64 `json:"predicted_confidence,omitempty"`
+
+	// SelectedProvider (Iteration 32) — provider selected by routing.
+	SelectedProvider string `json:"selected_provider,omitempty"`
+	// SelectedModel (Iteration 32) — model selected by routing.
+	SelectedModel string `json:"selected_model,omitempty"`
 }
 
 // StrategyProvider evaluates bounded multi-step strategies and may override
@@ -271,6 +276,14 @@ func (ap *AdaptivePlanner) PlanActions(ctx context.Context, goalList []goals.Goa
 				// Predicted confidence (Iteration 25) for calibration tracking.
 				if strategyOverride.PredictedConfidence > 0 {
 					resolved[i].Params["_ctx_predicted_confidence"] = strategyOverride.PredictedConfidence
+				}
+
+				// Provider + model target (Iteration 32) for outcome tracking.
+				if strategyOverride.SelectedProvider != "" {
+					resolved[i].Params["_ctx_provider"] = strategyOverride.SelectedProvider
+				}
+				if strategyOverride.SelectedModel != "" {
+					resolved[i].Params["_ctx_model"] = strategyOverride.SelectedModel
 				}
 			}
 		}

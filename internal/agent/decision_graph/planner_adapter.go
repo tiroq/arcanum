@@ -131,6 +131,14 @@ type ResourceOptimizationProvider interface {
 	RecordOutcome(ctx context.Context, mode, goalType string, latencyMs, reasoningDepth, pathLength, tokenCost, executionCost float64)
 }
 
+// ProviderRoutingProvider selects the best provider+model for a task (Iteration 32).
+// Defined here to avoid import cycles — implemented in provider_routing package.
+type ProviderRoutingProvider interface {
+	RouteForTask(ctx context.Context, goalType, taskType, preferredRole string,
+		estimatedTokens, latencyBudgetMs int, confidenceRequired float64,
+		allowExternal bool) (selected string, selectedModel string, fallbackChain []string, reason string)
+}
+
 // GraphPlannerAdapter adapts the decision graph layer to the
 // planning.StrategyProvider interface, replacing strategy portfolio
 // competition with graph-based decision evaluation.
@@ -175,6 +183,9 @@ type GraphPlannerAdapter struct {
 
 	// replayRecorder records decision replay packs for post-hoc review (Iteration 30).
 	replayRecorder ReplayPackRecorder
+
+	// providerRouting selects provider+model for task execution (Iteration 32).
+	providerRouting ProviderRoutingProvider
 
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
@@ -268,6 +279,13 @@ func (a *GraphPlannerAdapter) WithGovernance(gp GovernanceProvider) *GraphPlanne
 // WithReplayRecorder sets the replay pack recorder for decision explanation support (Iteration 30).
 func (a *GraphPlannerAdapter) WithReplayRecorder(rr ReplayPackRecorder) *GraphPlannerAdapter {
 	a.replayRecorder = rr
+	return a
+}
+
+// WithProviderRouting sets the provider routing provider for task-level
+// provider+model selection (Iteration 32).
+func (a *GraphPlannerAdapter) WithProviderRouting(pr ProviderRoutingProvider) *GraphPlannerAdapter {
+	a.providerRouting = pr
 	return a
 }
 
@@ -625,6 +643,24 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	override.DecisionID = override.StrategyID
 	override.MetaMode = metaMode
 	override.PredictedConfidence = selection.Selected.TotalConfidence
+
+	// --- Provider+model routing (Iteration 32) ---
+	// Select the best provider+model for this task. Fail-open: if routing
+	// is unavailable, provider/model fields remain empty.
+	if a.providerRouting != nil {
+		selectedProvider, selectedModel, _, routeReason := a.providerRouting.RouteForTask(
+			ctx, decision.GoalType, decision.GoalType, "", 0, 0, 0, true)
+		override.SelectedProvider = selectedProvider
+		override.SelectedModel = selectedModel
+		if selectedProvider != "" {
+			a.auditEvent(ctx, "provider.target_selected", map[string]any{
+				"goal_type":         decision.GoalType,
+				"selected_provider": selectedProvider,
+				"selected_model":    selectedModel,
+				"reason":            routeReason,
+			})
+		}
+	}
 
 	// Populate path metadata (Iteration 21) for path learning.
 	pathActions := make([]string, len(selection.Selected.Nodes))

@@ -26,6 +26,7 @@ import (
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
+	providercatalog "github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
@@ -351,6 +352,21 @@ func run() error {
 	providerRouter := providerrouting.NewRouter(providerRegistry, quotaTracker, auditor, logger)
 	providerRoutingAdapter := providerrouting.NewGraphAdapter(providerRouter, auditor, logger)
 
+	// Provider catalog + model-aware routing layer (Iteration 32).
+	catalogEntries, err := providercatalog.LoadCatalog(cfg.Providers.CatalogDir, logger)
+	if err != nil {
+		logger.Warn("failed to load provider catalog", zap.Error(err))
+	}
+	catalogRegistry := providercatalog.NewCatalogRegistry()
+	catalogRegistry.BuildFromCatalog(catalogEntries)
+	logger.Info("provider catalog loaded",
+		zap.Int("models", catalogRegistry.Count()),
+		zap.Int("files", len(catalogEntries)),
+	)
+
+	// Wire provider routing into decision graph.
+	graphAdapter.WithProviderRouting(providerRoutingAdapter)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -383,7 +399,8 @@ func run() error {
 		WithModeCalibration(modeCalibrator, modeCalTracker).
 		WithResourceOptimization(resourceAdapter).
 		WithGovernance(govController, govReplayBuilder).
-		WithProviderRouting(providerRoutingAdapter)
+		WithProviderRouting(providerRoutingAdapter).
+		WithProviderCatalog(catalogRegistry)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{

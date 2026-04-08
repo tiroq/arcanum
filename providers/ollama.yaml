@@ -1,0 +1,44 @@
+provider:
+  name: ollama
+  kind: local
+  enabled: true
+
+connection:
+  base_url: http://localhost:11434
+  timeout_seconds: 120
+
+limits:
+  rpm: 0
+  tpm: 0
+  rpd: 0
+  tpd: 0
+
+routing:
+  roles: [fast, planner, reviewer, batch, fallback]
+  fallback_priority: 100
+  allow_external: false
+
+models:
+  - name: qwen3:1.7b
+    enabled: true
+    roles: [fast]
+    capabilities: [json_mode, low_latency]
+    cost_class: local
+    relative_cost: 0.0
+    max_output_tokens: 4096
+
+  - name: qwen2.5:7b-instruct
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode]
+    cost_class: local
+    relative_cost: 0.0
+    max_output_tokens: 8192
+
+  - name: llama3.2:3b
+    enabled: true
+    roles: [fast, batch]
+    capabilities: [json_mode, low_latency]
+    cost_class: local
+    relative_cost: 0.0
+    max_output_tokens: 4096

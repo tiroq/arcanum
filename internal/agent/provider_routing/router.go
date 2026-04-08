@@ -101,13 +101,21 @@ func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision 
 	primary := scored[0]
 
 	// 5. Build fallback chain (remaining providers, no duplicates, bounded)
-	fallbackChain := r.buildFallbackChain(scored[1:], primary.Provider, input)
+	primaryKey := primary.Provider
+	if primary.Model != "" {
+		primaryKey = primary.Provider + "/" + primary.Model
+	}
+	fallbackChain := r.buildFallbackChain(scored[1:], primaryKey, input)
 
 	reason := fmt.Sprintf("selected %s: %s", primary.Provider, primary.Reason)
+	if primary.Model != "" {
+		reason = fmt.Sprintf("selected %s/%s: %s", primary.Provider, primary.Model, primary.Reason)
+	}
 	trace.FinalReason = reason
 
 	decision := RoutingDecision{
 		SelectedProvider: primary.Provider,
+		SelectedModel:    primary.Model,
 		FallbackChain:    fallbackChain,
 		Reason:           reason,
 		Trace:            trace,
@@ -195,7 +203,8 @@ func (r *Router) scoreProviders(providers []Provider, input RoutingInput) []Rank
 		})
 	}
 
-	// Deterministic sort: by score DESC, then local-before-external, then name ASC
+	// Deterministic sort: by score DESC, then local-before-external,
+	// then lower relative_cost, then lexical (provider+model).
 	sort.SliceStable(ranked, func(i, j int) bool {
 		diff := ranked[i].Score - ranked[j].Score
 		if diff > TieBreakEpsilon {
@@ -212,26 +221,43 @@ func (r *Router) scoreProviders(providers []Provider, input RoutingInput) []Rank
 			return pi.IsLocal()
 		}
 
-		// Tie: lexical name
-		return ranked[i].Provider < ranked[j].Provider
+		// Tie: lower relative cost
+		if pi.Cost.RelativeCost != pj.Cost.RelativeCost {
+			return pi.Cost.RelativeCost < pj.Cost.RelativeCost
+		}
+
+		// Tie: lexical provider name
+		if ranked[i].Provider != ranked[j].Provider {
+			return ranked[i].Provider < ranked[j].Provider
+		}
+
+		// Tie: lexical model name (Iteration 32)
+		return ranked[i].Model < ranked[j].Model
 	})
 
 	return ranked
 }
 
 // buildFallbackChain creates a bounded, duplicate-free fallback chain.
+// Iteration 32: operates on provider+model pairs. Same provider with different
+// models is allowed; duplicate provider+model pairs are rejected.
 func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, input RoutingInput) []string {
 	chain := make([]string, 0, MaxFallbackChainLength)
-	seen := map[string]bool{primary: true}
+	primaryKey := primary
+	seen := map[string]bool{primaryKey: true}
 
 	for _, rp := range remaining {
 		if len(chain) >= MaxFallbackChainLength {
 			break
 		}
-		if seen[rp.Provider] {
+		key := rp.Provider
+		if rp.Model != "" {
+			key = rp.Provider + "/" + rp.Model
+		}
+		if seen[key] {
 			continue
 		}
-		seen[rp.Provider] = true
+		seen[key] = true
 		chain = append(chain, rp.Provider)
 	}
 
@@ -247,6 +273,7 @@ func (r *Router) recordDecision(ctx context.Context, input RoutingInput, decisio
 		GoalType:         input.GoalType,
 		TaskType:         input.TaskType,
 		SelectedProvider: decision.SelectedProvider,
+		SelectedModel:    decision.SelectedModel,
 		FallbackChain:    decision.FallbackChain,
 		Reason:           decision.Reason,
 		CreatedAt:        time.Now(),
@@ -270,6 +297,7 @@ func (r *Router) emitAudit(ctx context.Context, eventType string, input RoutingI
 		"estimated_tokens":  input.EstimatedTokens,
 		"allow_external":    input.AllowExternal,
 		"selected_provider": decision.SelectedProvider,
+		"selected_model":    decision.SelectedModel,
 		"fallback_chain":    decision.FallbackChain,
 		"reason":            decision.Reason,
 	}

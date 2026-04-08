@@ -52,6 +52,7 @@ type LoggingConfig struct {
 }
 
 type ProvidersConfig struct {
+	CatalogDir  string `envconfig:"PROVIDERS_CATALOG_DIR" default:"providers"`
 	OpenAI      OpenAIConfig
 	OpenRouter  OpenRouterConfig
 	Ollama      OllamaConfig
