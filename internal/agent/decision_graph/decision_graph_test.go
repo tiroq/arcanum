@@ -850,3 +850,203 @@ func TestPathSignatureFromNodes_Single(t *testing.T) {
 		t.Errorf("expected 'retry_job', got '%s'", sig)
 	}
 }
+
+// --- Comparative Learning Adjustment Tests (Iteration 22) ---
+
+func TestComparativeAdjustments_PreferIncreasesScore(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.5},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job": "prefer_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	expected := 0.5 + comparativePreferAdjustment
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_AvoidDecreasesScore(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "log_recommendation"}}, FinalScore: 0.6},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"log_recommendation": "avoid_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	expected := 0.6 + comparativeAvoidAdjustment
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_UnderexploredBoost(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "trigger_resync"}}, FinalScore: 0.4},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"trigger_resync": "underexplored_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	expected := 0.4 + comparativeUnderexploredAdjustment
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_NilSignalsNoChange(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.5},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, nil)
+	if abs(adjusted[0].FinalScore-0.5) > 0.001 {
+		t.Errorf("expected FinalScore 0.5000, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_EmptyFeedbackNoChange(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.5},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	if abs(adjusted[0].FinalScore-0.5) > 0.001 {
+		t.Errorf("expected FinalScore 0.5000, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_NeutralNoChange(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.5},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job": "neutral",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	if abs(adjusted[0].FinalScore-0.5) > 0.001 {
+		t.Errorf("expected FinalScore 0.5000, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_ClampToZero(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.1},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job": "avoid_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	// 0.1 + (-0.20) = -0.1 → clamped to 0
+	if adjusted[0].FinalScore != 0 {
+		t.Errorf("expected FinalScore 0 (clamped), got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_ClampToOne(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.95},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job": "prefer_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	// 0.95 + 0.10 = 1.05 → clamped to 1
+	if adjusted[0].FinalScore != 1 {
+		t.Errorf("expected FinalScore 1 (clamped), got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_MultiplePaths(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.5},
+		{Nodes: []DecisionNode{{ActionType: "log_recommendation"}}, FinalScore: 0.6},
+		{Nodes: []DecisionNode{{ActionType: "noop"}}, FinalScore: 0.3},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job":          "prefer_path",
+			"log_recommendation": "avoid_path",
+			// noop has no feedback
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+
+	if abs(adjusted[0].FinalScore-(0.5+comparativePreferAdjustment)) > 0.001 {
+		t.Errorf("retry_job: expected %.4f, got %.4f", 0.5+comparativePreferAdjustment, adjusted[0].FinalScore)
+	}
+	if abs(adjusted[1].FinalScore-(0.6+comparativeAvoidAdjustment)) > 0.001 {
+		t.Errorf("log_recommendation: expected %.4f, got %.4f", 0.6+comparativeAvoidAdjustment, adjusted[1].FinalScore)
+	}
+	if abs(adjusted[2].FinalScore-0.3) > 0.001 {
+		t.Errorf("noop: expected 0.3000, got %.4f", adjusted[2].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_NoMatchingSignals(t *testing.T) {
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.5},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"other_action": "prefer_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	if abs(adjusted[0].FinalScore-0.5) > 0.001 {
+		t.Errorf("expected FinalScore 0.5000, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_MultiNodePathSignature(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ActionType: "retry_job"},
+				{ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job>log_recommendation": "prefer_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	expected := 0.5 + comparativePreferAdjustment
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestComparativeAdjustments_CombinedWithPathLearning(t *testing.T) {
+	// Simulate path learning already applied, then comparative adjustments on top.
+	paths := []DecisionPath{
+		{Nodes: []DecisionNode{{ActionType: "retry_job"}}, FinalScore: 0.6}, // already +0.10 from path learning
+	}
+	signals := &ComparativeLearningSignals{
+		ComparativeFeedback: map[string]string{
+			"retry_job": "prefer_path",
+		},
+	}
+	adjusted := ApplyComparativeLearningAdjustments(paths, signals)
+	expected := 0.6 + comparativePreferAdjustment // 0.70
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
