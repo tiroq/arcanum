@@ -24,6 +24,10 @@ type StrategyFeedbackSignal struct {
 	SuccessRate    float64
 	FailureRate    float64
 	SampleSize     int
+
+	// Iteration 18.1: continuation signals.
+	PreferContinuation bool
+	AvoidContinuation  bool
 }
 
 // ScoreStrategies assigns expected utility, risk, and confidence to each
@@ -105,6 +109,16 @@ func scorePlan(plan *StrategyPlan, input ScoreInput, blocked map[string]bool) {
 				avgQuality += StrategyPreferBoost
 			case "avoid_strategy":
 				avgQuality += StrategyAvoidPenalty
+			}
+
+			// G. Continuation-level feedback bias (Iteration 18.1).
+			// Only applies to multi-step strategies (step count > 1).
+			if stepCount > 1 {
+				if fb.AvoidContinuation {
+					avgQuality += ContinuationAvoidPenalty
+				} else if fb.PreferContinuation {
+					avgQuality += ContinuationPreferBoost
+				}
 			}
 		}
 	}

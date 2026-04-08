@@ -159,6 +159,14 @@ const (
 
 	// StrategyAvoidPenalty: scoring penalty for strategies with avoid_strategy feedback.
 	StrategyAvoidPenalty = -0.30
+
+	// ContinuationPreferBoost: scoring boost for multi-step strategies with
+	// high continuation gain rate (Iteration 18.1).
+	ContinuationPreferBoost = 0.10
+
+	// ContinuationAvoidPenalty: scoring penalty for multi-step strategies with
+	// low continuation gain rate (Iteration 18.1).
+	ContinuationAvoidPenalty = -0.15
 )
 
 // ExecutionMode documents how strategy steps are executed.
