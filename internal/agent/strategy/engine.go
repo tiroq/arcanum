@@ -197,6 +197,10 @@ func (e *Engine) EvaluatePortfolio(
 		ShouldExplore: shouldExplore,
 		StabilityMode: stabilityMode,
 	}
+	// Wire inertia: use last portfolio selection as incumbent.
+	if e.lastPortfolioSelection != nil && e.lastPortfolioSelection.Selected != nil {
+		selectConfig.LastSelectedStrategy = e.lastPortfolioSelection.Selected.StrategyType
+	}
 	selection := SelectFromPortfolio(portfolio, selectConfig)
 
 	// 7. Audit portfolio selection.

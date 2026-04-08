@@ -20,12 +20,22 @@ type PortfolioSelection struct {
 	ExplorationUsed bool                `json:"exploration_used"`
 }
 
+// InertiaBoost is added to a candidate's FinalScore when it matches the
+// last selected strategy, but only if the score gap to the next-best is < InertiaThreshold.
+// This prevents oscillation between closely-scored strategies.
+const (
+	InertiaBoost     = 0.05
+	InertiaThreshold = 0.10
+)
+
 // PortfolioSelectConfig controls selection behavior.
 type PortfolioSelectConfig struct {
 	// ShouldExplore: deterministic toggle for exploration override.
 	ShouldExplore bool
 	// StabilityMode: when safe_mode, only allow safest strategies.
 	StabilityMode string
+	// LastSelectedStrategy: if set, enables inertia (anti-oscillation).
+	LastSelectedStrategy StrategyType
 }
 
 // SelectFromPortfolio selects the best strategy from portfolio candidates.
@@ -41,6 +51,13 @@ func SelectFromPortfolio(candidates []StrategyCandidate, config PortfolioSelectC
 
 	// Sort by FinalScore descending, tie-break by fewer steps, then name.
 	sortPortfolioCandidates(candidates)
+
+	// Inertia: apply anti-oscillation boost to the previously selected strategy.
+	if config.LastSelectedStrategy != "" {
+		applyInertia(candidates, config.LastSelectedStrategy)
+		// Re-sort after inertia adjustment.
+		sortPortfolioCandidates(candidates)
+	}
 
 	// In safe_mode: filter to only safe strategies.
 	if config.StabilityMode == "safe_mode" {
@@ -151,4 +168,25 @@ func shouldSwapCandidate(a, b StrategyCandidate) bool {
 		return aSteps < bSteps
 	}
 	return string(a.StrategyType) < string(b.StrategyType)
+}
+
+// applyInertia adds InertiaBoost to the candidate matching lastSelected,
+// but only if the gap between that candidate and the current leader is < InertiaThreshold.
+// This prevents oscillation when two strategies have nearly identical scores.
+func applyInertia(candidates []StrategyCandidate, lastSelected StrategyType) {
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Find the incumbent and current leader.
+	leaderScore := candidates[0].FinalScore
+	for i := range candidates {
+		if candidates[i].StrategyType == lastSelected {
+			gap := leaderScore - candidates[i].FinalScore
+			if gap < InertiaThreshold {
+				candidates[i].FinalScore += InertiaBoost
+			}
+			return
+		}
+	}
 }
