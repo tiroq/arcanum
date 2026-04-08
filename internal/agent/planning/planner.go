@@ -47,9 +47,9 @@ type StrategyOverride struct {
 	Reason       string `json:"reason"`
 
 	// Path metadata (Iteration 21) — populated by decision graph when path learning is active.
-	PathSignature  string   `json:"path_signature,omitempty"`
+	PathSignature   string   `json:"path_signature,omitempty"`
 	PathActionTypes []string `json:"path_action_types,omitempty"`
-	PathLength     int      `json:"path_length,omitempty"`
+	PathLength      int      `json:"path_length,omitempty"`
 }
 
 // StrategyProvider evaluates bounded multi-step strategies and may override
