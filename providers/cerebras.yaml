@@ -15,7 +15,7 @@ limits:
   tpd: 0
 
 routing:
-  roles: [planner, reviewer, batch]
+  roles: [fast, planner, reviewer, batch, fallback]
   fallback_priority: 15
   allow_external: true
 
@@ -23,36 +23,72 @@ cost:
   cost_class: free
   relative_cost: 0.07
 
+health:
+  enabled: true
+  reachable: true
+  degraded: false
+
+model_defaults:
+  enabled: true
+  capabilities: [json_mode]
+  max_output_tokens: 4096
+  cost:
+    cost_class: free
+    relative_cost: 0.07
+
 models:
+  # --- FAST / LIGHT REVIEW ---
+  - name: llama3.1-8b
+    roles: [fast, reviewer, fallback]
+    capabilities: [low_latency, json_mode]
+    preferred_for: [cheap_review, light_reasoning, low_latency_fallback]
+    max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.05
+
+  # --- BALANCED HEAVY REASONING / BATCH ---
   - name: gpt-oss-120b
-    enabled: true
     roles: [planner, reviewer, batch]
-    capabilities: [json_mode, long_context]
-    preferred_for: [heavy_reasoning, batch_reasoning]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [heavy_reasoning, batch_reasoning, synthesis]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.08
     limits:
       rpm: 30
       tpm: 64000
       rpd: 14400
       tpd: 1000000
 
-  - name: llama3.1-8b
-    enabled: true
-    roles: [fast, reviewer]
-    capabilities: [json_mode]
-    preferred_for: [cheap_review, light_reasoning]
-    max_output_tokens: 2048
-
+  # --- LARGE REASONING / SYNTHESIS ---
   - name: qwen-3-235b-a22b-instruct-2507
-    enabled: true
     roles: [planner, batch]
-    capabilities: [json_mode, long_context]
-    preferred_for: [large_reasoning, synthesis]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [large_reasoning, synthesis, deep_planning]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.10
 
+  # --- EXPERIMENTAL / SECONDARY HEAVY PLANNER ---
   - name: zai-glm-4.7
-    enabled: true
     roles: [planner]
     capabilities: [json_mode, long_context]
-    preferred_for: [experimental_reasoning]
+    preferred_for: [experimental_reasoning, alternate_planning]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.09
+
+  # --- GENERIC PROVIDER FALLBACK ---
+  - name: cerebras-default
+    enabled: true
+    roles: [fallback]
+    capabilities: [json_mode]
+    preferred_for: [generic_fallback]
+    max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.06
