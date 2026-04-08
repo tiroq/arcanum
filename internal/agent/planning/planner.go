@@ -61,6 +61,10 @@ type StrategyLearningFeedback struct {
 	FailureRate    float64 `json:"failure_rate"`
 	SampleSize     int     `json:"sample_size"`
 	Recommendation string  `json:"recommendation"` // prefer_strategy | avoid_strategy | neutral | insufficient_data
+
+	// Iteration 18.1: continuation signals.
+	PreferContinuation bool `json:"prefer_continuation"`
+	AvoidContinuation  bool `json:"avoid_continuation"`
 }
 
 // StrategyLearningProvider supplies strategy-level feedback for scoring.
