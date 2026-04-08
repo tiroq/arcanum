@@ -119,5 +119,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	// Agent decision graph (graph-based decision evaluation)
 	mux.Handle("/api/v1/agent/decision-graph/status", chain(handlers.DecisionGraphStatus))
 
+	// Agent path learning (path memory + transition learning, Iteration 21)
+	mux.Handle("/api/v1/agent/path-memory", chain(handlers.PathMemoryList))
+	mux.Handle("/api/v1/agent/transition-memory", chain(handlers.TransitionMemoryList))
+	mux.Handle("/api/v1/agent/path-outcomes", chain(handlers.PathOutcomesList))
+
 	return requestIDMiddleware(mux)
 }

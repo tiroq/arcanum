@@ -20,6 +20,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
+	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
@@ -56,6 +57,8 @@ type Handlers struct {
 	strategyEngine    *strategy.Engine
 	strategyLearning  *strategylearning.MemoryStore
 	decisionGraph     *decision_graph.GraphPlannerAdapter
+	pathMemoryStore   *pathlearning.MemoryStore
+	transitionStore   *pathlearning.TransitionStore
 	logger            *zap.Logger
 }
 
@@ -153,6 +156,13 @@ func (h *Handlers) WithStrategyLearning(sl *strategylearning.MemoryStore) *Handl
 // WithDecisionGraph attaches the decision graph planner adapter.
 func (h *Handlers) WithDecisionGraph(dg *decision_graph.GraphPlannerAdapter) *Handlers {
 	h.decisionGraph = dg
+	return h
+}
+
+// WithPathLearning attaches the path learning memory and transition stores.
+func (h *Handlers) WithPathLearning(ms *pathlearning.MemoryStore, ts *pathlearning.TransitionStore) *Handlers {
+	h.pathMemoryStore = ms
+	h.transitionStore = ts
 	return h
 }
 
@@ -2008,5 +2018,161 @@ func (h *Handlers) DecisionGraphStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":    "ok",
 		"selection": selection,
+	})
+}
+
+// --- Path Learning handlers (Iteration 21) ---
+
+// PathMemoryList returns path memory records with recommendations.
+func (h *Handlers) PathMemoryList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pathMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "path learning not configured")
+		return
+	}
+
+	goalType := r.URL.Query().Get("goal_type")
+	pathSig := r.URL.Query().Get("path_signature")
+
+	var records []pathlearning.PathMemoryRecord
+	var err error
+
+	if goalType != "" {
+		records, err = h.pathMemoryStore.ListPathMemoryByGoalType(r.Context(), goalType)
+	} else {
+		records, err = h.pathMemoryStore.ListPathMemory(r.Context())
+	}
+	if err != nil {
+		h.logger.Error("path_memory_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	// Filter by path_signature if provided.
+	if pathSig != "" {
+		var filtered []pathlearning.PathMemoryRecord
+		for _, rec := range records {
+			if rec.PathSignature == pathSig {
+				filtered = append(filtered, rec)
+			}
+		}
+		records = filtered
+	}
+
+	// Attach feedback recommendation to each record.
+	type recordWithFeedback struct {
+		pathlearning.PathMemoryRecord
+		Recommendation string `json:"recommendation"`
+	}
+	result := make([]recordWithFeedback, 0, len(records))
+	for _, rec := range records {
+		fb := pathlearning.GeneratePathFeedback(&rec)
+		result = append(result, recordWithFeedback{
+			PathMemoryRecord: rec,
+			Recommendation:   string(fb.Recommendation),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": result,
+	})
+}
+
+// TransitionMemoryList returns transition memory records with recommendations.
+func (h *Handlers) TransitionMemoryList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.transitionStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "path learning not configured")
+		return
+	}
+
+	goalType := r.URL.Query().Get("goal_type")
+	tKey := r.URL.Query().Get("transition_key")
+
+	var records []pathlearning.TransitionMemoryRecord
+	var err error
+
+	if goalType != "" {
+		records, err = h.transitionStore.ListTransitionMemoryByGoalType(r.Context(), goalType)
+	} else {
+		records, err = h.transitionStore.ListTransitionMemory(r.Context())
+	}
+	if err != nil {
+		h.logger.Error("transition_memory_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	// Filter by transition_key if provided.
+	if tKey != "" {
+		var filtered []pathlearning.TransitionMemoryRecord
+		for _, rec := range records {
+			if rec.TransitionKey == tKey {
+				filtered = append(filtered, rec)
+			}
+		}
+		records = filtered
+	}
+
+	// Attach feedback recommendation to each record.
+	type recordWithFeedback struct {
+		pathlearning.TransitionMemoryRecord
+		Recommendation string `json:"recommendation"`
+	}
+	result := make([]recordWithFeedback, 0, len(records))
+	for _, rec := range records {
+		fb := pathlearning.GenerateTransitionFeedback(&rec)
+		result = append(result, recordWithFeedback{
+			TransitionMemoryRecord: rec,
+			Recommendation:         string(fb.Recommendation),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": result,
+	})
+}
+
+// PathOutcomesList returns recent evaluated path outcomes.
+func (h *Handlers) PathOutcomesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pathMemoryStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "path learning not configured")
+		return
+	}
+
+	p := parsePagination(r)
+	goalType := r.URL.Query().Get("goal_type")
+
+	var outcomes []pathlearning.PathOutcome
+	var err error
+
+	if goalType != "" {
+		outcomes, err = h.pathMemoryStore.ListPathOutcomesByGoalType(r.Context(), goalType, p.PerPage, p.Offset)
+	} else {
+		outcomes, err = h.pathMemoryStore.ListPathOutcomes(r.Context(), p.PerPage, p.Offset)
+	}
+	if err != nil {
+		h.logger.Error("path_outcomes_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if outcomes == nil {
+		outcomes = []pathlearning.PathOutcome{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"outcomes": outcomes,
+		"page":     p.Page,
 	})
 }
