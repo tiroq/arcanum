@@ -15,7 +15,7 @@ limits:
   tpd: 200000
 
 routing:
-  roles: [planner, reviewer, batch]
+  roles: [fast, planner, reviewer, batch, fallback]
   fallback_priority: 25
   allow_external: true
 
@@ -23,24 +23,57 @@ cost:
   cost_class: free
   relative_cost: 0.12
 
+health:
+  enabled: true
+  reachable: true
+  degraded: false
+
+model_defaults:
+  enabled: true
+  capabilities: [json_mode]
+  max_output_tokens: 4096
+  cost:
+    cost_class: free
+    relative_cost: 0.12
+
 models:
-  - name: deepseek
-    enabled: true
-    roles: [planner, batch]
-    capabilities: [json_mode, long_context]
-    preferred_for: [reasoning, batch]
-    max_output_tokens: 4096
-
-  - name: llama-3.3-70b
-    enabled: true
-    roles: [planner, reviewer]
-    capabilities: [json_mode]
-    preferred_for: [review, planning]
-    max_output_tokens: 4096
-
+  # --- FAST / LIGHT TASKS ---
   - name: llama-3.1-8b
-    enabled: true
-    roles: [fast]
-    capabilities: [low_latency]
-    preferred_for: [fast_tasks]
+    roles: [fast, fallback]
+    capabilities: [low_latency, json_mode]
+    preferred_for: [fast_tasks, cheap_reasoning, low_latency_fallback]
     max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.08
+
+  # --- BALANCED REVIEW / PLANNING ---
+  - name: llama-3.3-70b
+    roles: [planner, reviewer]
+    capabilities: [json_mode, structured_output]
+    preferred_for: [review, planning, summarization]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.12
+
+  # --- HEAVY REASONING / BATCH ---
+  - name: deepseek
+    roles: [planner, batch]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [reasoning, batch, synthesis, deep_planning]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.14
+
+  # --- GENERIC PROVIDER FALLBACK ---
+  - name: sambanova-default
+    enabled: true
+    roles: [fallback]
+    capabilities: [json_mode]
+    preferred_for: [generic_fallback]
+    max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.10
