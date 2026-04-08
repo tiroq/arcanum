@@ -23,10 +23,68 @@ cost:
   cost_class: free
   relative_cost: 0.10
 
+health:
+  enabled: true
+  reachable: true
+  degraded: false
+
 models:
+  - name: openrouter/auto
+    enabled: true
+    roles: [fallback]
+    capabilities: [json_mode, long_context]
+    preferred_for: [router_fallback, generic_free_fallback]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.10
+
   - name: openrouter/free
     enabled: true
     roles: [planner, reviewer, fallback]
     capabilities: [json_mode, long_context]
     preferred_for: [free_fallback, mixed_reasoning]
     max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.10
+
+  - name: openai/gpt-oss-20b:free
+    enabled: true
+    roles: [reviewer, fallback]
+    capabilities: [json_mode]
+    preferred_for: [light_review, cheap_router_fallback]
+    max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.08
+
+  - name: openai/gpt-oss-120b:free
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode, long_context]
+    preferred_for: [reasoning, synthesis, planning]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.12
+
+  - name: qwen/qwen3-32b:free
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode, long_context]
+    preferred_for: [reasoning, structured_tasks]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.09
+
+  - name: meta-llama/llama-3.3-70b-instruct:free
+    enabled: true
+    roles: [planner, reviewer]
+    capabilities: [json_mode, long_context]
+    preferred_for: [review, summarization, fallback_reasoning]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.11
