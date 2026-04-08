@@ -260,6 +260,16 @@ func run() error {
 	calibrationOutcomeAdapter := calibration.NewOutcomeAdapter(calibrator, logger)
 	outcomeHandler.WithCalibrationRecorder(calibrationOutcomeAdapter)
 
+	// Contextual confidence calibration layer (Iteration 26).
+	contextCalStore := calibration.NewContextStore(pool)
+	contextCalibrator := calibration.NewContextCalibrator(contextCalStore, auditor, logger)
+	contextCalGraphAdapter := calibration.NewContextGraphAdapter(contextCalibrator, logger)
+	graphAdapter.WithContextualCalibration(contextCalGraphAdapter)
+
+	// Wire contextual calibration recorder into outcome handler.
+	contextCalOutcomeAdapter := calibration.NewContextOutcomeAdapter(contextCalibrator, logger)
+	outcomeHandler.WithContextualCalibrationRecorder(contextCalOutcomeAdapter)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -287,7 +297,8 @@ func run() error {
 		WithPathComparison(compSnapshotStore, compOutcomeStore, compMemoryStore).
 		WithCounterfactual(cfSimStore, cfOutcomeStore, cfMemoryStore).
 		WithMetaReasoning(metaEngine).
-		WithCalibration(calibrator, calibrationTracker)
+		WithCalibration(calibrator, calibrationTracker).
+		WithContextCalibration(contextCalStore)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
