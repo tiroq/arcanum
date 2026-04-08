@@ -67,6 +67,84 @@ func EvaluateAllPaths(paths []DecisionPath, config GraphConfig) []DecisionPath {
 	return scored
 }
 
+// --- Path/Transition Learning Adjustments (Iteration 21) ---
+
+// PathLearningSignals holds path and transition feedback for scoring adjustments.
+type PathLearningSignals struct {
+	// PathFeedback: map[pathSignature] → recommendation string
+	// Values: "prefer_path", "avoid_path", "neutral"
+	PathFeedback map[string]string
+
+	// TransitionFeedback: map[transitionKey] → recommendation string
+	// Values: "prefer_transition", "avoid_transition", "neutral"
+	TransitionFeedback map[string]string
+}
+
+// ApplyPathLearningAdjustments adjusts scored paths based on path and transition learning signals.
+// Adjustments are additive and bounded. Returns the adjusted paths.
+// If signals is nil, returns paths unchanged (fail-open).
+func ApplyPathLearningAdjustments(paths []DecisionPath, signals *PathLearningSignals) []DecisionPath {
+	if signals == nil {
+		return paths
+	}
+
+	adjusted := make([]DecisionPath, len(paths))
+	for i, p := range paths {
+		adjustment := 0.0
+
+		// Path-level adjustment.
+		sig := pathSignatureFromNodes(p.Nodes)
+		if rec, ok := signals.PathFeedback[sig]; ok {
+			switch rec {
+			case "prefer_path":
+				adjustment += pathPreferAdjustment
+			case "avoid_path":
+				adjustment += pathAvoidAdjustment
+			}
+		}
+
+		// Transition-level adjustments (per edge in the path).
+		if len(p.Nodes) > 1 {
+			for j := 0; j < len(p.Nodes)-1; j++ {
+				tKey := p.Nodes[j].ActionType + "->" + p.Nodes[j+1].ActionType
+				if rec, ok := signals.TransitionFeedback[tKey]; ok {
+					switch rec {
+					case "prefer_transition":
+						adjustment += transitionPreferAdjustment
+					case "avoid_transition":
+						adjustment += transitionAvoidAdjustment
+					}
+				}
+			}
+		}
+
+		p.FinalScore = clamp01(p.FinalScore + adjustment)
+		adjusted[i] = p
+	}
+
+	return adjusted
+}
+
+// pathSignatureFromNodes builds a canonical path signature from a slice of nodes.
+func pathSignatureFromNodes(nodes []DecisionNode) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	sig := nodes[0].ActionType
+	for i := 1; i < len(nodes); i++ {
+		sig += ">" + nodes[i].ActionType
+	}
+	return sig
+}
+
+// Path/transition adjustment constants.
+const (
+	pathPreferAdjustment       = 0.10
+	pathAvoidAdjustment        = -0.20
+	transitionPreferAdjustment = 0.05
+	transitionAvoidAdjustment  = -0.10
+)
+
 // clamp01 restricts a value to [0, 1].
 func clamp01(v float64) float64 {
 	if v < 0 {

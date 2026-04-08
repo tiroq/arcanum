@@ -560,3 +560,293 @@ func abs(x float64) float64 {
 	}
 	return x
 }
+
+// --- Iteration 21: Path/Transition Learning Adjustment Tests ---
+
+func TestApplyPathLearningAdjustments_PreferPathIncreasesScore(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{
+			"retry_job>log_recommendation": "prefer_path",
+		},
+		TransitionFeedback: map[string]string{},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	if adjusted[0].FinalScore <= 0.5 {
+		t.Errorf("prefer_path should increase score, got %.4f", adjusted[0].FinalScore)
+	}
+	expected := 0.5 + pathPreferAdjustment
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_AvoidPathDecreasesScore(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{
+			"retry_job>log_recommendation": "avoid_path",
+		},
+		TransitionFeedback: map[string]string{},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	if adjusted[0].FinalScore >= 0.5 {
+		t.Errorf("avoid_path should decrease score, got %.4f", adjusted[0].FinalScore)
+	}
+	expected := 0.5 + pathAvoidAdjustment // 0.5 - 0.20 = 0.30
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_PreferTransitionIncreasesScore(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{},
+		TransitionFeedback: map[string]string{
+			"retry_job->log_recommendation": "prefer_transition",
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	expected := 0.5 + transitionPreferAdjustment // 0.5 + 0.05 = 0.55
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_AvoidTransitionDecreasesScore(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{},
+		TransitionFeedback: map[string]string{
+			"retry_job->log_recommendation": "avoid_transition",
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	expected := 0.5 + transitionAvoidAdjustment // 0.5 - 0.10 = 0.40
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_CombinedAdjustments(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{
+			"retry_job>log_recommendation": "prefer_path",
+		},
+		TransitionFeedback: map[string]string{
+			"retry_job->log_recommendation": "prefer_transition",
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	expected := 0.5 + pathPreferAdjustment + transitionPreferAdjustment // 0.5 + 0.10 + 0.05 = 0.65
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_NilSignalsNoChange(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, nil)
+
+	if adjusted[0].FinalScore != 0.5 {
+		t.Errorf("nil signals should leave score unchanged, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_NoMatchingSignalsNoChange(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback:       map[string]string{"nonexistent_path": "prefer_path"},
+		TransitionFeedback: map[string]string{"nonexistent_key": "prefer_transition"},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	if adjusted[0].FinalScore != 0.5 {
+		t.Errorf("non-matching signals should leave score unchanged, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_SingleNodeNoTransitionEffect(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{},
+		TransitionFeedback: map[string]string{
+			"retry_job->log_recommendation": "avoid_transition",
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	// Single-node path has no transitions, so transition signals shouldn't apply.
+	if adjusted[0].FinalScore != 0.5 {
+		t.Errorf("single-node path should not be affected by transition signals, got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_ScoreClampedToRange(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+			},
+			FinalScore: 0.05, // Very low score.
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{
+			"retry_job>log_recommendation": "avoid_path",
+		},
+		TransitionFeedback: map[string]string{
+			"retry_job->log_recommendation": "avoid_transition",
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	// 0.05 - 0.20 - 0.10 = -0.25, should be clamped to 0.
+	if adjusted[0].FinalScore < 0 {
+		t.Errorf("score should be clamped to 0, got %.4f", adjusted[0].FinalScore)
+	}
+	if adjusted[0].FinalScore != 0 {
+		t.Errorf("expected score 0 (clamped), got %.4f", adjusted[0].FinalScore)
+	}
+}
+
+func TestApplyPathLearningAdjustments_MultipleTransitions(t *testing.T) {
+	paths := []DecisionPath{
+		{
+			Nodes: []DecisionNode{
+				{ID: "a", ActionType: "retry_job"},
+				{ID: "b", ActionType: "log_recommendation"},
+				{ID: "c", ActionType: "trigger_resync"},
+			},
+			FinalScore: 0.5,
+		},
+	}
+
+	signals := &PathLearningSignals{
+		PathFeedback: map[string]string{},
+		TransitionFeedback: map[string]string{
+			"retry_job->log_recommendation":      "prefer_transition",
+			"log_recommendation->trigger_resync": "avoid_transition",
+		},
+	}
+
+	adjusted := ApplyPathLearningAdjustments(paths, signals)
+
+	// 0.5 + 0.05 - 0.10 = 0.45
+	expected := 0.5 + transitionPreferAdjustment + transitionAvoidAdjustment
+	if abs(adjusted[0].FinalScore-expected) > 0.001 {
+		t.Errorf("expected FinalScore %.4f, got %.4f", expected, adjusted[0].FinalScore)
+	}
+}
+
+func TestPathSignatureFromNodes(t *testing.T) {
+	nodes := []DecisionNode{
+		{ActionType: "retry_job"},
+		{ActionType: "log_recommendation"},
+	}
+	sig := pathSignatureFromNodes(nodes)
+	if sig != "retry_job>log_recommendation" {
+		t.Errorf("expected 'retry_job>log_recommendation', got '%s'", sig)
+	}
+}
+
+func TestPathSignatureFromNodes_Empty(t *testing.T) {
+	sig := pathSignatureFromNodes(nil)
+	if sig != "" {
+		t.Errorf("expected empty string, got '%s'", sig)
+	}
+}
+
+func TestPathSignatureFromNodes_Single(t *testing.T) {
+	nodes := []DecisionNode{{ActionType: "retry_job"}}
+	sig := pathSignatureFromNodes(nodes)
+	if sig != "retry_job" {
+		t.Errorf("expected 'retry_job', got '%s'", sig)
+	}
+}

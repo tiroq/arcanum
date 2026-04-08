@@ -17,6 +17,13 @@ type StabilityProvider interface {
 	GetMode(ctx context.Context) string
 }
 
+// PathLearningProvider retrieves path and transition feedback for graph scoring.
+// Defined here to avoid import cycles — implemented in path_learning package.
+type PathLearningProvider interface {
+	GetAllPathFeedbackMap(ctx context.Context, goalType string) map[string]string
+	GetAllTransitionFeedbackMap(ctx context.Context, goalType string) map[string]string
+}
+
 // GraphPlannerAdapter adapts the decision graph layer to the
 // planning.StrategyProvider interface, replacing strategy portfolio
 // competition with graph-based decision evaluation.
@@ -28,6 +35,9 @@ type GraphPlannerAdapter struct {
 	// explorationTrigger is a deterministic function that returns true
 	// when exploration should override exploitation.
 	explorationTrigger func(goalType string) bool
+
+	// pathLearning provides path and transition feedback for scoring adjustments.
+	pathLearning PathLearningProvider
 
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
@@ -49,6 +59,12 @@ func NewGraphPlannerAdapter(
 // WithExplorationTrigger sets a deterministic exploration trigger function.
 func (a *GraphPlannerAdapter) WithExplorationTrigger(fn func(goalType string) bool) *GraphPlannerAdapter {
 	a.explorationTrigger = fn
+	return a
+}
+
+// WithPathLearning sets the path learning provider for scoring adjustments.
+func (a *GraphPlannerAdapter) WithPathLearning(pl PathLearningProvider) *GraphPlannerAdapter {
+	a.pathLearning = pl
 	return a
 }
 
@@ -132,6 +148,17 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	paths := EnumeratePaths(graph)
 	scored := EvaluateAllPaths(paths, config)
 
+	// Apply path/transition learning adjustments (Iteration 21).
+	// Fail-open: if pathLearning is nil, scored paths are unchanged.
+	var learningSignals *PathLearningSignals
+	if a.pathLearning != nil {
+		learningSignals = &PathLearningSignals{
+			PathFeedback:       a.pathLearning.GetAllPathFeedbackMap(ctx, decision.GoalType),
+			TransitionFeedback: a.pathLearning.GetAllTransitionFeedbackMap(ctx, decision.GoalType),
+		}
+	}
+	scored = ApplyPathLearningAdjustments(scored, learningSignals)
+
 	// Select best path.
 	selection := SelectBestPath(scored, config)
 	a.lastSelection = &selection
@@ -172,6 +199,15 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	override.StrategyID = uuid.New().String()
 	override.StrategyType = "decision_graph"
 	override.Reason = "graph_path: " + selection.Reason
+
+	// Populate path metadata (Iteration 21) for path learning.
+	pathActions := make([]string, len(selection.Selected.Nodes))
+	for i, n := range selection.Selected.Nodes {
+		pathActions[i] = n.ActionType
+	}
+	override.PathSignature = pathSignatureFromNodes(selection.Selected.Nodes)
+	override.PathActionTypes = pathActions
+	override.PathLength = len(selection.Selected.Nodes)
 
 	// Audit the override.
 	a.auditEvent(ctx, "decision_graph.override", map[string]any{
