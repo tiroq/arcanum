@@ -24,6 +24,24 @@ type PathLearningProvider interface {
 	GetAllTransitionFeedbackMap(ctx context.Context, goalType string) map[string]string
 }
 
+// ComparativeLearningProvider retrieves comparative feedback for graph scoring.
+// Defined here to avoid import cycles — implemented in path_comparison package.
+type ComparativeLearningProvider interface {
+	GetAllComparativeFeedbackMap(ctx context.Context, goalType string) map[string]string
+}
+
+// SnapshotCapturer captures decision snapshots at path selection time.
+// Defined here to avoid import cycles — implemented in path_comparison package.
+type SnapshotCapturer interface {
+	CaptureAndSave(ctx context.Context, decisionID, goalType string, scoredPaths []ScoredPathExport, selectedSignature string, selectedScore float64) error
+}
+
+// ScoredPathExport carries a path signature and score for snapshot capture.
+type ScoredPathExport struct {
+	PathSignature string
+	Score         float64
+}
+
 // GraphPlannerAdapter adapts the decision graph layer to the
 // planning.StrategyProvider interface, replacing strategy portfolio
 // competition with graph-based decision evaluation.
@@ -38,6 +56,12 @@ type GraphPlannerAdapter struct {
 
 	// pathLearning provides path and transition feedback for scoring adjustments.
 	pathLearning PathLearningProvider
+
+	// comparativeLearning provides comparative feedback for scoring adjustments.
+	comparativeLearning ComparativeLearningProvider
+
+	// snapshotCapturer captures decision snapshots at selection time.
+	snapshotCapturer SnapshotCapturer
 
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
@@ -65,6 +89,18 @@ func (a *GraphPlannerAdapter) WithExplorationTrigger(fn func(goalType string) bo
 // WithPathLearning sets the path learning provider for scoring adjustments.
 func (a *GraphPlannerAdapter) WithPathLearning(pl PathLearningProvider) *GraphPlannerAdapter {
 	a.pathLearning = pl
+	return a
+}
+
+// WithComparativeLearning sets the comparative learning provider for scoring adjustments.
+func (a *GraphPlannerAdapter) WithComparativeLearning(cl ComparativeLearningProvider) *GraphPlannerAdapter {
+	a.comparativeLearning = cl
+	return a
+}
+
+// WithSnapshotCapturer sets the snapshot capturer for decision snapshot capture.
+func (a *GraphPlannerAdapter) WithSnapshotCapturer(sc SnapshotCapturer) *GraphPlannerAdapter {
+	a.snapshotCapturer = sc
 	return a
 }
 
@@ -159,6 +195,16 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	}
 	scored = ApplyPathLearningAdjustments(scored, learningSignals)
 
+	// Apply comparative learning adjustments (Iteration 22).
+	// Fail-open: if comparativeLearning is nil, scored paths are unchanged.
+	var comparativeSignals *ComparativeLearningSignals
+	if a.comparativeLearning != nil {
+		comparativeSignals = &ComparativeLearningSignals{
+			ComparativeFeedback: a.comparativeLearning.GetAllComparativeFeedbackMap(ctx, decision.GoalType),
+		}
+	}
+	scored = ApplyComparativeLearningAdjustments(scored, comparativeSignals)
+
 	// Select best path.
 	selection := SelectBestPath(scored, config)
 	a.lastSelection = &selection
@@ -199,6 +245,7 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	override.StrategyID = uuid.New().String()
 	override.StrategyType = "decision_graph"
 	override.Reason = "graph_path: " + selection.Reason
+	override.DecisionID = override.StrategyID
 
 	// Populate path metadata (Iteration 21) for path learning.
 	pathActions := make([]string, len(selection.Selected.Nodes))
@@ -208,6 +255,24 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	override.PathSignature = pathSignatureFromNodes(selection.Selected.Nodes)
 	override.PathActionTypes = pathActions
 	override.PathLength = len(selection.Selected.Nodes)
+
+	// Capture decision snapshot (Iteration 22).
+	// Best-effort: failures are logged but do not block selection.
+	if a.snapshotCapturer != nil {
+		exportPaths := make([]ScoredPathExport, len(scored))
+		for i, sp := range scored {
+			exportPaths[i] = ScoredPathExport{
+				PathSignature: pathSignatureFromNodes(sp.Nodes),
+				Score:         sp.FinalScore,
+			}
+		}
+		if err := a.snapshotCapturer.CaptureAndSave(ctx, override.DecisionID, decision.GoalType, exportPaths, override.PathSignature, selection.Selected.FinalScore); err != nil {
+			a.logger.Warn("snapshot_capture_failed",
+				zap.String("decision_id", override.DecisionID),
+				zap.Error(err),
+			)
+		}
+	}
 
 	// Audit the override.
 	a.auditEvent(ctx, "decision_graph.override", map[string]any{

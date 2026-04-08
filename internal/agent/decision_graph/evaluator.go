@@ -145,6 +145,53 @@ const (
 	transitionAvoidAdjustment  = -0.10
 )
 
+// --- Comparative Learning Adjustments (Iteration 22) ---
+
+// ComparativeLearningSignals holds comparative feedback for scoring adjustments.
+type ComparativeLearningSignals struct {
+	// ComparativeFeedback: map[pathSignature] → recommendation string
+	// Values: "prefer_path", "avoid_path", "underexplored_path", "neutral"
+	ComparativeFeedback map[string]string
+}
+
+// Comparative adjustment constants.
+const (
+	comparativePreferAdjustment        = 0.10
+	comparativeAvoidAdjustment         = -0.20
+	comparativeUnderexploredAdjustment = 0.05
+)
+
+// ApplyComparativeLearningAdjustments adjusts scored paths based on comparative learning signals.
+// Adjustments are additive to existing scores (including path learning adjustments).
+// If signals is nil, returns paths unchanged (fail-open).
+func ApplyComparativeLearningAdjustments(paths []DecisionPath, signals *ComparativeLearningSignals) []DecisionPath {
+	if signals == nil {
+		return paths
+	}
+
+	adjusted := make([]DecisionPath, len(paths))
+	for i, p := range paths {
+		adjustment := 0.0
+
+		sig := pathSignatureFromNodes(p.Nodes)
+		if rec, ok := signals.ComparativeFeedback[sig]; ok {
+			switch rec {
+			case "prefer_path":
+				adjustment += comparativePreferAdjustment
+			case "avoid_path":
+				adjustment += comparativeAvoidAdjustment
+			case "underexplored_path":
+				adjustment += comparativeUnderexploredAdjustment
+			}
+		}
+
+		p.FinalScore = clamp01(p.FinalScore + adjustment)
+		adjusted[i] = p
+	}
+
+	return adjusted
+}
+
 // clamp01 restricts a value to [0, 1].
 func clamp01(v float64) float64 {
 	if v < 0 {
