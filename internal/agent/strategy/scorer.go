@@ -20,7 +20,7 @@ type ScoreInput struct {
 
 // StrategyFeedbackSignal carries strategy-level learning signal.
 type StrategyFeedbackSignal struct {
-	Recommendation string  // "prefer_strategy", "avoid_strategy", "neutral", "insufficient_data"
+	Recommendation string // "prefer_strategy", "avoid_strategy", "neutral", "insufficient_data"
 	SuccessRate    float64
 	FailureRate    float64
 	SampleSize     int
