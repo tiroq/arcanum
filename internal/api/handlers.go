@@ -22,6 +22,7 @@ import (
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
+	"github.com/tiroq/arcanum/internal/agent/governance"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
@@ -29,6 +30,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
+	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
@@ -74,6 +76,11 @@ type Handlers struct {
 	calibrator         *calibration.Calibrator
 	calibrationTracker *calibration.Tracker
 	contextCalStore    *calibration.ContextStore
+	modeCalibrator     *calibration.ModeCalibrator
+	modeCalTracker     *calibration.ModeTracker
+	govController      *governance.Controller
+	govReplayBuilder   *governance.ReplayPackBuilder
+	resourceAdapter    *resourceopt.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -214,6 +221,27 @@ func (h *Handlers) WithCalibration(c *calibration.Calibrator, t *calibration.Tra
 // contextual confidence calibration API (Iteration 26).
 func (h *Handlers) WithContextCalibration(cs *calibration.ContextStore) *Handlers {
 	h.contextCalStore = cs
+	return h
+}
+
+// WithModeCalibration attaches the mode-specific calibration engine for the
+// mode calibration API (Iteration 28).
+func (h *Handlers) WithModeCalibration(mc *calibration.ModeCalibrator, mt *calibration.ModeTracker) *Handlers {
+	h.modeCalibrator = mc
+	h.modeCalTracker = mt
+	return h
+}
+
+// WithGovernance attaches the governance controller and replay builder (Iteration 30).
+func (h *Handlers) WithGovernance(gc *governance.Controller, rb *governance.ReplayPackBuilder) *Handlers {
+	h.govController = gc
+	h.govReplayBuilder = rb
+	return h
+}
+
+// WithResourceOptimization attaches the resource optimization adapter (Iteration 29).
+func (h *Handlers) WithResourceOptimization(ra *resourceopt.GraphAdapter) *Handlers {
+	h.resourceAdapter = ra
 	return h
 }
 
@@ -2684,6 +2712,111 @@ func (h *Handlers) CalibrationContextList(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// --- Mode-Specific Calibration (Iteration 28) ---
+
+// ModeCalibrationSummaryList returns mode-specific calibration summaries for all modes.
+func (h *Handlers) ModeCalibrationSummaryList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.modeCalibrator == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "mode calibration not configured")
+		return
+	}
+
+	summaries, err := h.modeCalibrator.GetAllSummaries(r.Context())
+	if err != nil {
+		h.logger.Error("mode_calibration_summary_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if summaries == nil {
+		summaries = []calibration.ModeCalibrationSummary{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summaries": summaries,
+	})
+}
+
+// ModeCalibrationBucketsList returns bucket-level calibration data by mode.
+func (h *Handlers) ModeCalibrationBucketsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.modeCalTracker == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "mode calibration not configured")
+		return
+	}
+
+	type modeBucketsEntry struct {
+		Mode    string                              `json:"mode"`
+		Buckets []calibration.ModeCalibrationBucket `json:"buckets"`
+	}
+
+	var result []modeBucketsEntry
+	for _, mode := range calibration.KnownModes {
+		records, err := h.modeCalTracker.GetRecordsByMode(r.Context(), mode)
+		if err != nil {
+			h.logger.Error("mode_calibration_buckets_failed",
+				zap.String("mode", mode),
+				zap.Error(err))
+			writeError(w, r, http.StatusInternalServerError, "query failed")
+			return
+		}
+		buckets := calibration.BuildModeBuckets(mode, records)
+		result = append(result, modeBucketsEntry{Mode: mode, Buckets: buckets})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode_buckets": result,
+	})
+}
+
+// ModeCalibrationRecordsList returns recent mode calibration records.
+// Supports optional ?limit= and ?offset= query parameters.
+func (h *Handlers) ModeCalibrationRecordsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.modeCalTracker == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "mode calibration not configured")
+		return
+	}
+
+	limit := 100
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	records, err := h.modeCalTracker.ListRecords(r.Context(), limit, offset)
+	if err != nil {
+		h.logger.Error("mode_calibration_records_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	if records == nil {
+		records = []calibration.ModeCalibrationRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": records,
+	})
+}
+
 // ArbitrationTrace returns the most recent arbitration traces (Iteration 27).
 func (h *Handlers) ArbitrationTrace(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -2702,5 +2835,297 @@ func (h *Handlers) ArbitrationTrace(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"traces": traces,
+	})
+}
+
+// --- Governance handlers (Iteration 30) ---
+
+// GovernanceState returns the current governance state.
+func (h *Handlers) GovernanceState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	st := h.govController.GetState(r.Context())
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceActions returns the governance action history.
+func (h *Handlers) GovernanceActions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	pg := parsePagination(r)
+	actions, err := h.govController.ListActions(r.Context(), pg.PerPage, pg.Offset)
+	if err != nil {
+		h.logger.Error("governance_actions_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"actions": actions,
+	})
+}
+
+// GovernanceFreeze handles POST /api/v1/agent/governance/freeze.
+func (h *Handlers) GovernanceFreeze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	var req governance.FreezeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.govController.Freeze(r.Context(), req)
+	if err != nil {
+		h.logger.Error("governance_freeze_failed", zap.Error(err))
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceUnfreeze handles POST /api/v1/agent/governance/unfreeze.
+func (h *Handlers) GovernanceUnfreeze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	var req governance.UnfreezeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.govController.Unfreeze(r.Context(), req)
+	if err != nil {
+		h.logger.Error("governance_unfreeze_failed", zap.Error(err))
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceForceMode handles POST /api/v1/agent/governance/force-mode.
+func (h *Handlers) GovernanceForceMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	var req governance.ForceModeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.govController.ForceMode(r.Context(), req)
+	if err != nil {
+		h.logger.Error("governance_force_mode_failed", zap.Error(err))
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceSafeHold handles POST /api/v1/agent/governance/safe-hold.
+func (h *Handlers) GovernanceSafeHold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	var req governance.SafeHoldRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.govController.SafeHold(r.Context(), req)
+	if err != nil {
+		h.logger.Error("governance_safe_hold_failed", zap.Error(err))
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceRollback handles POST /api/v1/agent/governance/rollback.
+func (h *Handlers) GovernanceRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	var req governance.RollbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.govController.Rollback(r.Context(), req)
+	if err != nil {
+		h.logger.Error("governance_rollback_failed", zap.Error(err))
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceClearOverride handles POST /api/v1/agent/governance/clear.
+func (h *Handlers) GovernanceClearOverride(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govController == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance not configured")
+		return
+	}
+
+	var req governance.ClearOverrideRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	st, err := h.govController.ClearOverride(r.Context(), req)
+	if err != nil {
+		h.logger.Error("governance_clear_override_failed", zap.Error(err))
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, st)
+}
+
+// GovernanceReplay handles GET /api/v1/agent/governance/replay/{decision_id}.
+func (h *Handlers) GovernanceReplay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.govReplayBuilder == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "governance replay not configured")
+		return
+	}
+
+	// Extract decision_id from path: /api/v1/agent/governance/replay/{decision_id}
+	path := r.URL.Path
+	prefix := "/api/v1/agent/governance/replay/"
+	if !strings.HasPrefix(path, prefix) {
+		writeError(w, r, http.StatusBadRequest, "missing decision_id")
+		return
+	}
+	decisionID := strings.TrimPrefix(path, prefix)
+	if decisionID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing decision_id")
+		return
+	}
+
+	rp, err := h.govReplayBuilder.GetReplayPack(r.Context(), decisionID)
+	if err != nil {
+		h.logger.Error("governance_replay_failed", zap.String("decision_id", decisionID), zap.Error(err))
+		writeError(w, r, http.StatusNotFound, "replay pack not found")
+		return
+	}
+	if rp == nil {
+		writeError(w, r, http.StatusNotFound, "replay pack not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, rp)
+}
+
+// --- Resource Optimization (Iteration 29) ---
+
+// ResourceProfiles returns all current resource profiles.
+func (h *Handlers) ResourceProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.resourceAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "resource optimization not configured")
+		return
+	}
+
+	profiles := h.resourceAdapter.GetProfiles(r.Context())
+	if profiles == nil {
+		profiles = []resourceopt.ResourceProfile{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"profiles": profiles,
+	})
+}
+
+// ResourceSummary returns aggregate cost/latency/efficiency summary.
+func (h *Handlers) ResourceSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.resourceAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "resource optimization not configured")
+		return
+	}
+
+	summary := h.resourceAdapter.GetSummary(r.Context())
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// ResourceDecisions returns recent decisions with resource penalties/adjustments.
+func (h *Handlers) ResourceDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	decisions := resourceopt.GetRecentDecisions()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"decisions": decisions,
 	})
 }

@@ -147,8 +147,29 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	// Agent contextual calibration (context-aware calibration, Iteration 26)
 	mux.Handle("/api/v1/agent/calibration/context", chain(handlers.CalibrationContextList))
 
+	// Agent mode-specific calibration (per-mode calibration, Iteration 28)
+	mux.Handle("/api/v1/agent/calibration/mode-summary", chain(handlers.ModeCalibrationSummaryList))
+	mux.Handle("/api/v1/agent/calibration/mode-buckets", chain(handlers.ModeCalibrationBucketsList))
+	mux.Handle("/api/v1/agent/calibration/mode-records", chain(handlers.ModeCalibrationRecordsList))
+
 	// Agent signal arbitration (Iteration 27)
 	mux.Handle("/api/v1/agent/arbitration/trace", chain(handlers.ArbitrationTrace))
+
+	// Agent resource optimization (cost/latency-aware decision, Iteration 29)
+	mux.Handle("/api/v1/agent/resource/profiles", chain(handlers.ResourceProfiles))
+	mux.Handle("/api/v1/agent/resource/summary", chain(handlers.ResourceSummary))
+	mux.Handle("/api/v1/agent/resource/decisions", chain(handlers.ResourceDecisions))
+
+	// Agent governance (human override + governance layer, Iteration 30)
+	mux.Handle("/api/v1/agent/governance/state", chain(handlers.GovernanceState))
+	mux.Handle("/api/v1/agent/governance/actions", chain(handlers.GovernanceActions))
+	mux.Handle("/api/v1/agent/governance/freeze", chain(handlers.GovernanceFreeze))
+	mux.Handle("/api/v1/agent/governance/unfreeze", chain(handlers.GovernanceUnfreeze))
+	mux.Handle("/api/v1/agent/governance/force-mode", chain(handlers.GovernanceForceMode))
+	mux.Handle("/api/v1/agent/governance/safe-hold", chain(handlers.GovernanceSafeHold))
+	mux.Handle("/api/v1/agent/governance/rollback", chain(handlers.GovernanceRollback))
+	mux.Handle("/api/v1/agent/governance/clear", chain(handlers.GovernanceClearOverride))
+	mux.Handle("/api/v1/agent/governance/replay/", chain(handlers.GovernanceReplay))
 
 	return requestIDMiddleware(mux)
 }

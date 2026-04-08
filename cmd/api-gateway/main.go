@@ -19,6 +19,7 @@ import (
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
+	"github.com/tiroq/arcanum/internal/agent/governance"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
@@ -26,6 +27,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
+	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
@@ -270,6 +272,41 @@ func run() error {
 	contextCalOutcomeAdapter := calibration.NewContextOutcomeAdapter(contextCalibrator, logger)
 	outcomeHandler.WithContextualCalibrationRecorder(contextCalOutcomeAdapter)
 
+	// Mode-specific calibration layer (Iteration 28).
+	modeCalTracker := calibration.NewModeTracker(pool)
+	modeCalibrator := calibration.NewModeCalibrator(modeCalTracker, auditor, logger)
+	modeCalGraphAdapter := calibration.NewModeGraphAdapter(modeCalibrator, logger)
+	graphAdapter.WithModeCalibration(modeCalGraphAdapter)
+
+	// Wire mode calibration recorder into outcome handler.
+	modeCalOutcomeAdapter := calibration.NewModeOutcomeAdapter(modeCalibrator, logger)
+	outcomeHandler.WithModeCalibrationRecorder(modeCalOutcomeAdapter)
+
+	// Resource / cost / latency-aware optimization layer (Iteration 29).
+	resourceTracker := resourceopt.NewTracker(pool)
+	resourceAdapter := resourceopt.NewGraphAdapter(resourceTracker, auditor, logger)
+	graphAdapter.WithResourceOptimization(resourceAdapter)
+
+	// Wire resource outcome recorder into outcome handler.
+	resourceOutcomeAdapter := resourceopt.NewOutcomeAdapter(resourceAdapter, logger)
+	outcomeHandler.WithResourceOutcomeRecorder(resourceOutcomeAdapter)
+
+	// Human override + governance layer (Iteration 30).
+	govStateStore := governance.NewStateStore(pool)
+	govActionStore := governance.NewActionStore(pool)
+	govController := governance.NewController(govStateStore, govActionStore, auditor, logger)
+	govAdapter := governance.NewControllerAdapter(govController, logger)
+	graphAdapter.WithGovernance(govAdapter)
+
+	// Wire governance replay pack support.
+	govReplayStore := governance.NewReplayStore(pool)
+	govReplayBuilder := governance.NewReplayPackBuilder(govReplayStore, auditor, logger)
+	govReplayAdapter := governance.NewGraphReplayAdapter(govReplayBuilder)
+	graphAdapter.WithReplayRecorder(govReplayAdapter)
+
+	// Wire governance learning guard into outcome handler.
+	outcomeHandler.WithGovernanceLearningGuard(govAdapter)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -298,7 +335,10 @@ func run() error {
 		WithCounterfactual(cfSimStore, cfOutcomeStore, cfMemoryStore).
 		WithMetaReasoning(metaEngine).
 		WithCalibration(calibrator, calibrationTracker).
-		WithContextCalibration(contextCalStore)
+		WithContextCalibration(contextCalStore).
+		WithModeCalibration(modeCalibrator, modeCalTracker).
+		WithResourceOptimization(resourceAdapter).
+		WithGovernance(govController, govReplayBuilder)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
