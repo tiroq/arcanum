@@ -50,6 +50,12 @@ type ContextualCalibrationProvider interface {
 	CalibrateConfidenceForContext(ctx context.Context, rawConfidence float64, goalType, providerName, strategyType string) float64
 }
 
+// ModeCalibrationProvider adjusts confidence values based on per-mode
+// historical prediction accuracy (Iteration 28). Defined here to avoid import cycles.
+type ModeCalibrationProvider interface {
+	CalibrateConfidenceForMode(ctx context.Context, rawConfidence float64, mode string) float64
+}
+
 // ContextualCalibrationContext carries the context dimensions for calibration lookups.
 // Used internally within the planner adapter.
 type ContextualCalibrationContext struct {
@@ -89,6 +95,42 @@ type MetaReasoningProvider interface {
 	RecordOutcome(ctx context.Context, mode string, goalType string, success bool)
 }
 
+// GovernanceProvider reads governance state for runtime enforcement.
+// Defined here to avoid import cycles — implemented in governance package.
+type GovernanceProvider interface {
+	IsLearningBlocked(ctx context.Context) bool
+	IsPolicyBlocked(ctx context.Context) bool
+	IsExplorationBlocked(ctx context.Context) bool
+	EffectiveReasoningMode(ctx context.Context) string
+	RequiresHumanReview(ctx context.Context) bool
+	GetMode(ctx context.Context) string
+}
+
+// ReplayPackRecorder records decision replay packs.
+// Defined here to avoid import cycles — implemented in governance package.
+// Uses primitive parameters to avoid type coupling.
+type ReplayPackRecorder interface {
+	RecordReplayPack(ctx context.Context,
+		decisionID, goalType, selectedMode, selectedPath string,
+		confidence float64,
+		signals, arbTrace, calInfo, compInfo, cfInfo map[string]any,
+	)
+}
+
+// ResourceOptimizationProvider provides resource-aware signals for mode selection
+// and path scoring. Defined here to avoid import cycles — implemented in
+// resource_optimization package.
+type ResourceOptimizationProvider interface {
+	// GetModeAdjustment returns a bounded adjustment for mode scoring.
+	// Positive = prefer, negative = penalize. Returns 0 if no data (fail-open).
+	GetModeAdjustment(ctx context.Context, mode, goalType string, confidence, successRate float64, stabilityMode string) float64
+	// GetPathPenalty returns a bounded resource penalty for path scoring.
+	// Returns 0 if no data or single-step path (fail-open).
+	GetPathPenalty(ctx context.Context, mode, goalType string, pathLength int, stabilityMode string) float64
+	// RecordOutcome records resource metrics after a decision. Fail-open.
+	RecordOutcome(ctx context.Context, mode, goalType string, latencyMs, reasoningDepth, pathLength, tokenCost, executionCost float64)
+}
+
 // GraphPlannerAdapter adapts the decision graph layer to the
 // planning.StrategyProvider interface, replacing strategy portfolio
 // competition with graph-based decision evaluation.
@@ -121,6 +163,18 @@ type GraphPlannerAdapter struct {
 
 	// contextCalibration adjusts confidence based on per-context accuracy (Iteration 26).
 	contextCalibration ContextualCalibrationProvider
+
+	// modeCalibration adjusts confidence based on per-mode accuracy (Iteration 28).
+	modeCalibration ModeCalibrationProvider
+
+	// resourceOptimization provides cost/latency-aware signals (Iteration 29).
+	resourceOptimization ResourceOptimizationProvider
+
+	// governance provides runtime enforcement of human overrides (Iteration 30).
+	governance GovernanceProvider
+
+	// replayRecorder records decision replay packs for post-hoc review (Iteration 30).
+	replayRecorder ReplayPackRecorder
 
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
@@ -191,6 +245,32 @@ func (a *GraphPlannerAdapter) WithContextualCalibration(cp ContextualCalibration
 	return a
 }
 
+// WithResourceOptimization sets the resource optimization provider for
+// cost/latency-aware mode selection and path scoring (Iteration 29).
+func (a *GraphPlannerAdapter) WithResourceOptimization(ro ResourceOptimizationProvider) *GraphPlannerAdapter {
+	a.resourceOptimization = ro
+	return a
+}
+
+// WithModeCalibration sets the mode-specific calibration provider for
+// per-mode confidence adjustment (Iteration 28).
+func (a *GraphPlannerAdapter) WithModeCalibration(mp ModeCalibrationProvider) *GraphPlannerAdapter {
+	a.modeCalibration = mp
+	return a
+}
+
+// WithGovernance sets the governance provider for runtime enforcement (Iteration 30).
+func (a *GraphPlannerAdapter) WithGovernance(gp GovernanceProvider) *GraphPlannerAdapter {
+	a.governance = gp
+	return a
+}
+
+// WithReplayRecorder sets the replay pack recorder for decision explanation support (Iteration 30).
+func (a *GraphPlannerAdapter) WithReplayRecorder(rr ReplayPackRecorder) *GraphPlannerAdapter {
+	a.replayRecorder = rr
+	return a
+}
+
 // LastSelection returns the most recent path selection for API visibility.
 func (a *GraphPlannerAdapter) LastSelection() *PathSelection {
 	return a.lastSelection
@@ -212,6 +292,9 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 ) planning.StrategyOverride {
 	override := planning.StrategyOverride{Applied: false}
 
+	// Start timing for resource tracking (Iteration 29).
+	decisionStartTime := time.Now()
+
 	// Determine stability mode.
 	stabilityMode := "normal"
 	if a.stability != nil {
@@ -222,6 +305,16 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	shouldExplore := false
 	if a.explorationTrigger != nil {
 		shouldExplore = a.explorationTrigger(decision.GoalType)
+	}
+
+	// --- Governance enforcement: exploration (Iteration 30) ---
+	// If governance blocks exploration, override the trigger result.
+	if a.governance != nil && a.governance.IsExplorationBlocked(ctx) {
+		shouldExplore = false
+		a.logger.Info("governance_exploration_blocked",
+			zap.String("goal_type", decision.GoalType),
+			zap.String("governance_mode", a.governance.GetMode(ctx)),
+		)
 	}
 
 	// --- Meta-reasoning mode selection (Iteration 24) ---
@@ -253,6 +346,45 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		metaMode, _, _ = a.metaReasoning.SelectMode(ctx,
 			decision.GoalType, failureRate, avgConfidence, avgRisk,
 			stabilityMode, missedWinCount, noopRate, lowValueRate)
+	}
+
+	// Emit mode-specific calibration audit event (Iteration 28).
+	// Applied after mode selection — uses mode calibration to adjust node confidence,
+	// and logs the mode calibration applied event for observability.
+	if a.modeCalibration != nil && a.auditor != nil {
+		// Log calibration.mode_applied for a representative confidence (0.5 midpoint)
+		// to audit the mode-specific correction being applied.
+		testConfidence := 0.5
+		adjusted := a.modeCalibration.CalibrateConfidenceForMode(ctx, testConfidence, metaMode)
+		if adjusted != testConfidence {
+			a.auditEvent(ctx, "calibration.mode_applied", map[string]any{
+				"mode":                metaMode,
+				"original_confidence": testConfidence,
+				"adjusted_confidence": adjusted,
+				"goal_type":           decision.GoalType,
+			})
+		}
+	}
+
+	// --- Governance enforcement: reasoning mode (Iteration 30) ---
+	// Human-forced reasoning mode dominates autonomous meta-reasoning.
+	if a.governance != nil {
+		forcedMode := a.governance.EffectiveReasoningMode(ctx)
+		if forcedMode != "" && forcedMode != metaMode {
+			a.logger.Info("governance_mode_override",
+				zap.String("original_mode", metaMode),
+				zap.String("forced_mode", forcedMode),
+				zap.String("governance_mode", a.governance.GetMode(ctx)),
+			)
+			a.auditEvent(ctx, "governance.override_applied", map[string]any{
+				"goal_type":      decision.GoalType,
+				"original_mode":  metaMode,
+				"forced_mode":    forcedMode,
+				"override_type":  "reasoning_mode",
+				"governance_mode": a.governance.GetMode(ctx),
+			})
+			metaMode = forcedMode
+		}
 	}
 
 	// Apply mode-specific configuration.
@@ -330,6 +462,18 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	if a.contextCalibration != nil {
 		for action, sig := range signals {
 			sig.Confidence = a.contextCalibration.CalibrateConfidenceForContext(ctx, sig.Confidence, decision.GoalType, "", "")
+			signals[action] = sig
+		}
+	}
+
+	// Apply mode-specific calibration to node confidence values (Iteration 28).
+	// Adjusts confidence based on per-mode historical prediction accuracy.
+	// Applied after contextual calibration in the confidence pipeline:
+	//   raw → global → contextual → mode-specific → final
+	// Fail-open: if modeCalibration is nil, confidence values are unchanged.
+	if a.modeCalibration != nil {
+		for action, sig := range signals {
+			sig.Confidence = a.modeCalibration.CalibrateConfidenceForMode(ctx, sig.Confidence, metaMode)
 			signals[action] = sig
 		}
 	}
@@ -425,6 +569,18 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	// Emit arbitration audit events.
 	a.emitArbitrationAudit(ctx, decision.GoalID, decision.GoalType, arbTraces)
 
+	// --- Resource-aware path penalty (Iteration 29) ---
+	// Apply a bounded penalty to longer/more expensive paths based on
+	// historical resource profiles. Fail-open: if provider is nil, paths unchanged.
+	if a.resourceOptimization != nil {
+		for i, p := range scored {
+			penalty := a.resourceOptimization.GetPathPenalty(ctx, metaMode, decision.GoalType, len(p.Nodes), stabilityMode)
+			if penalty > 0 {
+				scored[i].FinalScore = clamp01(p.FinalScore - penalty)
+			}
+		}
+	}
+
 	// Select best path.
 	selection := SelectBestPath(scored, config)
 	a.lastSelection = &selection
@@ -507,6 +663,57 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		"final_score":     selection.Selected.FinalScore,
 		"reason":          override.Reason,
 	})
+
+	// --- Record resource metrics (Iteration 29) ---
+	// Best-effort: failures are logged but do not block the decision.
+	if a.resourceOptimization != nil {
+		latencyMs := float64(time.Since(decisionStartTime).Milliseconds())
+		reasoningDepth := float64(config.MaxDepth)
+		pathLength := float64(len(selection.Selected.Nodes))
+		a.resourceOptimization.RecordOutcome(ctx, metaMode, decision.GoalType,
+			latencyMs, reasoningDepth, pathLength, 0, 0)
+	}
+
+	// --- Record replay pack (Iteration 30) ---
+	// Persists a decision explanation pack for post-hoc review.
+	// Best-effort: failures are logged but do not block the decision.
+	if a.replayRecorder != nil {
+		arbTraceMap := map[string]any{}
+		if len(arbTraces) > 0 {
+			arbTraceEntries := make([]map[string]any, len(arbTraces))
+			for i, tr := range arbTraces {
+				arbTraceEntries[i] = map[string]any{
+					"path_signature":   tr.PathSignature,
+					"final_adjustment": tr.FinalAdjustment,
+					"rules_applied":    tr.RulesApplied,
+					"reason":           tr.Reason,
+				}
+			}
+			arbTraceMap["traces"] = arbTraceEntries
+		}
+
+		a.replayRecorder.RecordReplayPack(ctx,
+			override.DecisionID, decision.GoalType, metaMode,
+			override.PathSignature, selection.Selected.TotalConfidence,
+			map[string]any{"stability_mode": stabilityMode, "should_explore": shouldExplore},
+			arbTraceMap, nil, nil, nil,
+		)
+	}
+
+	// --- Governance: human review enforcement (Iteration 30) ---
+	// If human review is required, annotate the override and emit audit event.
+	// The override is still returned, but marked as requiring review.
+	if a.governance != nil && a.governance.RequiresHumanReview(ctx) {
+		override.Reason = "governance_review_required: " + override.Reason
+		a.auditEvent(ctx, "governance.review_required", map[string]any{
+			"goal_id":       decision.GoalID,
+			"goal_type":     decision.GoalType,
+			"decision_id":   override.DecisionID,
+			"graph_action":  firstAction,
+			"path_signature": override.PathSignature,
+			"meta_mode":     metaMode,
+		})
+	}
 
 	return override
 }
