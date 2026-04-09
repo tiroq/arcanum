@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -36,10 +37,16 @@ func LoadCatalog(dir string, logger *zap.Logger) ([]ProviderCatalogFile, error) 
 	}
 
 	// Collect YAML files in deterministic order.
+	// Underscore-prefixed files (e.g. _global.yaml) are meta/config files
+	// and must NOT be parsed as ProviderCatalogFile entries — they use a
+	// different schema and are loaded via dedicated functions (LoadGlobalPolicy).
 	var yamlFiles []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
+		}
+		if strings.HasPrefix(e.Name(), "_") {
+			continue // skip meta files
 		}
 		ext := filepath.Ext(e.Name())
 		if ext == ".yaml" || ext == ".yml" {

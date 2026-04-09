@@ -188,6 +188,33 @@ type ProviderUsageState struct {
 	LastUpdated time.Time `json:"last_updated"`
 }
 
+// GlobalPolicyConfig holds routing policy settings derived from providers/_global.yaml.
+// It is consumed by the Router without importing the provider_catalog package
+// (to avoid import cycles). The api-gateway main.go bridges the two by reading
+// the GlobalPolicy and constructing a GlobalPolicyConfig.
+type GlobalPolicyConfig struct {
+	// PreferFree instructs the router to boost free/local providers during scoring.
+	PreferFree bool
+
+	// AllowExternal is a global gate for external (cloud / router) providers.
+	// When false, external providers are filtered even if RoutingInput.AllowExternal=true.
+	// Applied as: effectiveAllowExternal = input.AllowExternal && policy.AllowExternal.
+	AllowExternal bool
+
+	// MaxFallbackChain overrides the MaxFallbackChainLength constant when > 0.
+	MaxFallbackChain int
+
+	// RolePreferences maps role names to ordered provider preference lists.
+	// Providers listed first receive a scoring boost (position 0 = highest boost).
+	// Example: {"fast": ["groq", "gemini", "ollama"]}.
+	RolePreferences map[string][]string
+
+	// DegradePolicy defines provider tier ordering for fallback chain assembly.
+	// Valid tier names: external_strong, external_fast, router, local.
+	// Providers matching earlier tiers appear first in the fallback chain.
+	DegradePolicy []string
+}
+
 // RoutingRecord persists a routing decision for observability queries.
 type RoutingRecord struct {
 	ID               string    `json:"id"`

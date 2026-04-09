@@ -183,6 +183,12 @@ type RoutingPolicyConfig struct {
 // applyProfileBackcompat copies deprecated OLLAMA_*_PROFILE env vars into the
 // new MODEL_*_PROFILE fields when the latter are unset. It returns one warning
 // string per deprecated var consumed so the caller can surface them.
+//
+// IMPORTANT: These profile vars are execution-only — they control which local
+// Ollama model and execution options (think mode, timeout, JSON mode) are used
+// within the worker execution engine. They do NOT affect provider routing
+// decisions in the agent decision graph (which uses providers/_global.yaml,
+// the provider catalog, and the scoring-based routing engine instead).
 func applyProfileBackcompat(cfg *OllamaConfig) []string {
 	type mapping struct {
 		oldKey  string
@@ -200,7 +206,10 @@ func applyProfileBackcompat(cfg *OllamaConfig) []string {
 		if *p.current == "" {
 			if v := os.Getenv(p.oldKey); v != "" {
 				*p.current = v
-				warnings = append(warnings, fmt.Sprintf("%s is deprecated; rename to %s", p.oldKey, p.newKey))
+				warnings = append(warnings, fmt.Sprintf(
+					"%s is deprecated; rename to %s"+
+						" (execution-only: affects local Ollama model selection and options, NOT provider routing)",
+					p.oldKey, p.newKey))
 			}
 		}
 	}

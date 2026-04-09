@@ -9,6 +9,7 @@ type ScoreComponents struct {
 	ReliabilityFit  float64 `json:"reliability_fit"`
 	CostEfficiency  float64 `json:"cost_efficiency"`
 	ModelCapability float64 `json:"model_capability"` // Iteration 32: capability fit
+	PreferenceBoost float64 `json:"preference_boost"` // global policy preference bonus
 	FinalScore      float64 `json:"final_score"`
 }
 
@@ -39,6 +40,12 @@ func ScoreProvider(p Provider, input RoutingInput, usage ProviderUsageState) Sco
 
 // FormatScoreReason builds a human-readable explanation of the score components.
 func FormatScoreReason(c ScoreComponents) string {
+	if c.PreferenceBoost > 0 {
+		return fmt.Sprintf(
+			"latency=%.2f quota=%.2f reliability=%.2f cost=%.2f capability=%.2f preference=%.2f → score=%.3f",
+			c.LatencyFit, c.QuotaHeadroom, c.ReliabilityFit, c.CostEfficiency, c.ModelCapability, c.PreferenceBoost, c.FinalScore,
+		)
+	}
 	return fmt.Sprintf(
 		"latency=%.2f quota=%.2f reliability=%.2f cost=%.2f capability=%.2f → score=%.3f",
 		c.LatencyFit, c.QuotaHeadroom, c.ReliabilityFit, c.CostEfficiency, c.ModelCapability, c.FinalScore,

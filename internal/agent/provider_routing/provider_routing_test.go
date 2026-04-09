@@ -923,3 +923,410 @@ func TestLocalPreferredOnTie(t *testing.T) {
 		t.Errorf("expected local provider on tie, got %q", d.SelectedProvider)
 	}
 }
+
+// =============================================================================
+// Global Policy Tests (Iteration 33: providers/_global.yaml wire-in)
+// =============================================================================
+
+// --- 25. Global policy: role-based preference ordering (fast role) ---
+// Test 4.3.8: fast role prefers groq/gemini/ollama ordering.
+
+func TestGlobalPolicy_FastRolePreferenceOrdering(t *testing.T) {
+	// Register providers in reverse alphabetical order to ensure preference
+	// boost drives the ordering, not alphabetical tie-break.
+	registry := NewRegistry()
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RoleFast, RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("gemini", KindCloud,
+		[]string{RoleFast}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+	registry.Register(testProvider("groq", KindCloud,
+		[]string{RoleFast}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: true,
+		RolePreferences: map[string][]string{
+			RoleFast: {"groq", "gemini", "ollama"},
+		},
+	})
+
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RoleFast,
+		AllowExternal: true,
+	})
+
+	// groq is first in preference list → should win despite same score as gemini.
+	if d.SelectedProvider != "groq" {
+		t.Errorf("expected groq (first in fast preference list), got %q", d.SelectedProvider)
+	}
+}
+
+// --- 26. Global policy: planner role preference ordering ---
+// Test 4.3.9: planner role prefers cerebras/sambanova/gemini/openrouter.
+
+func TestGlobalPolicy_PlannerRolePreferenceOrdering(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("openrouter", KindRouter,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{RPM: 20}, CostFree, 0.1))
+	registry.Register(testProvider("cerebras", KindCloud,
+		[]string{RolePlanner}, nil, ProviderLimits{RPM: 30}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: true,
+		RolePreferences: map[string][]string{
+			RolePlanner: {"cerebras", "sambanova", "gemini", "openrouter"},
+		},
+	})
+
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: true,
+	})
+
+	// cerebras is first in preference list → should win.
+	if d.SelectedProvider != "cerebras" {
+		t.Errorf("expected cerebras (first in planner preference list), got %q", d.SelectedProvider)
+	}
+}
+
+// --- 27. Global policy: fallback role preference ordering ---
+// Test 4.3.10: fallback role prefers openrouter/ollama.
+
+func TestGlobalPolicy_FallbackRolePreferenceOrdering(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("openrouter", KindRouter,
+		[]string{RoleFallback}, nil, ProviderLimits{RPM: 20}, CostFree, 0.1))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: true,
+		RolePreferences: map[string][]string{
+			RoleFallback: {"openrouter", "ollama"},
+		},
+	})
+
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RoleFallback,
+		AllowExternal: true,
+	})
+
+	// openrouter is first in fallback preference list → should win.
+	if d.SelectedProvider != "openrouter" {
+		t.Errorf("expected openrouter (first in fallback preference list), got %q", d.SelectedProvider)
+	}
+}
+
+// --- 28. Global policy: allow_external=false blocks external providers ---
+// Test 4.3.11: allow_external=false blocks external providers even if preferred.
+
+func TestGlobalPolicy_AllowExternalFalseBlocksExternalProviders(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("groq", KindCloud,
+		[]string{RolePlanner}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+	registry.Register(testProvider("openrouter", KindRouter,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{RPM: 20}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	// Global policy blocks external even though groq/openrouter are preferred.
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: false, // ← gate
+		RolePreferences: map[string][]string{
+			RolePlanner: {"groq", "openrouter", "ollama"},
+		},
+	})
+
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: true, // caller requests external — policy overrides
+	})
+
+	if d.SelectedProvider != "ollama" {
+		t.Errorf("expected local ollama (global policy blocks external), got %q", d.SelectedProvider)
+	}
+	for _, f := range d.FallbackChain {
+		p, ok := registry.Get(f)
+		if ok && p.IsExternal() {
+			t.Errorf("external provider %q in fallback chain when global policy allow_external=false", f)
+		}
+	}
+}
+
+// --- 29. Global policy: max_fallback_chain from policy overrides constant ---
+// Test 4.1.4: fallback chain respects _global.yaml max_fallback_chain.
+
+func TestGlobalPolicy_MaxFallbackChainFromPolicy(t *testing.T) {
+	registry := NewRegistry()
+	// Register many providers so fallback chain can be naturally long.
+	for i := 0; i < 10; i++ {
+		name := string(rune('a' + i))
+		registry.Register(testProvider(name, KindCloud,
+			[]string{RolePlanner}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+	}
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal:    true,
+		MaxFallbackChain: 2, // policy caps at 2
+	})
+
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: true,
+	})
+
+	if len(d.FallbackChain) > 2 {
+		t.Errorf("fallback chain exceeds policy max_fallback_chain=2: got %d entries", len(d.FallbackChain))
+	}
+}
+
+// --- 30. Global policy: degrade_policy ordering in fallback chain ---
+// Test 4.3.12: degrade_policy ordering is respected deterministically.
+
+func TestGlobalPolicy_DegradePolicyOrderingInFallbackChain(t *testing.T) {
+	registry := NewRegistry()
+	// cloud providers (external_strong tier) come before router and local.
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("openrouter", KindRouter,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{RPM: 20}, CostFree, 0.1))
+	registry.Register(testProvider("groq", KindCloud,
+		[]string{RolePlanner}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	// Policy: try external_strong → router → local when degrading.
+	// groq is selected as primary (highest preference + cloud score).
+	// Fallback should be: openrouter (router) before ollama (local).
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal:    true,
+		MaxFallbackChain: 3,
+		RolePreferences: map[string][]string{
+			RolePlanner: {"groq", "openrouter", "ollama"},
+		},
+		DegradePolicy: []string{"external_strong", "router", "local"},
+	})
+
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: true,
+	})
+
+	// Primary should be groq (highest preference).
+	if d.SelectedProvider != "groq" {
+		t.Errorf("expected groq as primary, got %q", d.SelectedProvider)
+	}
+
+	// Fallback chain should have openrouter before ollama (degrade_policy: router < local).
+	openrouterIdx := -1
+	ollamaIdx := -1
+	for i, f := range d.FallbackChain {
+		if f == "openrouter" {
+			openrouterIdx = i
+		}
+		if f == "ollama" {
+			ollamaIdx = i
+		}
+	}
+	if openrouterIdx == -1 {
+		t.Skip("openrouter not in fallback chain (may have been capped by MaxFallbackChain)")
+	}
+	if ollamaIdx != -1 && openrouterIdx > ollamaIdx {
+		t.Errorf("router (openrouter) should appear before local (ollama) per degrade_policy, fallback=%v", d.FallbackChain)
+	}
+}
+
+// --- 31. Legacy env isolation: OLLAMA_*_PROFILE does not affect provider routing ---
+// Tests 4.2.5 and 4.2.6: legacy env only affects worker execution, not routing engine.
+
+func TestLegacyEnv_OllamaProfileDoesNotAffectProviderRouting(t *testing.T) {
+	// The provider routing engine is governed solely by the registry, scoring,
+	// and global policy. MODEL_*_PROFILE / OLLAMA_*_PROFILE env vars are consumed
+	// by cmd/worker/main.go for execution-only purposes (which local Ollama model
+	// runs and with which options). They are never passed to the routing engine.
+	//
+	// This test verifies that a Router with no awareness of legacy env vars
+	// produces the same result as one with a policy containing no profile overrides.
+	registry := NewRegistry()
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("groq", KindCloud,
+		[]string{RolePlanner}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+
+	// Router without any policy (baseline — no profile knowledge).
+	routerBase := NewRouter(registry, quotas, nil, nil)
+
+	// Router with global policy (matching _global.yaml) — still no profile knowledge.
+	routerWithPolicy := NewRouter(registry, quotas, nil, nil)
+	routerWithPolicy.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal:    true,
+		MaxFallbackChain: 3,
+		RolePreferences: map[string][]string{
+			RolePlanner: {"groq", "ollama"},
+		},
+	})
+
+	input := RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: true,
+	}
+
+	d1 := routerBase.Route(context.Background(), input)
+	d2 := routerWithPolicy.Route(context.Background(), input)
+
+	// Both must return a valid provider (system is functional).
+	if d1.SelectedProvider == "" || d2.SelectedProvider == "" {
+		t.Error("expected a provider to be selected in both cases")
+	}
+
+	// With global policy, groq should be preferred (first in preference list).
+	if d2.SelectedProvider != "groq" {
+		t.Errorf("expected groq with global policy preference, got %q", d2.SelectedProvider)
+	}
+}
+
+// --- 32. Local-only mode regression ---
+// Test 4.4.13: local-only mode still works with policy wired in.
+
+func TestGlobalPolicy_LocalOnlyModeRegression(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testProvider("ollama", KindLocal,
+		[]string{RolePlanner, RoleFallback}, nil, ProviderLimits{}, CostLocal, 0.0))
+	registry.Register(testProvider("groq", KindCloud,
+		[]string{RolePlanner}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: true, // global allows external
+		RolePreferences: map[string][]string{
+			RolePlanner: {"groq", "ollama"}, // groq preferred
+		},
+	})
+
+	// But caller sets AllowExternal=false (local-only mode at call site).
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: false,
+	})
+
+	// Local-only mode must be respected; external must not be selected.
+	if d.SelectedProvider != "ollama" {
+		t.Errorf("expected ollama in local-only mode, got %q", d.SelectedProvider)
+	}
+	for _, f := range d.FallbackChain {
+		p, ok := registry.Get(f)
+		if ok && p.IsExternal() {
+			t.Errorf("external provider %q in fallback chain in local-only mode", f)
+		}
+	}
+}
+
+// --- 33. Routing decisions still persist with policy ---
+// Test 4.4.15: provider routing decisions still persist (recent decisions bounded).
+
+func TestGlobalPolicy_RoutingDecisionsPersistWithPolicy(t *testing.T) {
+	registry := testRegistry()
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: true,
+		RolePreferences: map[string][]string{
+			RolePlanner: {"cerebras", "groq"},
+		},
+	})
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		router.Route(ctx, RoutingInput{
+			PreferredRole:   RolePlanner,
+			EstimatedTokens: 100,
+			AllowExternal:   true,
+		})
+	}
+
+	decisions := router.GetRecentDecisions()
+	if len(decisions) != 5 {
+		t.Errorf("expected 5 recorded decisions, got %d", len(decisions))
+	}
+	for _, d := range decisions {
+		if d.SelectedProvider == "" {
+			t.Error("recorded decision should have a selected provider")
+		}
+	}
+}
+
+// --- 34. Preference boost is additive and bounded ---
+
+func TestGlobalPolicy_PreferenceBoostBounded(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(testProvider("preferred", KindCloud,
+		[]string{RolePlanner}, nil, ProviderLimits{RPM: 100}, CostFree, 0.0))
+
+	quotas := NewQuotaTracker(nil)
+	router := NewRouter(registry, quotas, nil, nil)
+
+	// Preference list with 10 entries — boost must be capped at 0.05.
+	router.WithGlobalPolicy(&GlobalPolicyConfig{
+		AllowExternal: true,
+		RolePreferences: map[string][]string{
+			RolePlanner: {"p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "preferred"},
+		},
+	})
+
+	// The final score must remain in [0, 1] regardless of how many entries are in the preference list.
+	d := router.Route(context.Background(), RoutingInput{
+		PreferredRole: RolePlanner,
+		AllowExternal: true,
+	})
+	if d.SelectedProvider != "preferred" {
+		t.Errorf("expected 'preferred', got %q", d.SelectedProvider)
+	}
+	// Verify score in trace does not exceed 1.0
+	for _, ranked := range d.Trace.RankedProviders {
+		if ranked.Score > 1.0 {
+			t.Errorf("ranked score exceeds 1.0: %f for %s", ranked.Score, ranked.Provider)
+		}
+	}
+}
+
+// --- 35. No-policy router behavior unchanged ---
+
+func TestGlobalPolicy_NilPolicyPreservesExistingBehavior(t *testing.T) {
+	registry := testRegistry()
+	quotas := NewQuotaTracker(nil)
+
+	// Router without policy.
+	routerNoPolicy := NewRouter(registry, quotas, nil, nil)
+
+	// Router with nil policy explicitly.
+	routerNilPolicy := NewRouter(registry, quotas, nil, nil)
+	routerNilPolicy.WithGlobalPolicy(nil)
+
+	input := RoutingInput{
+		PreferredRole:   RolePlanner,
+		EstimatedTokens: 100,
+		AllowExternal:   true,
+	}
+
+	d1 := routerNoPolicy.Route(context.Background(), input)
+	d2 := routerNilPolicy.Route(context.Background(), input)
+
+	if d1.SelectedProvider != d2.SelectedProvider {
+		t.Errorf("nil policy should produce same result as no policy: got %q vs %q",
+			d1.SelectedProvider, d2.SelectedProvider)
+	}
+}

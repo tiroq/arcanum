@@ -23,6 +23,7 @@ type Router struct {
 	quotas   *QuotaTracker
 	auditor  audit.AuditRecorder
 	logger   *zap.Logger
+	policy   *GlobalPolicyConfig // optional; nil = use defaults
 
 	mu              sync.Mutex
 	recentDecisions []RoutingRecord
@@ -39,9 +40,25 @@ func NewRouter(registry *Registry, quotas *QuotaTracker, auditor audit.AuditReco
 	}
 }
 
+// WithGlobalPolicy attaches the global routing policy to the router.
+// Returns the router for method chaining. Safe to call with a nil policy (no-op).
+// The policy gates external providers, overrides max fallback chain length,
+// applies role-based preference boosts, and orders the fallback chain by tier.
+func (r *Router) WithGlobalPolicy(cfg *GlobalPolicyConfig) *Router {
+	r.policy = cfg
+	return r
+}
+
 // Route selects the best provider for the given input and builds a fallback chain.
 // This is the main entry point for all provider routing decisions.
 func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision {
+	// Apply global policy gate: if the global policy disallows external providers,
+	// override the input's AllowExternal even when the caller requested external.
+	// This ensures providers/_global.yaml has final say on external access.
+	if r.policy != nil && !r.policy.AllowExternal {
+		input.AllowExternal = false
+	}
+
 	trace := RoutingTrace{
 		ConsideredProviders: make([]string, 0),
 		RejectedProviders:   make([]RejectedProvider, 0),
@@ -196,6 +213,15 @@ func (r *Router) scoreProviders(providers []Provider, input RoutingInput) []Rank
 		usage := r.quotas.GetUsage(p.Name)
 		components := ScoreProvider(p, input, usage)
 
+		// Apply global policy preference boost. Providers appearing earlier
+		// in the role's preference list receive a higher score boost, making
+		// providers/_global.yaml priorities influence routing decisions.
+		boost := r.preferenceBoostFor(p.Name, input.PreferredRole)
+		if boost > 0 {
+			components.PreferenceBoost = boost
+			components.FinalScore = clamp01(components.FinalScore + boost)
+		}
+
 		ranked = append(ranked, RankedProvider{
 			Provider: p.Name,
 			Score:    components.FinalScore,
@@ -239,15 +265,40 @@ func (r *Router) scoreProviders(providers []Provider, input RoutingInput) []Rank
 }
 
 // buildFallbackChain creates a bounded, duplicate-free fallback chain.
+// When a global policy is attached, the chain is sorted by degrade_policy tier ordering
+// and bounded by policy.MaxFallbackChain (overriding MaxFallbackChainLength if > 0).
+//
 // Iteration 32: operates on provider+model pairs. Same provider with different
 // models is allowed; duplicate provider+model pairs are rejected.
 func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, input RoutingInput) []string {
-	chain := make([]string, 0, MaxFallbackChainLength)
+	// Determine effective max fallback chain length.
+	maxChain := MaxFallbackChainLength
+	if r.policy != nil && r.policy.MaxFallbackChain > 0 {
+		maxChain = r.policy.MaxFallbackChain
+	}
+
+	// Apply degrade_policy tier ordering to the fallback chain when set.
+	// This re-sorts remaining candidates so that, e.g., external_strong providers
+	// appear before router providers before local — regardless of raw score order.
+	if r.policy != nil && len(r.policy.DegradePolicy) > 0 {
+		sort.SliceStable(remaining, func(i, j int) bool {
+			pi, oki := r.registry.Get(remaining[i].Provider)
+			pj, okj := r.registry.Get(remaining[j].Provider)
+			if !oki || !okj {
+				return oki // known provider before unknown
+			}
+			ti := r.degradeTierIndex(pi)
+			tj := r.degradeTierIndex(pj)
+			return ti < tj
+		})
+	}
+
+	chain := make([]string, 0, maxChain)
 	primaryKey := primary
 	seen := map[string]bool{primaryKey: true}
 
 	for _, rp := range remaining {
-		if len(chain) >= MaxFallbackChainLength {
+		if len(chain) >= maxChain {
 			break
 		}
 		key := rp.Provider
@@ -262,6 +313,62 @@ func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, 
 	}
 
 	return chain
+}
+
+// preferenceBoostFor returns a score boost for a provider based on its position
+// in the global policy's preference list for the given role.
+// The boost is designed to override typical cost-efficiency differences between provider kinds:
+//   - Position 0 → +0.10 (first preferred: highest boost)
+//   - Each subsequent position → -0.03 (e.g. position 1 → +0.07, position 2 → +0.04)
+//   - Providers not in the list receive 0.
+//
+// This magnitude ensures that preference ordering wins over minor scoring differences
+// (e.g. CostLocal=1.0 vs CostFree=0.95) while not overriding significant score gaps.
+func (r *Router) preferenceBoostFor(providerName, role string) float64 {
+	if r.policy == nil || len(r.policy.RolePreferences) == 0 {
+		return 0
+	}
+	prefs, ok := r.policy.RolePreferences[role]
+	if !ok || len(prefs) == 0 {
+		return 0
+	}
+	for i, name := range prefs {
+		if name == providerName {
+			boost := 0.10 - float64(i)*0.03
+			if boost < 0 {
+				boost = 0
+			}
+			return boost
+		}
+	}
+	return 0
+}
+
+// degradeTierIndex returns the degrade_policy tier index for a provider.
+// Lower index = higher priority in fallback chain.
+// Provider kinds are mapped: (external_strong|external_fast) → cloud, router → router, local → local.
+// Returns len(DegradePolicy) for providers not matching any tier (sort them last).
+func (r *Router) degradeTierIndex(p Provider) int {
+	if r.policy == nil || len(r.policy.DegradePolicy) == 0 {
+		return 0
+	}
+	for i, tier := range r.policy.DegradePolicy {
+		switch tier {
+		case "external_strong", "external_fast":
+			if p.Kind == KindCloud {
+				return i
+			}
+		case "router":
+			if p.Kind == KindRouter {
+				return i
+			}
+		case "local":
+			if p.Kind == KindLocal {
+				return i
+			}
+		}
+	}
+	return len(r.policy.DegradePolicy) // not found → last
 }
 
 func (r *Router) recordDecision(ctx context.Context, input RoutingInput, decision RoutingDecision) {

@@ -350,6 +350,41 @@ func run() error {
 		logger.Warn("failed to load provider usage from DB", zap.Error(err))
 	}
 	providerRouter := providerrouting.NewRouter(providerRegistry, quotaTracker, auditor, logger)
+
+	// Load global routing policy from providers/_global.yaml and wire it into the
+	// routing engine. This makes _global.yaml the authoritative source of truth for:
+	//   - allow_external (global gate for external providers)
+	//   - max_fallback_chain (overrides MaxFallbackChainLength constant)
+	//   - role-based provider preference ordering
+	//   - degrade_policy tier ordering for fallback chain assembly
+	// Previously _global.yaml was silently skipped by the catalog loader and had
+	// zero runtime effect. It is now enforced here (Iteration 33 cleanup).
+	globalPolicy, err := providercatalog.LoadGlobalPolicy(cfg.Providers.CatalogDir, logger)
+	if err != nil {
+		logger.Warn("failed to load global routing policy; using defaults", zap.Error(err))
+	}
+	if globalPolicy != nil {
+		rp := globalPolicy.RoutingPolicy
+		policyCfg := &providerrouting.GlobalPolicyConfig{
+			PreferFree:       rp.PreferFree,
+			AllowExternal:    rp.AllowExternal,
+			MaxFallbackChain: rp.MaxFallbackChain,
+			DegradePolicy:    rp.DegradePolicy,
+		}
+		if len(rp.Priorities) > 0 {
+			policyCfg.RolePreferences = make(map[string][]string, len(rp.Priorities))
+			for role, prio := range rp.Priorities {
+				policyCfg.RolePreferences[role] = prio.Prefer
+			}
+		}
+		providerRouter.WithGlobalPolicy(policyCfg)
+		logger.Info("global routing policy wired into provider router",
+			zap.Bool("allow_external", policyCfg.AllowExternal),
+			zap.Int("max_fallback_chain", policyCfg.MaxFallbackChain),
+			zap.Int("role_preferences", len(policyCfg.RolePreferences)),
+		)
+	}
+
 	providerRoutingAdapter := providerrouting.NewGraphAdapter(providerRouter, auditor, logger)
 
 	// Provider catalog + model-aware routing layer (Iteration 32).
