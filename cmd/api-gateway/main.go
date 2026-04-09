@@ -399,6 +399,26 @@ func run() error {
 		zap.Int("files", len(catalogEntries)),
 	)
 
+	// Build and wire model execution map into the router.
+	// Maps "provider/model" → ExecutionConfig derived from catalog models[].execution blocks.
+	// This enables the router to populate ExecutionPlan.Execution for selected models.
+	catalogExecMap := providercatalog.BuildModelExecutionMap(catalogEntries)
+	if len(catalogExecMap) > 0 {
+		routingExecMap := make(map[string]providerrouting.ExecutionConfig, len(catalogExecMap))
+		for key, spec := range catalogExecMap {
+			routingExecMap[key] = providerrouting.ExecutionConfig{
+				TimeoutSeconds:  spec.TimeoutSeconds,
+				ThinkMode:       spec.Think,
+				JSONMode:        spec.JSONMode,
+				MaxOutputTokens: spec.MaxOutputTokens,
+			}
+		}
+		providerRouter.WithModelExecutionMap(routingExecMap)
+		logger.Info("model execution map wired into provider router",
+			zap.Int("entries", len(routingExecMap)),
+		)
+	}
+
 	// Wire provider routing into decision graph.
 	graphAdapter.WithProviderRouting(providerRoutingAdapter)
 
