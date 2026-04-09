@@ -26,10 +26,10 @@ var requiredExecutionRoles = []providers.ModelRole{
 // LoadExecutionProfiles reads the YAML file for the named provider from dir and
 // returns a map of role → ordered model candidates suitable for worker execution.
 //
-// The function reads the execution_profiles section of the provider YAML file.
-// It does NOT load from env vars. If execution_profiles is missing or any required
-// role has no candidates, it returns an explicit error — operators must configure
-// execution settings in providers/<providerName>.yaml.
+// The function reads the execution_profiles section (ref-based) and resolves
+// each ref to the corresponding model in models[], picking up that model's
+// execution block (timeout, think, json_mode). No inline execution settings
+// are allowed in execution_profiles entries.
 //
 // Fails explicitly rather than silently degrading, per requirement F.
 func LoadExecutionProfiles(dir, providerName string, logger *zap.Logger) (map[providers.ModelRole][]profile.ModelCandidate, error) {
@@ -55,8 +55,16 @@ func LoadExecutionProfiles(dir, providerName string, logger *zap.Logger) (map[pr
 		return nil, fmt.Errorf(
 			"execution profiles: %s.yaml has no execution_profiles section — "+
 				"add an execution_profiles block to providers/%s.yaml to configure "+
-				"per-role model candidate chains (think mode, timeout, json_mode)",
+				"per-role model candidate chains (use ref: to reference models)",
 			providerName, providerName)
+	}
+
+	// Build a map of model name → ModelSpec for ref resolution.
+	modelByName := make(map[string]ModelSpec, len(entry.Models))
+	for _, m := range entry.Models {
+		if m.Enabled {
+			modelByName[m.Name] = m
+		}
 	}
 
 	result := make(map[providers.ModelRole][]profile.ModelCandidate, len(requiredExecutionRoles))
@@ -72,30 +80,39 @@ func LoadExecutionProfiles(dir, providerName string, logger *zap.Logger) (map[pr
 
 		candidates := make([]profile.ModelCandidate, 0, len(specs))
 		for i, spec := range specs {
-			if spec.Model == "" {
+			if spec.Ref == "" {
 				return nil, fmt.Errorf(
-					"execution profiles: role %q candidate %d in %s.yaml: model name is required",
+					"execution profiles: role %q candidate %d in %s.yaml: ref is required "+
+						"(use 'ref: model_name' to reference a model in models[])",
 					role, i, providerName)
 			}
 
-			c := profile.ModelCandidate{
-				ModelName:    spec.Model,
-				ProviderName: providerName,
-				JSONMode:     spec.JSONMode,
+			m, ok := modelByName[spec.Ref]
+			if !ok {
+				return nil, fmt.Errorf(
+					"execution profiles: role %q candidate %d in %s.yaml: ref %q does not match "+
+						"any enabled model in models[] — check spelling or enable the model",
+					role, i, providerName, spec.Ref)
 			}
 
-			if spec.Think != "" {
-				tm, err := profile.ParseThinkMode(spec.Think)
+			c := profile.ModelCandidate{
+				ModelName:    m.Name,
+				ProviderName: providerName,
+				JSONMode:     m.Execution.JSONMode,
+			}
+
+			if m.Execution.Think != "" {
+				tm, err := profile.ParseThinkMode(m.Execution.Think)
 				if err != nil {
 					return nil, fmt.Errorf(
 						"execution profiles: role %q candidate %d (%q) in %s.yaml: %w",
-						role, i, spec.Model, providerName, err)
+						role, i, m.Name, providerName, err)
 				}
 				c.ThinkMode = tm
 			}
 
-			if spec.TimeoutSeconds > 0 {
-				c.Timeout = time.Duration(spec.TimeoutSeconds) * time.Second
+			if m.Execution.TimeoutSeconds > 0 {
+				c.Timeout = time.Duration(m.Execution.TimeoutSeconds) * time.Second
 			}
 
 			candidates = append(candidates, c)

@@ -32,31 +32,45 @@ provider:
   name: ollama
   kind: local
   enabled: true
-execution_profiles:
-  default:
-    - model: qwen3:1.7b
-      think: off
-      timeout_seconds: 120
-  fast:
-    - model: qwen3:1.7b
+models:
+  - name: "qwen3:1.7b"
+    enabled: true
+    execution:
       think: off
       timeout_seconds: 60
-  planner:
-    - model: qwen3:8b
+  - name: "qwen3:8b"
+    enabled: true
+    execution:
       think: on
       timeout_seconds: 240
-    - model: qwen3:1.7b
-      think: on
-      timeout_seconds: 150
-  review:
-    - model: qwen3:1.7b
+  - name: "qwen3:review"
+    enabled: true
+    execution:
       think: off
       json_mode: true
       timeout_seconds: 120
-    - model: qwen3:1.7b
+  - name: "qwen3:review-think"
+    enabled: true
+    execution:
       think: on
       json_mode: true
       timeout_seconds: 180
+  - name: "qwen3:default"
+    enabled: true
+    execution:
+      think: off
+      timeout_seconds: 120
+execution_profiles:
+  default:
+    - ref: "qwen3:default"
+  fast:
+    - ref: "qwen3:1.7b"
+  planner:
+    - ref: "qwen3:8b"
+    - ref: "qwen3:1.7b"
+  review:
+    - ref: "qwen3:review"
+    - ref: "qwen3:review-think"
 `)
 
 	result, err := LoadExecutionProfiles(dir, "ollama", nil)
@@ -65,7 +79,7 @@ execution_profiles:
 	// Default role
 	def := result[providers.RoleDefault]
 	require.Len(t, def, 1)
-	assert.Equal(t, "qwen3:1.7b", def[0].ModelName)
+	assert.Equal(t, "qwen3:default", def[0].ModelName)
 	assert.Equal(t, "ollama", def[0].ProviderName)
 	assert.Equal(t, profile.ThinkDisabled, def[0].ThinkMode)
 	assert.Equal(t, 120*time.Second, def[0].Timeout)
@@ -85,7 +99,7 @@ execution_profiles:
 	assert.Equal(t, profile.ThinkEnabled, planner[0].ThinkMode)
 	assert.Equal(t, 240*time.Second, planner[0].Timeout)
 	assert.Equal(t, "qwen3:1.7b", planner[1].ModelName)
-	assert.Equal(t, 150*time.Second, planner[1].Timeout)
+	assert.Equal(t, 60*time.Second, planner[1].Timeout)
 
 	// Review role — 2 candidates with json_mode=true
 	review := result[providers.RoleReview]
@@ -107,24 +121,35 @@ provider:
   name: ollama
   kind: local
   enabled: true
-execution_profiles:
-  default:
-    - model: base-model
-      think: off
+models:
+  - name: base-model
+    enabled: true
+    execution:
       timeout_seconds: 90
-  fast:
-    - model: fast-model
+  - name: fast-model
+    enabled: true
+    execution:
       think: off
       timeout_seconds: 30
-  planner:
-    - model: smart-model
+  - name: smart-model
+    enabled: true
+    execution:
       think: on
       timeout_seconds: 300
-  review:
-    - model: review-model
-      think: off
+  - name: review-model
+    enabled: true
+    execution:
       json_mode: true
       timeout_seconds: 60
+execution_profiles:
+  default:
+    - ref: base-model
+  fast:
+    - ref: fast-model
+  planner:
+    - ref: smart-model
+  review:
+    - ref: review-model
 `)
 
 	result, err := LoadExecutionProfiles(dir, "ollama", nil)
@@ -148,11 +173,22 @@ func TestLoadExecutionProfiles_DefaultThinkIsUnset(t *testing.T) {
 	dir := t.TempDir()
 	writeExecYAML(t, dir, "ollama.yaml", `
 provider: {name: ollama, kind: local, enabled: true}
+models:
+  - name: m1
+    enabled: true
+    execution:
+      timeout_seconds: 60
+  - name: m2
+    enabled: true
+  - name: m3
+    enabled: true
+  - name: m4
+    enabled: true
 execution_profiles:
-  default: [{model: m1}]
-  fast: [{model: m2}]
-  planner: [{model: m3}]
-  review: [{model: m4}]
+  default: [{ref: m1}]
+  fast: [{ref: m2}]
+  planner: [{ref: m3}]
+  review: [{ref: m4}]
 `)
 
 	result, err := LoadExecutionProfiles(dir, "ollama", nil)
@@ -167,11 +203,16 @@ func TestLoadExecutionProfiles_LocalFallbackStillWorks(t *testing.T) {
 	dir := t.TempDir()
 	writeExecYAML(t, dir, "ollama.yaml", `
 provider: {name: ollama, kind: local, enabled: true}
+models:
+  - name: fallback-model
+    enabled: true
+    execution:
+      timeout_seconds: 60
 execution_profiles:
-  default: [{model: fallback-model}]
-  fast:    [{model: fallback-model}]
-  planner: [{model: fallback-model}]
-  review:  [{model: fallback-model, json_mode: true}]
+  default: [{ref: fallback-model}]
+  fast:    [{ref: fallback-model}]
+  planner: [{ref: fallback-model}]
+  review:  [{ref: fallback-model}]
 `)
 
 	result, err := LoadExecutionProfiles(dir, "ollama", nil)
@@ -227,10 +268,17 @@ func TestLoadExecutionProfiles_FailsIfRoleMissing(t *testing.T) {
 	dir := t.TempDir()
 	writeExecYAML(t, dir, "ollama.yaml", `
 provider: {name: ollama, kind: local, enabled: true}
+models:
+  - name: m1
+    enabled: true
+  - name: m2
+    enabled: true
+  - name: m3
+    enabled: true
 execution_profiles:
-  default: [{model: m1}]
-  fast:    [{model: m2}]
-  planner: [{model: m3}]
+  default: [{ref: m1}]
+  fast:    [{ref: m2}]
+  planner: [{ref: m3}]
   # review intentionally missing
 `)
 
@@ -246,16 +294,23 @@ func TestLoadExecutionProfiles_FailsIfModelNameEmpty(t *testing.T) {
 	dir := t.TempDir()
 	writeExecYAML(t, dir, "ollama.yaml", `
 provider: {name: ollama, kind: local, enabled: true}
+models:
+  - name: m2
+    enabled: true
+  - name: m3
+    enabled: true
+  - name: m4
+    enabled: true
 execution_profiles:
-  default: [{model: ""}]
-  fast:    [{model: m2}]
-  planner: [{model: m3}]
-  review:  [{model: m4}]
+  default: [{ref: ""}]
+  fast:    [{ref: m2}]
+  planner: [{ref: m3}]
+  review:  [{ref: m4}]
 `)
 
 	_, err := LoadExecutionProfiles(dir, "ollama", nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "model name is required")
+	assert.Contains(t, err.Error(), "ref is required")
 }
 
 // TestLoadExecutionProfiles_FailsIfInvalidThinkMode verifies explicit error on
@@ -264,11 +319,22 @@ func TestLoadExecutionProfiles_FailsIfInvalidThinkMode(t *testing.T) {
 	dir := t.TempDir()
 	writeExecYAML(t, dir, "ollama.yaml", `
 provider: {name: ollama, kind: local, enabled: true}
+models:
+  - name: m1
+    enabled: true
+    execution:
+      think: maybe
+  - name: m2
+    enabled: true
+  - name: m3
+    enabled: true
+  - name: m4
+    enabled: true
 execution_profiles:
-  default: [{model: m1, think: "maybe"}]
-  fast:    [{model: m2}]
-  planner: [{model: m3}]
-  review:  [{model: m4}]
+  default: [{ref: m1}]
+  fast:    [{ref: m2}]
+  planner: [{ref: m3}]
+  review:  [{ref: m4}]
 `)
 
 	_, err := LoadExecutionProfiles(dir, "ollama", nil)
@@ -297,11 +363,30 @@ func TestExecutionProfiles_ModelProfileEnvVarNotConsumed(t *testing.T) {
 	dir := t.TempDir()
 	writeExecYAML(t, dir, "ollama.yaml", `
 provider: {name: ollama, kind: local, enabled: true}
+models:
+  - name: catalog-default
+    enabled: true
+    execution:
+      timeout_seconds: 60
+  - name: catalog-fast
+    enabled: true
+    execution:
+      timeout_seconds: 30
+  - name: catalog-planner
+    enabled: true
+    execution:
+      think: on
+      timeout_seconds: 300
+  - name: catalog-review
+    enabled: true
+    execution:
+      json_mode: true
+      timeout_seconds: 60
 execution_profiles:
-  default: [{model: catalog-default}]
-  fast:    [{model: catalog-fast}]
-  planner: [{model: catalog-planner}]
-  review:  [{model: catalog-review, json_mode: true}]
+  default: [{ref: catalog-default}]
+  fast:    [{ref: catalog-fast}]
+  planner: [{ref: catalog-planner}]
+  review:  [{ref: catalog-review}]
 `)
 
 	// Set env vars that previously controlled execution (now forbidden in config.Load).
