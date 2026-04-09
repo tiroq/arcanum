@@ -422,6 +422,24 @@ func run() error {
 	// Wire provider routing into decision graph.
 	graphAdapter.WithProviderRouting(providerRoutingAdapter)
 
+	// Goal-driven execution layer (Iteration 35).
+	// Load strategic system goals from YAML at startup. Fail-open: if file missing or
+	// invalid, the graph adapter is nil and goal alignment is skipped entirely.
+	systemGoals, err := goals.LoadSystemGoals(cfg.Agent.SystemGoalsPath)
+	if err != nil {
+		logger.Warn("system goals load failed; goal alignment disabled",
+			zap.String("path", cfg.Agent.SystemGoalsPath),
+			zap.Error(err),
+		)
+	} else {
+		goalAlignmentAdapter := goals.NewGoalGraphAdapter(systemGoals.Goals)
+		graphAdapter.WithGoalAlignment(goalAlignmentAdapter)
+		logger.Info("system goals loaded",
+			zap.Int("goals", len(systemGoals.Goals)),
+			zap.String("path", cfg.Agent.SystemGoalsPath),
+		)
+	}
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
