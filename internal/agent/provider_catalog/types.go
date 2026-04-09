@@ -5,11 +5,32 @@ const MaxModelsPerProvider = 10
 
 // ProviderCatalogFile represents the top-level structure of a provider YAML file.
 type ProviderCatalogFile struct {
-	Provider   ProviderSpec   `yaml:"provider"   json:"provider"`
-	Connection ConnectionSpec `yaml:"connection" json:"connection"`
-	Limits     LimitsSpec     `yaml:"limits"     json:"limits"`
-	Routing    RoutingSpec    `yaml:"routing"    json:"routing"`
-	Models     []ModelSpec    `yaml:"models"     json:"models"`
+	Provider          ProviderSpec          `yaml:"provider"           json:"provider"`
+	Connection        ConnectionSpec        `yaml:"connection"         json:"connection"`
+	Limits            LimitsSpec            `yaml:"limits"             json:"limits"`
+	Routing           RoutingSpec           `yaml:"routing"            json:"routing"`
+	Models            []ModelSpec           `yaml:"models"             json:"models"`
+	ExecutionProfiles ExecutionProfilesSpec `yaml:"execution_profiles" json:"execution_profiles,omitempty"`
+}
+
+// ExecutionProfilesSpec maps role names to ordered lists of execution candidates.
+// Used by local providers (e.g. ollama) to define per-role model candidate chains
+// with execution settings (think mode, timeout, JSON output).
+//
+// Role names match providers.ModelRole values: "default", "fast", "planner", "review".
+type ExecutionProfilesSpec map[string][]ExecutionCandidateSpec
+
+// ExecutionCandidateSpec defines a single model candidate in an execution profile.
+// Candidates are tried in order; if one fails the next is attempted.
+type ExecutionCandidateSpec struct {
+	// Model is the model identifier (e.g. "qwen3:8b", "llama3.2:3b").
+	Model string `yaml:"model" json:"model"`
+	// Think controls thinking/reasoning behavior: "on", "off", or "" (provider default).
+	Think string `yaml:"think" json:"think,omitempty"`
+	// TimeoutSeconds is the per-candidate timeout in seconds. Zero means use provider default.
+	TimeoutSeconds int `yaml:"timeout_seconds" json:"timeout_seconds,omitempty"`
+	// JSONMode requests structured JSON output from the model.
+	JSONMode bool `yaml:"json_mode" json:"json_mode,omitempty"`
 }
 
 // ProviderSpec defines the identity and classification of a provider.
