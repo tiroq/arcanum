@@ -37,7 +37,6 @@ model_defaults:
     relative_cost: 0.08
 
 models:
-  # --- FAST / LOW-LATENCY LAYER ---
   - name: llama-3.1-8b-instant
     roles: [fast, fallback]
     capabilities: [low_latency, json_mode]
@@ -52,11 +51,10 @@ models:
       rpd: 14400
       tpd: 500000
 
-  # --- BALANCED REVIEW / PLANNING ---
   - name: llama-3.3-70b-versatile
-    roles: [planner, reviewer]
+    roles: [reviewer]
     capabilities: [json_mode, long_context, structured_output]
-    preferred_for: [review, reasoning, planning, summarization]
+    preferred_for: [review, summarization, balanced_reasoning]
     max_output_tokens: 4096
     cost:
       cost_class: free
@@ -68,26 +66,24 @@ models:
       tpd: 100000
 
   - name: qwen/qwen3-32b
-    roles: [planner, reviewer]
+    roles: [planner]
     capabilities: [json_mode, long_context, structured_output]
-    preferred_for: [reasoning, synthesis, structured_tasks]
+    preferred_for: [structured_reasoning, synthesis, planning]
     max_output_tokens: 4096
     cost:
       cost_class: free
       relative_cost: 0.08
 
-  # --- HEAVY REASONING ---
   - name: openai/gpt-oss-120b
     roles: [planner]
     capabilities: [json_mode, long_context, structured_output]
-    preferred_for: [heavy_reasoning, deep_synthesis, planning]
+    preferred_for: [deep_reasoning, heavy_planning]
     max_output_tokens: 4096
     cost:
       cost_class: free
       relative_cost: 0.12
 
-  # --- SAFETY / GENERIC FALLBACK ---
-  - name: groq-default
+  - name: groq/free
     enabled: true
     roles: [fallback]
     capabilities: [json_mode]
