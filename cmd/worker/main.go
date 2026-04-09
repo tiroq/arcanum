@@ -31,7 +31,7 @@ import (
 	"github.com/tiroq/arcanum/internal/prompts"
 	"github.com/tiroq/arcanum/internal/providers"
 	"github.com/tiroq/arcanum/internal/providers/execution"
-	"github.com/tiroq/arcanum/internal/providers/routing"
+	"github.com/tiroq/arcanum/internal/providers/profile"
 	"github.com/tiroq/arcanum/internal/worker"
 )
 
@@ -128,67 +128,14 @@ func run() error {
 		return fmt.Errorf("load execution profiles: %w", err)
 	}
 
-	// Resolve execution profiles from routing policy + catalog-provided local candidates.
-	// Catalog candidates replace the per-role single-model config for the local tier.
-	// Cloud and OpenRouter escalation candidates are still appended per routing policy.
-	routingPolicy, err := routing.NewRoutingPolicy(
-		cfg.Routing.FastEscalation,
-		cfg.Routing.DefaultEscalation,
-		cfg.Routing.PlannerEscalation,
-		cfg.Routing.ReviewEscalation,
+	// Build RoleProfiles directly from catalog. Provider routing (cloud/openrouter escalation)
+	// is handled at the planning layer via the provider router — not at the worker level.
+	// The worker executes whatever model the plan specifies; it does not escalate on its own.
+	workerProfiles := profile.RoleProfiles(catalogLocalCandidates)
+
+	logger.Info("worker execution profiles loaded from catalog",
+		zap.Int("roles", len(workerProfiles)),
 	)
-	if err != nil {
-		return fmt.Errorf("parse routing policy: %w", err)
-	}
-
-	// Resolve the OpenRouter model: explicit ROUTING_OPENROUTER_MODEL overrides provider default.
-	openRouterModel := cfg.Routing.OpenRouterModel
-	if openRouterModel == "" {
-		openRouterModel = cfg.Providers.OpenRouter.DefaultModel
-	}
-
-	profiles, routeDecisions, err := routing.ResolveProfiles(routing.Input{
-		Policy:                 routingPolicy,
-		LocalDefaultModel:      ollamaCfg.DefaultModel,
-		LocalFastModel:         ollamaCfg.FastModel,
-		LocalPlannerModel:      ollamaCfg.PlannerModel,
-		LocalReviewModel:       ollamaCfg.ReviewModel,
-		CloudEnabled:           cfg.Providers.OllamaCloud.Enabled,
-		CloudModel:             cfg.Routing.CloudModel,
-		OpenRouterEnabled:      cfg.Providers.OpenRouter.Enabled,
-		OpenRouterModel:        openRouterModel,
-		CatalogLocalCandidates: catalogLocalCandidates,
-	})
-	if err != nil {
-		return fmt.Errorf("resolve routing profiles: %w", err)
-	}
-
-	// Log each route decision at startup for operator visibility.
-	// An operator can read these lines to understand exactly which model/provider
-	// will be used for each role and why — without live traffic or tracing setup.
-	for _, d := range routeDecisions {
-		fields := []zap.Field{
-			zap.String("role", d.Role),
-			zap.String("profile_source", d.ProfileSource),
-			zap.String("justification", d.Justification),
-			zap.Strings("available_providers", d.AvailableProviders),
-		}
-		if len(d.Candidates) > 0 {
-			candidateLabels := make([]string, len(d.Candidates))
-			for i, c := range d.Candidates {
-				if c.ProviderName != "" {
-					candidateLabels[i] = c.ModelName + "@" + c.ProviderName
-				} else {
-					candidateLabels[i] = c.ModelName
-				}
-			}
-			fields = append(fields, zap.Strings("candidates", candidateLabels))
-		}
-		if len(d.SkippedProviders) > 0 {
-			fields = append(fields, zap.Strings("skipped_providers", d.SkippedProviders))
-		}
-		logger.Info("routing decision", fields...)
-	}
 
 	// rawProviders holds undecorated backend implementations for per-candidate
 	// provider resolution inside the execution engine. Separate from providerReg
@@ -224,7 +171,7 @@ func run() error {
 		logger.Debug("openrouter provider disabled (set OPENROUTER_ENABLED=true to enable)")
 	}
 
-	execProvider := execution.NewExecutingProviderWithRegistry(ollamaBase, rawProviders, profiles, m, logger)
+	execProvider := execution.NewExecutingProviderWithRegistry(ollamaBase, rawProviders, workerProfiles, m, logger)
 
 	providerReg := providers.NewProviderRegistry()
 	providerReg.Register("ollama", providers.NewAuditedProvider(execProvider, agentCore, logger))
