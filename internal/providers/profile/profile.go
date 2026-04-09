@@ -1,61 +1,24 @@
 package profile
 
 import (
+	"fmt"
+
 	"github.com/tiroq/arcanum/internal/providers"
 )
 
 // RoleProfiles maps each ModelRole to its ordered candidate chain.
 type RoleProfiles map[providers.ModelRole][]ModelCandidate
 
-// ResolveFromConfig builds RoleProfiles from profile DSL strings and legacy model names.
-//
-// For each role, the resolution order is:
-//  1. If a profile DSL string is provided (non-empty), parse it.
-//  2. Else if a legacy single model name is provided, wrap it as a single candidate.
-//  3. Else fall back to the default model as a single candidate.
+// ResolveFromConfig is disabled. The DSL-based profile resolution has been removed.
+// Use provider_catalog.LoadExecutionProfiles() to build role profiles from the
+// catalog's execution_profiles section.
 func ResolveFromConfig(
-	defaultModel string,
-	fastModel string,
-	plannerModel string,
-	reviewModel string,
-	defaultProfile string,
-	fastProfile string,
-	plannerProfile string,
-	reviewProfile string,
+	_, _, _, _ string, // legacy model name params
+	_, _, _, _ string, // legacy profile DSL params
 ) (RoleProfiles, error) {
-	rp := make(RoleProfiles, 4)
-
-	resolvers := []struct {
-		role        providers.ModelRole
-		profileDSL  string
-		legacyModel string
-	}{
-		{providers.RoleDefault, defaultProfile, defaultModel},
-		{providers.RoleFast, fastProfile, fastModel},
-		{providers.RolePlanner, plannerProfile, plannerModel},
-		{providers.RoleReview, reviewProfile, reviewModel},
-	}
-
-	for _, r := range resolvers {
-		candidates, err := resolveRole(r.profileDSL, r.legacyModel, defaultModel)
-		if err != nil {
-			return nil, err
-		}
-		rp[r.role] = candidates
-	}
-
-	return rp, nil
-}
-
-func resolveRole(profileDSL, legacyModel, defaultModel string) ([]ModelCandidate, error) {
-	if profileDSL != "" {
-		return ParseProfile(profileDSL)
-	}
-	model := legacyModel
-	if model == "" {
-		model = defaultModel
-	}
-	return []ModelCandidate{{ModelName: model}}, nil
+	return nil, fmt.Errorf(
+		"ResolveFromConfig is disabled: use provider_catalog.LoadExecutionProfiles() instead — " +
+			"define execution settings in providers/<name>.yaml under models[].execution")
 }
 
 // CandidatesForRole returns the candidate chain for the given role.
