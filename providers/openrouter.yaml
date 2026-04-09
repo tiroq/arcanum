@@ -10,18 +10,16 @@ connection:
 
 limits:
   rpm: 20
-  tpm: 0
   rpd: 50
-  tpd: 0
 
 routing:
   roles: [planner, reviewer, fallback]
-  fallback_priority: 100   # самый последний fallback
+  fallback_priority: 100
   allow_external: true
 
 cost:
   cost_class: free
-  relative_cost: 0.10
+  relative_cost: 0.15
 
 health:
   enabled: true
@@ -29,41 +27,13 @@ health:
   degraded: false
 
 models:
-  - name: openrouter/auto
-    enabled: true
-    roles: [fallback]
-    capabilities: [json_mode, long_context]
-    preferred_for: [router_fallback, generic_free_fallback]
-    max_output_tokens: 4096
-    cost:
-      cost_class: free
-      relative_cost: 0.10
 
-  - name: openrouter/free
-    enabled: true
-    roles: [planner, reviewer, fallback]
-    capabilities: [json_mode, long_context]
-    preferred_for: [free_fallback, mixed_reasoning]
-    max_output_tokens: 4096
-    cost:
-      cost_class: free
-      relative_cost: 0.10
-
-  - name: openai/gpt-oss-20b:free
-    enabled: true
-    roles: [reviewer, fallback]
-    capabilities: [json_mode]
-    preferred_for: [light_review, cheap_router_fallback]
-    max_output_tokens: 2048
-    cost:
-      cost_class: free
-      relative_cost: 0.08
-
+  # 🔴 HEAVY PLANNER (primary)
   - name: openai/gpt-oss-120b:free
     enabled: true
-    roles: [planner, reviewer]
+    roles: [planner]
     capabilities: [json_mode, long_context]
-    preferred_for: [reasoning, synthesis, planning]
+    preferred_for: [deep_reasoning]
     max_output_tokens: 4096
     cost:
       cost_class: free
@@ -71,20 +41,49 @@ models:
 
   - name: qwen/qwen3-32b:free
     enabled: true
-    roles: [planner, reviewer]
+    roles: [planner]
     capabilities: [json_mode, long_context]
-    preferred_for: [reasoning, structured_tasks]
+    preferred_for: [structured_reasoning]
     max_output_tokens: 4096
     cost:
       cost_class: free
       relative_cost: 0.09
 
+  # 🟡 REVIEW / MID-TIER
   - name: meta-llama/llama-3.3-70b-instruct:free
     enabled: true
-    roles: [planner, reviewer]
+    roles: [reviewer]
     capabilities: [json_mode, long_context]
-    preferred_for: [review, summarization, fallback_reasoning]
+    preferred_for: [review, summarization]
     max_output_tokens: 4096
     cost:
       cost_class: free
       relative_cost: 0.11
+
+  - name: mistralai/mixtral-8x7b
+    enabled: true
+    roles: [reviewer]
+    capabilities: [json_mode]
+    preferred_for: [cheap_review]
+    max_output_tokens: 4096
+
+  # 🟢 FALLBACK (cheap + stable)
+  - name: openrouter/free
+    enabled: true
+    roles: [fallback]
+    capabilities: [json_mode]
+    preferred_for: [generic_fallback]
+    max_output_tokens: 4096
+    cost:
+      cost_class: free
+      relative_cost: 0.10
+
+  - name: openai/gpt-oss-20b:free
+    enabled: true
+    roles: [fallback]
+    capabilities: [json_mode]
+    preferred_for: [light_tasks]
+    max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.08
