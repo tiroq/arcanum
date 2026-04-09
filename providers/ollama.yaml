@@ -37,22 +37,81 @@ model_defaults:
 
 models:
   - name: qwen3:1.7b
+    enabled: true
     roles: [fast]
     capabilities: [json_mode, low_latency]
     preferred_for: [fast_tasks, classification, short_generation]
     max_output_tokens: 4096
+    execution:
+      timeout_seconds: 60
+      think: off
+      json_mode: false
+
+  - name: qwen3:1.7b-json
+    enabled: true
+    roles: [fast]
+    capabilities: [json_mode, low_latency]
+    preferred_for: [fast_tasks, classification, json_output]
+    max_output_tokens: 4096
+    execution:
+      timeout_seconds: 120
+      think: off
+      json_mode: true
+
+  - name: qwen3:8b
+    enabled: true
+    roles: [planner]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [planning, reasoning, reliable_execution]
+    max_output_tokens: 8192
+    execution:
+      timeout_seconds: 240
+      think: on
+      json_mode: false
+
+  - name: qwen3:8b-nothink
+    enabled: true
+    roles: [planner]
+    capabilities: [json_mode, long_context, structured_output]
+    preferred_for: [planning, fallback_planning]
+    max_output_tokens: 8192
+    execution:
+      timeout_seconds: 180
+      think: off
+      json_mode: false
 
   - name: qwen2.5:7b-instruct
-    roles: [planner, reviewer]
+    enabled: true
+    roles: [reviewer]
     capabilities: [json_mode, long_context, structured_output]
-    preferred_for: [planning, reasoning, reliable_execution, fallback_heavy]
+    preferred_for: [review, reasoning, reliable_review]
     max_output_tokens: 8192
+    execution:
+      timeout_seconds: 120
+      think: off
+      json_mode: false
+
+  - name: qwen2.5:7b-instruct-review
+    enabled: true
+    roles: [reviewer]
+    capabilities: [json_mode, structured_output]
+    preferred_for: [review, json_review]
+    max_output_tokens: 8192
+    execution:
+      timeout_seconds: 180
+      think: on
+      json_mode: true
 
   - name: llama3.2:3b
+    enabled: true
     roles: [batch, fallback]
     capabilities: [json_mode]
     preferred_for: [long_running_tasks, batch_processing, guaranteed_completion]
     max_output_tokens: 8192
+    execution:
+      timeout_seconds: 120
+      think: off
+      json_mode: false
 
   - name: ollama/default
     enabled: true
@@ -60,39 +119,27 @@ models:
     capabilities: [json_mode]
     preferred_for: [ultimate_local_fallback]
     max_output_tokens: 4096
+    execution:
+      timeout_seconds: 120
+      think: off
+      json_mode: false
 
 # Execution profiles define per-role ordered model candidate chains for local execution.
-# Each candidate specifies which model to try (in order), its thinking mode,
-# per-candidate timeout, and whether to request JSON output.
-# These settings replace MODEL_*_PROFILE and OLLAMA_*_PROFILE env vars.
+# Each entry MUST use ref: to reference a model defined in models[] above.
+# Execution settings (think, timeout, json_mode) are resolved from the referenced
+# model's execution block — no inline execution config is allowed here.
 execution_profiles:
   default:
-    - model: qwen3:1.7b
-      think: off
-      timeout_seconds: 120
+    - ref: qwen3:1.7b
 
   fast:
-    - model: qwen3:1.7b
-      think: off
-      timeout_seconds: 60
+    - ref: qwen3:1.7b
 
   planner:
-    - model: qwen3:8b
-      think: on
-      timeout_seconds: 240
-    - model: qwen3:8b
-      think: off
-      timeout_seconds: 180
-    - model: qwen3:1.7b
-      think: on
-      timeout_seconds: 150
+    - ref: qwen3:8b
+    - ref: qwen3:8b-nothink
+    - ref: qwen3:1.7b
 
   review:
-    - model: qwen3:1.7b
-      think: off
-      json_mode: true
-      timeout_seconds: 120
-    - model: qwen3:1.7b
-      think: on
-      json_mode: true
-      timeout_seconds: 180
+    - ref: qwen3:1.7b-json
+    - ref: qwen2.5:7b-instruct-review
