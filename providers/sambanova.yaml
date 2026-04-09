@@ -37,7 +37,6 @@ model_defaults:
     relative_cost: 0.12
 
 models:
-  # --- FAST / LIGHT TASKS ---
   - name: llama-3.1-8b
     roles: [fast, fallback]
     capabilities: [low_latency, json_mode]
@@ -47,28 +46,25 @@ models:
       cost_class: free
       relative_cost: 0.08
 
-  # --- BALANCED REVIEW / PLANNING ---
   - name: llama-3.3-70b
-    roles: [planner, reviewer]
+    roles: [reviewer]
     capabilities: [json_mode, structured_output]
-    preferred_for: [review, planning, summarization]
+    preferred_for: [review, summarization, balanced_reasoning]
     max_output_tokens: 4096
     cost:
       cost_class: free
       relative_cost: 0.12
 
-  # --- HEAVY REASONING / BATCH ---
   - name: deepseek
     roles: [planner, batch]
     capabilities: [json_mode, long_context, structured_output]
-    preferred_for: [reasoning, batch, synthesis, deep_planning]
+    preferred_for: [deep_reasoning, synthesis, batch_processing]
     max_output_tokens: 4096
     cost:
       cost_class: free
       relative_cost: 0.14
 
-  # --- GENERIC PROVIDER FALLBACK ---
-  - name: sambanova-default
+  - name: sambanova/free
     enabled: true
     roles: [fallback]
     capabilities: [json_mode]
