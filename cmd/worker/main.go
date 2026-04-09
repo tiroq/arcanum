@@ -22,6 +22,7 @@ import (
 	"github.com/tiroq/arcanum/internal/config"
 	"github.com/tiroq/arcanum/internal/db"
 	"github.com/tiroq/arcanum/internal/health"
+	"github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	"github.com/tiroq/arcanum/internal/jobs"
 	"github.com/tiroq/arcanum/internal/logging"
 	"github.com/tiroq/arcanum/internal/messaging"
@@ -118,8 +119,18 @@ func run() error {
 	ollamaCfg := cfg.Providers.Ollama
 	ollamaBase := providers.NewOllamaProvider("ollama", ollamaCfg, logger)
 
-	// Resolve execution profiles from routing policy + explicit DSL overrides.
-	// Explicit DSL profiles (OLLAMA_*_PROFILE env vars) always win over policy.
+	// Load execution profiles from the provider catalog.
+	// providers/ollama.yaml must have an execution_profiles section defining per-role
+	// model candidate chains. Fails explicitly if the section is missing or incomplete.
+	catalogLocalCandidates, err := provider_catalog.LoadExecutionProfiles(
+		cfg.Providers.CatalogDir, "ollama", logger)
+	if err != nil {
+		return fmt.Errorf("load execution profiles: %w", err)
+	}
+
+	// Resolve execution profiles from routing policy + catalog-provided local candidates.
+	// Catalog candidates replace the per-role single-model config for the local tier.
+	// Cloud and OpenRouter escalation candidates are still appended per routing policy.
 	routingPolicy, err := routing.NewRoutingPolicy(
 		cfg.Routing.FastEscalation,
 		cfg.Routing.DefaultEscalation,
@@ -137,21 +148,16 @@ func run() error {
 	}
 
 	profiles, routeDecisions, err := routing.ResolveProfiles(routing.Input{
-		Policy:            routingPolicy,
-		LocalDefaultModel: ollamaCfg.DefaultModel,
-		LocalFastModel:    ollamaCfg.FastModel,
-		LocalPlannerModel: ollamaCfg.PlannerModel,
-		LocalReviewModel:  ollamaCfg.ReviewModel,
-		CloudEnabled:      cfg.Providers.OllamaCloud.Enabled,
-		CloudModel:        cfg.Routing.CloudModel,
-		OpenRouterEnabled: cfg.Providers.OpenRouter.Enabled,
-		OpenRouterModel:   openRouterModel,
-		DSLOverrides: map[providers.ModelRole]string{
-			providers.RoleDefault: ollamaCfg.DefaultProfile,
-			providers.RoleFast:    ollamaCfg.FastProfile,
-			providers.RolePlanner: ollamaCfg.PlannerProfile,
-			providers.RoleReview:  ollamaCfg.ReviewProfile,
-		},
+		Policy:                 routingPolicy,
+		LocalDefaultModel:      ollamaCfg.DefaultModel,
+		LocalFastModel:         ollamaCfg.FastModel,
+		LocalPlannerModel:      ollamaCfg.PlannerModel,
+		LocalReviewModel:       ollamaCfg.ReviewModel,
+		CloudEnabled:           cfg.Providers.OllamaCloud.Enabled,
+		CloudModel:             cfg.Routing.CloudModel,
+		OpenRouterEnabled:      cfg.Providers.OpenRouter.Enabled,
+		OpenRouterModel:        openRouterModel,
+		CatalogLocalCandidates: catalogLocalCandidates,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve routing profiles: %w", err)

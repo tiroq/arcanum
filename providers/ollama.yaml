@@ -60,3 +60,39 @@ models:
     capabilities: [json_mode]
     preferred_for: [ultimate_local_fallback]
     max_output_tokens: 4096
+
+# Execution profiles define per-role ordered model candidate chains for local execution.
+# Each candidate specifies which model to try (in order), its thinking mode,
+# per-candidate timeout, and whether to request JSON output.
+# These settings replace MODEL_*_PROFILE and OLLAMA_*_PROFILE env vars.
+execution_profiles:
+  default:
+    - model: qwen3:1.7b
+      think: off
+      timeout_seconds: 120
+
+  fast:
+    - model: qwen3:1.7b
+      think: off
+      timeout_seconds: 60
+
+  planner:
+    - model: qwen3:8b
+      think: on
+      timeout_seconds: 240
+    - model: qwen3:8b
+      think: off
+      timeout_seconds: 180
+    - model: qwen3:1.7b
+      think: on
+      timeout_seconds: 150
+
+  review:
+    - model: qwen3:1.7b
+      think: off
+      json_mode: true
+      timeout_seconds: 120
+    - model: qwen3:1.7b
+      think: on
+      json_mode: true
+      timeout_seconds: 180

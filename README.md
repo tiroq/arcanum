@@ -38,7 +38,7 @@ Supported parameters:
 
 #### Examples
 
-**Simple — one model per role (legacy env vars):**
+**Simple — one model per role (env vars):**
 
 ```bash
 OLLAMA_DEFAULT_MODEL=qwen2.5:7b
@@ -46,20 +46,40 @@ OLLAMA_FAST_MODEL=llama3.2:3b
 OLLAMA_PLANNER_MODEL=qwen2.5:14b
 ```
 
-**Advanced — fallback chains with thinking modes (profile DSL):**
+**Advanced — fallback chains with thinking modes (catalog YAML):**
 
-```bash
-# Fast role: try small model first, fall back to tiny model with thinking disabled
-MODEL_FAST_PROFILE=llama3.2:3b?think=off&timeout=30|llama3.2:1b?think=off&timeout=15
+Edit `providers/ollama.yaml` to configure per-role model candidates with execution settings:
 
-# Planner role: large model with thinking, fall back to medium model
-MODEL_PLANNER_PROFILE=qwen2.5:14b?think=on&timeout=300|qwen2.5:7b?think=on&timeout=120
-
-# Review role: require JSON output, two candidates
-MODEL_REVIEW_PROFILE=qwen2.5:7b?json=true&timeout=120|llama3.2:3b?json=true&timeout=60
+```yaml
+execution_profiles:
+  fast:
+    - model: llama3.2:3b
+      think: off
+      timeout_seconds: 30
+    - model: llama3.2:1b   # fallback
+      think: off
+      timeout_seconds: 15
+  planner:
+    - model: qwen2.5:14b
+      think: on
+      timeout_seconds: 300
+    - model: qwen2.5:7b    # fallback
+      think: on
+      timeout_seconds: 120
+  review:
+    - model: qwen2.5:7b
+      json_mode: true
+      timeout_seconds: 120
+    - model: llama3.2:3b   # fallback
+      json_mode: true
+      timeout_seconds: 60
+  default:
+    - model: qwen2.5:7b
+      timeout_seconds: 120
 ```
 
-When `MODEL_FAST_PROFILE` is set, `OLLAMA_FAST_MODEL` is ignored for that role. Unset roles fall back to `OLLAMA_DEFAULT_MODEL` as a single candidate.
+`OLLAMA_FAST_MODEL` (and other `OLLAMA_*_MODEL` vars) are still used as a simple fallback when
+no catalog execution_profiles is configured for a role.
 
 ## Quick Start
 
