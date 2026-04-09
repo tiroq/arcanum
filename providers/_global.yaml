@@ -1,0 +1,29 @@
+# providers/_global.yaml
+
+routing_policy:
+  prefer_free: true
+  allow_external: true
+
+  max_fallback_chain: 3
+
+  priorities:
+    fast:
+      prefer: [groq, gemini, ollama]
+    planner:
+      prefer: [cerebras, sambanova, gemini, openrouter]
+    reviewer:
+      prefer: [groq, gemini, cerebras]
+    batch:
+      prefer: [cerebras, sambanova]
+    fallback:
+      prefer: [openrouter, ollama]
+
+  constraints:
+    latency_sensitive_threshold_ms: 300
+    heavy_task_tokens_threshold: 20000
+
+  degrade_policy:
+    - external_strong
+    - external_fast
+    - router
+    - local
