@@ -15,7 +15,7 @@ limits:
   tpd: 500000
 
 routing:
-  roles: [planner, reviewer, batch, fast]
+  roles: [fast, planner, reviewer, batch, fallback]
   fallback_priority: 30
   allow_external: true
 
@@ -37,11 +37,10 @@ model_defaults:
     relative_cost: 0.10
 
 models:
-  # --- FAST LAYER (low latency) ---
   - name: gemini-2.0-flash
-    roles: [fast]
+    roles: [fast, fallback]
     capabilities: [low_latency, json_mode]
-    preferred_for: [cheap_fast_tasks, short_responses]
+    preferred_for: [cheap_fast_tasks, short_responses, low_latency_fallback]
     max_output_tokens: 2048
     cost:
       cost_class: free
@@ -55,9 +54,7 @@ models:
       cost_class: free
       relative_cost: 0.09
 
-  # --- BALANCED / REVIEW ---
   - name: gemini-2.5-flash-lite
-    enabled: true
     roles: [reviewer, batch]
     capabilities: [json_mode, long_context]
     preferred_for: [batch_processing, cost_sensitive_tasks]
@@ -66,7 +63,6 @@ models:
       cost_class: cheap
       relative_cost: 0.07
 
-  # --- HEAVY REASONING ---
   - name: gemini-2.5-pro
     roles: [planner, reviewer]
     capabilities: [json_mode, long_context, structured_output]
@@ -76,10 +72,12 @@ models:
       cost_class: cheap
       relative_cost: 0.15
 
-  # --- FALLBACK SAFETY ---
   - name: gemini-default
     enabled: true
     roles: [fallback]
     capabilities: [json_mode]
     preferred_for: [generic_fallback]
     max_output_tokens: 2048
+    cost:
+      cost_class: free
+      relative_cost: 0.10
