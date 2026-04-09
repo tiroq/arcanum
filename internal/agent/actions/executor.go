@@ -119,7 +119,7 @@ func (e *Executor) doPost(ctx context.Context, url string) error {
 		return fmt.Errorf("create request: %w", err)
 	}
 	if e.apiToken != "" {
-		req.Header.Set("Authorization", "Bearer "+e.apiToken)
+		req.Header.Set("X-Admin-Token", e.apiToken)
 	}
 
 	resp, err := e.client.Do(req)

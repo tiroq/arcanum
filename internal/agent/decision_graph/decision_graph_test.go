@@ -3,6 +3,8 @@ package decision_graph
 import (
 	"context"
 	"testing"
+
+	"github.com/tiroq/arcanum/internal/agent/planning"
 )
 
 // --- Test 1: Graph builds correctly ---
@@ -1290,5 +1292,125 @@ func TestContextualCalibration_DifferentGoalsDifferentAdjustments(t *testing.T) 
 	}
 	if adjB <= raw {
 		t.Error("underconfident goal should increase confidence")
+	}
+}
+
+// --- Hotfix tests: replay + snapshot recorded when graph agrees with tactical ---
+
+// mockReplayRecorder tracks whether RecordReplayPack was called.
+type mockReplayRecorder struct {
+	called     bool
+	decisionID string
+}
+
+func (m *mockReplayRecorder) RecordReplayPack(_ context.Context,
+	decisionID, _, _, _ string, _ float64,
+	_, _, _, _, _ map[string]any,
+) {
+	m.called = true
+	m.decisionID = decisionID
+}
+
+// mockSnapshotCapturer tracks whether CaptureAndSave was called.
+type mockSnapshotCapturer struct {
+	called     bool
+	decisionID string
+}
+
+func (m *mockSnapshotCapturer) CaptureAndSave(_ context.Context,
+	decisionID, _ string, _ []ScoredPathExport, _ string, _ float64,
+) error {
+	m.called = true
+	m.decisionID = decisionID
+	return nil
+}
+
+func TestEvaluateForPlanner_RecordsReplayAndSnapshot_WhenGraphAgreesWithTactical(t *testing.T) {
+	replayMock := &mockReplayRecorder{}
+	snapshotMock := &mockSnapshotCapturer{}
+
+	adapter := NewGraphPlannerAdapter(nil, nil, nil).
+		WithReplayRecorder(replayMock).
+		WithSnapshotCapturer(snapshotMock)
+
+	// Build a decision where retry_job is already selected.
+	// Give retry_job the highest signal so the graph also picks it.
+	decision := planning.PlanningDecision{
+		GoalID:             "goal-1",
+		GoalType:           "reduce_retry_rate",
+		SelectedActionType: "retry_job",
+		Candidates: []planning.PlannedActionCandidate{
+			{ActionType: "retry_job", GoalType: "reduce_retry_rate", Score: 0.9, Confidence: 0.9},
+			{ActionType: "log_recommendation", GoalType: "reduce_retry_rate", Score: 0.3, Confidence: 0.6},
+			{ActionType: "noop", GoalType: "reduce_retry_rate", Score: 0.1, Confidence: 1.0},
+		},
+	}
+
+	override := adapter.EvaluateForPlanner(context.Background(), decision, nil, nil)
+
+	// Graph should agree with tactical — no override applied.
+	if override.Applied {
+		t.Errorf("expected Applied=false when graph agrees, got true (action=%s)", override.ActionType)
+	}
+	if override.Reason != "graph agrees with tactical selection" {
+		t.Errorf("unexpected reason: %s", override.Reason)
+	}
+
+	// Replay pack MUST be recorded even when graph agrees (Hotfix A-1).
+	if !replayMock.called {
+		t.Error("replay pack was NOT recorded when graph agrees — A-1 regression")
+	}
+
+	// Snapshot MUST be captured even when graph agrees (Hotfix A-2).
+	if !snapshotMock.called {
+		t.Error("snapshot was NOT captured when graph agrees — A-2 regression")
+	}
+
+	// Decision ID must be set for both recorders.
+	if replayMock.decisionID == "" {
+		t.Error("replay pack decisionID is empty")
+	}
+	if snapshotMock.decisionID == "" {
+		t.Error("snapshot decisionID is empty")
+	}
+	if replayMock.decisionID != snapshotMock.decisionID {
+		t.Error("replay and snapshot should share the same decisionID")
+	}
+}
+
+func TestEvaluateForPlanner_RecordsReplayAndSnapshot_WhenGraphOverrides(t *testing.T) {
+	replayMock := &mockReplayRecorder{}
+	snapshotMock := &mockSnapshotCapturer{}
+
+	adapter := NewGraphPlannerAdapter(nil, nil, nil).
+		WithReplayRecorder(replayMock).
+		WithSnapshotCapturer(snapshotMock)
+
+	// Build a decision where log_recommendation is selected tactically,
+	// but retry_job has much higher signal so graph should override.
+	decision := planning.PlanningDecision{
+		GoalID:             "goal-2",
+		GoalType:           "reduce_retry_rate",
+		SelectedActionType: "log_recommendation",
+		Candidates: []planning.PlannedActionCandidate{
+			{ActionType: "retry_job", GoalType: "reduce_retry_rate", Score: 0.9, Confidence: 0.9},
+			{ActionType: "log_recommendation", GoalType: "reduce_retry_rate", Score: 0.2, Confidence: 0.5},
+			{ActionType: "noop", GoalType: "reduce_retry_rate", Score: 0.1, Confidence: 1.0},
+		},
+	}
+
+	override := adapter.EvaluateForPlanner(context.Background(), decision, nil, nil)
+
+	// Graph should override tactical.
+	if !override.Applied {
+		t.Error("expected Applied=true when graph overrides, got false")
+	}
+
+	// Both must still be recorded when overriding.
+	if !replayMock.called {
+		t.Error("replay pack was NOT recorded when graph overrides")
+	}
+	if !snapshotMock.called {
+		t.Error("snapshot was NOT captured when graph overrides")
 	}
 }

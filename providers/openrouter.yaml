@@ -16,7 +16,7 @@ limits:
 
 routing:
   roles: [planner, reviewer, fallback]
-  fallback_priority: 90
+  fallback_priority: 100   # самый последний fallback
   allow_external: true
 
 cost:

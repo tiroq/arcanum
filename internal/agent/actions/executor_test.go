@@ -19,8 +19,8 @@ func TestExecutor_RetryJob(t *testing.T) {
 		if r.URL.Path != "/api/v1/jobs/job-123/retry" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if r.Header.Get("Authorization") != "Bearer test-token" {
-			t.Errorf("missing or wrong auth header: %s", r.Header.Get("Authorization"))
+		if r.Header.Get("X-Admin-Token") != "test-token" {
+			t.Errorf("missing or wrong auth header: %s", r.Header.Get("X-Admin-Token"))
 		}
 		called = true
 		w.WriteHeader(http.StatusAccepted)

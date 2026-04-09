@@ -629,36 +629,40 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		return override
 	}
 
-	// Only override if the graph's first action differs from tactical.
-	if firstAction == decision.SelectedActionType {
-		override.Reason = "graph agrees with tactical selection"
-		return override
-	}
-
-	override.Applied = true
-	override.ActionType = firstAction
+	// Generate decision ID and path metadata for observability,
+	// regardless of whether graph overrides tactical selection.
+	// (Hotfix: A-1, A-2 — snapshot and replay must be recorded even
+	// when graph agrees with tactical.)
 	override.StrategyID = uuid.New().String()
-	override.StrategyType = "decision_graph"
-	override.Reason = "graph_path: " + selection.Reason
 	override.DecisionID = override.StrategyID
 	override.MetaMode = metaMode
 	override.PredictedConfidence = selection.Selected.TotalConfidence
 
-	// --- Provider+model routing (Iteration 32) ---
-	// Select the best provider+model for this task. Fail-open: if routing
-	// is unavailable, provider/model fields remain empty.
-	if a.providerRouting != nil {
-		selectedProvider, selectedModel, _, routeReason := a.providerRouting.RouteForTask(
-			ctx, decision.GoalType, decision.GoalType, "", 0, 0, 0, true)
-		override.SelectedProvider = selectedProvider
-		override.SelectedModel = selectedModel
-		if selectedProvider != "" {
-			a.auditEvent(ctx, "provider.target_selected", map[string]any{
-				"goal_type":         decision.GoalType,
-				"selected_provider": selectedProvider,
-				"selected_model":    selectedModel,
-				"reason":            routeReason,
-			})
+	graphAgreesWithTactical := firstAction == decision.SelectedActionType
+	if graphAgreesWithTactical {
+		override.Reason = "graph agrees with tactical selection"
+	} else {
+		override.Applied = true
+		override.ActionType = firstAction
+		override.StrategyType = "decision_graph"
+		override.Reason = "graph_path: " + selection.Reason
+
+		// --- Provider+model routing (Iteration 32) ---
+		// Select the best provider+model for this task. Fail-open: if routing
+		// is unavailable, provider/model fields remain empty.
+		if a.providerRouting != nil {
+			selectedProvider, selectedModel, _, routeReason := a.providerRouting.RouteForTask(
+				ctx, decision.GoalType, decision.GoalType, "", 0, 0, 0, true)
+			override.SelectedProvider = selectedProvider
+			override.SelectedModel = selectedModel
+			if selectedProvider != "" {
+				a.auditEvent(ctx, "provider.target_selected", map[string]any{
+					"goal_type":         decision.GoalType,
+					"selected_provider": selectedProvider,
+					"selected_model":    selectedModel,
+					"reason":            routeReason,
+				})
+			}
 		}
 	}
 
@@ -689,16 +693,18 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		}
 	}
 
-	// Audit the override.
-	a.auditEvent(ctx, "decision_graph.override", map[string]any{
-		"goal_id":         decision.GoalID,
-		"goal_type":       decision.GoalType,
-		"tactical_action": decision.SelectedActionType,
-		"graph_action":    firstAction,
-		"path_length":     len(selection.Selected.Nodes),
-		"final_score":     selection.Selected.FinalScore,
-		"reason":          override.Reason,
-	})
+	// Audit the override (only when graph actually overrides tactical).
+	if override.Applied {
+		a.auditEvent(ctx, "decision_graph.override", map[string]any{
+			"goal_id":         decision.GoalID,
+			"goal_type":       decision.GoalType,
+			"tactical_action": decision.SelectedActionType,
+			"graph_action":    firstAction,
+			"path_length":     len(selection.Selected.Nodes),
+			"final_score":     selection.Selected.FinalScore,
+			"reason":          override.Reason,
+		})
+	}
 
 	// --- Record resource metrics (Iteration 29) ---
 	// Best-effort: failures are logged but do not block the decision.
@@ -739,7 +745,7 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 	// --- Governance: human review enforcement (Iteration 30) ---
 	// If human review is required, annotate the override and emit audit event.
 	// The override is still returned, but marked as requiring review.
-	if a.governance != nil && a.governance.RequiresHumanReview(ctx) {
+	if override.Applied && a.governance != nil && a.governance.RequiresHumanReview(ctx) {
 		override.Reason = "governance_review_required: " + override.Reason
 		a.auditEvent(ctx, "governance.review_required", map[string]any{
 			"goal_id":        decision.GoalID,
