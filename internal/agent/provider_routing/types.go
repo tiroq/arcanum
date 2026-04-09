@@ -152,6 +152,75 @@ func (t RoutingTarget) IsEmpty() bool {
 	return t.Provider == ""
 }
 
+// ProviderModelPair is a fully resolved provider+model pair.
+// Used in ExecutionPlan.Fallbacks to carry structured fallback chain entries.
+type ProviderModelPair struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model,omitempty"`
+}
+
+// String returns "provider/model" or "provider" when model is empty.
+func (p ProviderModelPair) String() string {
+	if p.Model == "" {
+		return p.Provider
+	}
+	return p.Provider + "/" + p.Model
+}
+
+// ExecutionConfig holds resolved execution settings for a selected model.
+// Populated from the catalog model's execution block.
+// Zero values mean "use provider default".
+type ExecutionConfig struct {
+	// TimeoutSeconds is the per-call timeout. Zero means use provider default.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// ThinkMode controls reasoning: "on", "off", or "" (provider default).
+	ThinkMode string `json:"think_mode,omitempty"`
+	// JSONMode requests structured JSON output.
+	JSONMode bool `json:"json_mode,omitempty"`
+	// MaxOutputTokens caps the response length. Zero means use model default.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+}
+
+// ExecutionPlan is the deterministic, fully resolved output of the routing engine.
+// It describes exactly how a task should be executed: which provider and model to call,
+// an ordered fallback chain of provider+model pairs, and the execution configuration
+// derived from the catalog.
+// It is JSON-serializable for audit logging and structured observability.
+type ExecutionPlan struct {
+	// Provider is the name of the selected primary provider.
+	Provider string `json:"provider"`
+	// Model is the name of the selected primary model.
+	Model string `json:"model,omitempty"`
+	// Fallbacks is the ordered fallback chain of provider+model pairs to try on failure.
+	Fallbacks []ProviderModelPair `json:"fallbacks,omitempty"`
+	// Execution holds resolved execution settings for the primary model.
+	Execution ExecutionConfig `json:"execution"`
+	// Score is the routing score of the selected provider+model pair.
+	Score float64 `json:"score"`
+	// Reason is a human-readable explanation of the routing decision.
+	Reason string `json:"reason"`
+	// Trace holds the full routing decision audit trail.
+	Trace RoutingTrace `json:"trace"`
+}
+
+// IsEmpty returns true if no provider has been selected.
+func (p ExecutionPlan) IsEmpty() bool {
+	return p.Provider == ""
+}
+
+// PrimaryTarget returns the primary provider+model as a ProviderModelPair.
+func (p ExecutionPlan) PrimaryTarget() ProviderModelPair {
+	return ProviderModelPair{Provider: p.Provider, Model: p.Model}
+}
+
+// AllTargets returns the primary target followed by all fallbacks in order.
+func (p ExecutionPlan) AllTargets() []ProviderModelPair {
+	all := make([]ProviderModelPair, 0, 1+len(p.Fallbacks))
+	all = append(all, p.PrimaryTarget())
+	all = append(all, p.Fallbacks...)
+	return all
+}
+
 // RoutingTrace records the full decision-making process for observability.
 type RoutingTrace struct {
 	ConsideredProviders []string           `json:"considered_providers"`
@@ -217,12 +286,14 @@ type GlobalPolicyConfig struct {
 
 // RoutingRecord persists a routing decision for observability queries.
 type RoutingRecord struct {
-	ID               string    `json:"id"`
-	GoalType         string    `json:"goal_type"`
-	TaskType         string    `json:"task_type"`
-	SelectedProvider string    `json:"selected_provider"`
-	SelectedModel    string    `json:"selected_model,omitempty"` // Iteration 32
-	FallbackChain    []string  `json:"fallback_chain"`
-	Reason           string    `json:"reason"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID               string              `json:"id"`
+	GoalType         string              `json:"goal_type"`
+	TaskType         string              `json:"task_type"`
+	SelectedProvider string              `json:"selected_provider"`
+	SelectedModel    string              `json:"selected_model,omitempty"`
+	Fallbacks        []ProviderModelPair `json:"fallbacks,omitempty"`
+	Execution        ExecutionConfig     `json:"execution"`
+	Score            float64             `json:"score"`
+	Reason           string              `json:"reason"`
+	CreatedAt        time.Time           `json:"created_at"`
 }

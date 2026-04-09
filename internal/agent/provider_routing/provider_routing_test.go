@@ -65,10 +65,10 @@ func TestDeterministicRouting(t *testing.T) {
 	d1 := router.Route(context.Background(), input)
 	d2 := router.Route(context.Background(), input)
 
-	if d1.SelectedProvider != d2.SelectedProvider {
-		t.Errorf("deterministic violation: first=%s, second=%s", d1.SelectedProvider, d2.SelectedProvider)
+	if d1.Provider != d2.Provider {
+		t.Errorf("deterministic violation: first=%s, second=%s", d1.Provider, d2.Provider)
 	}
-	if d1.SelectedProvider == "" {
+	if d1.Provider == "" {
 		t.Error("expected a provider to be selected")
 	}
 }
@@ -101,7 +101,7 @@ func TestQuotaExceededRPM(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "limited" {
+	if d.Provider == "limited" {
 		t.Error("should not select provider with exceeded RPM quota")
 	}
 	// Should have rejected "limited" in trace
@@ -142,7 +142,7 @@ func TestQuotaExceededTPM(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "tpm-limited" {
+	if d.Provider == "tpm-limited" {
 		t.Error("should not select provider with exceeded TPM quota")
 	}
 }
@@ -174,7 +174,7 @@ func TestDailyQuotaExceeded(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "daily-limited" {
+	if d.Provider == "daily-limited" {
 		t.Error("should not select provider with exceeded daily quota")
 	}
 }
@@ -196,10 +196,10 @@ func TestFallbackWorks(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "cerebras" {
+	if d.Provider == "cerebras" {
 		t.Error("cerebras should be rejected due to RPM exhaustion")
 	}
-	if d.SelectedProvider == "" {
+	if d.Provider == "" {
 		t.Error("fallback provider should have been selected")
 	}
 }
@@ -217,12 +217,12 @@ func TestNoDuplicateFallback(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	seen := map[string]bool{d.SelectedProvider: true}
-	for _, f := range d.FallbackChain {
-		if seen[f] {
-			t.Errorf("duplicate provider in fallback chain: %s", f)
+	seen := map[string]bool{d.Provider: true}
+	for _, f := range d.Fallbacks {
+		if seen[f.Provider] {
+			t.Errorf("duplicate provider in fallback chain: %s", f.Provider)
 		}
-		seen[f] = true
+		seen[f.Provider] = true
 	}
 }
 
@@ -239,14 +239,14 @@ func TestLocalOnlyRouting(t *testing.T) {
 		AllowExternal:   false,
 	})
 
-	if d.SelectedProvider != "ollama" {
-		t.Errorf("expected local provider 'ollama', got %q", d.SelectedProvider)
+	if d.Provider != "ollama" {
+		t.Errorf("expected local provider 'ollama', got %q", d.Provider)
 	}
 
-	for _, f := range d.FallbackChain {
-		p, ok := registry.Get(f)
+	for _, f := range d.Fallbacks {
+		p, ok := registry.Get(f.Provider)
 		if ok && p.IsExternal() {
-			t.Errorf("external provider %q in fallback chain when AllowExternal=false", f)
+			t.Errorf("external provider %q in fallback chain when AllowExternal=false", f.Provider)
 		}
 	}
 }
@@ -282,7 +282,7 @@ func TestTokenHeavyRequest(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "low-cap" {
+	if d.Provider == "low-cap" {
 		t.Error("should not select provider with insufficient TPM for token-heavy request")
 	}
 }
@@ -302,8 +302,8 @@ func TestLatencySensitiveRouting(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider != "ollama" {
-		t.Errorf("expected local provider for tight latency budget, got %q", d.SelectedProvider)
+	if d.Provider != "ollama" {
+		t.Errorf("expected local provider for tight latency budget, got %q", d.Provider)
 	}
 }
 
@@ -335,7 +335,7 @@ func TestTieBreakingDeterministic(t *testing.T) {
 	results := map[string]int{}
 	for i := 0; i < 10; i++ {
 		d := router.Route(context.Background(), input)
-		results[d.SelectedProvider]++
+		results[d.Provider]++
 	}
 
 	// Must always pick the same one (lexical tie-break: "alpha" < "beta")
@@ -373,8 +373,8 @@ func TestFailOpenLocalFallback(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider != "ollama" {
-		t.Errorf("expected local fallback, got %q", d.SelectedProvider)
+	if d.Provider != "ollama" {
+		t.Errorf("expected local fallback, got %q", d.Provider)
 	}
 }
 
@@ -391,8 +391,8 @@ func TestNoProviderAvailable(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider != "" {
-		t.Errorf("expected empty provider, got %q", d.SelectedProvider)
+	if d.Provider != "" {
+		t.Errorf("expected empty provider, got %q", d.Provider)
 	}
 	if d.Reason == "" {
 		t.Error("expected a reason when no provider available")
@@ -543,8 +543,8 @@ func TestProviderDisabled(t *testing.T) {
 	router := NewRouter(registry, quotas, nil, nil)
 	d := router.Route(context.Background(), RoutingInput{AllowExternal: true})
 
-	if d.SelectedProvider != "" {
-		t.Errorf("disabled provider should not be selected, got %q", d.SelectedProvider)
+	if d.Provider != "" {
+		t.Errorf("disabled provider should not be selected, got %q", d.Provider)
 	}
 }
 
@@ -575,7 +575,7 @@ func TestProviderDegraded(t *testing.T) {
 	})
 
 	// Degraded provider should still be selectable but local preferred
-	if d.SelectedProvider == "" {
+	if d.Provider == "" {
 		t.Error("expected a provider to be selected")
 	}
 }
@@ -591,7 +591,7 @@ func TestZeroEstimatedTokens(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "" {
+	if d.Provider == "" {
 		t.Error("should select a provider even with zero estimated tokens")
 	}
 }
@@ -611,8 +611,8 @@ func TestEmptyRegistry(t *testing.T) {
 
 	d := router.Route(context.Background(), RoutingInput{AllowExternal: true})
 
-	if d.SelectedProvider != "" {
-		t.Errorf("empty registry should produce no provider, got %q", d.SelectedProvider)
+	if d.Provider != "" {
+		t.Errorf("empty registry should produce no provider, got %q", d.Provider)
 	}
 }
 
@@ -633,8 +633,8 @@ func TestOnlyLocalProvider(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider != "ollama" {
-		t.Errorf("expected ollama as only option, got %q", d.SelectedProvider)
+	if d.Provider != "ollama" {
+		t.Errorf("expected ollama as only option, got %q", d.Provider)
 	}
 }
 
@@ -665,8 +665,8 @@ func TestAllQuotasExhausted(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider != "" {
-		t.Errorf("expected no provider when all quotas exhausted, got %q", d.SelectedProvider)
+	if d.Provider != "" {
+		t.Errorf("expected no provider when all quotas exhausted, got %q", d.Provider)
 	}
 }
 
@@ -687,7 +687,7 @@ func TestRoleIncompatible(t *testing.T) {
 	})
 
 	// "fast-only" does not have reviewer role and no fallback role → rejected
-	if d.SelectedProvider == "fast-only" {
+	if d.Provider == "fast-only" {
 		t.Error("role-incompatible provider should not be selected")
 	}
 }
@@ -772,8 +772,8 @@ func TestMaxFallbackChainLength(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if len(d.FallbackChain) > MaxFallbackChainLength {
-		t.Errorf("fallback chain exceeded max length: %d > %d", len(d.FallbackChain), MaxFallbackChainLength)
+	if len(d.Fallbacks) > MaxFallbackChainLength {
+		t.Errorf("fallback chain exceeded max length: %d > %d", len(d.Fallbacks), MaxFallbackChainLength)
 	}
 }
 
@@ -781,18 +781,18 @@ func TestMaxFallbackChainLength(t *testing.T) {
 
 func TestGraphAdapterNilSafety(t *testing.T) {
 	var adapter *GraphAdapter
-	selected, model, chain, reason := adapter.RouteForTask(context.Background(), "test", "test", RolePlanner, 100, 1000, 0.8, true)
+	plan := adapter.RouteForTask(context.Background(), "test", "test", RolePlanner, 100, 1000, 0.8, true)
 
-	if selected != "" {
-		t.Errorf("nil adapter should return empty selected, got %q", selected)
+	if plan.Provider != "" {
+		t.Errorf("nil adapter should return empty provider, got %q", plan.Provider)
 	}
-	if model != "" {
-		t.Errorf("nil adapter should return empty model, got %q", model)
+	if plan.Model != "" {
+		t.Errorf("nil adapter should return empty model, got %q", plan.Model)
 	}
-	if chain != nil {
-		t.Errorf("nil adapter should return nil chain, got %v", chain)
+	if len(plan.Fallbacks) != 0 {
+		t.Errorf("nil adapter should return empty fallbacks, got %v", plan.Fallbacks)
 	}
-	if reason == "" {
+	if plan.Reason == "" {
 		t.Error("nil adapter should return a reason")
 	}
 }
@@ -849,10 +849,10 @@ func TestFallbackChainUsedWhenPrimaryRejected(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "primary" {
+	if d.Provider == "primary" {
 		t.Error("primary should be rejected due to RPM exhaustion")
 	}
-	if d.SelectedProvider == "" {
+	if d.Provider == "" {
 		t.Error("expected a fallback provider to be selected")
 	}
 }
@@ -882,7 +882,7 @@ func TestQuotaExceededTPD(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider == "tpd-limited" {
+	if d.Provider == "tpd-limited" {
 		t.Error("should not select provider with exceeded TPD quota")
 	}
 }
@@ -919,8 +919,8 @@ func TestLocalPreferredOnTie(t *testing.T) {
 		AllowExternal:   true,
 	})
 
-	if d.SelectedProvider != "local1" {
-		t.Errorf("expected local provider on tie, got %q", d.SelectedProvider)
+	if d.Provider != "local1" {
+		t.Errorf("expected local provider on tie, got %q", d.Provider)
 	}
 }
 
@@ -957,8 +957,8 @@ func TestGlobalPolicy_FastRolePreferenceOrdering(t *testing.T) {
 	})
 
 	// groq is first in preference list → should win despite same score as gemini.
-	if d.SelectedProvider != "groq" {
-		t.Errorf("expected groq (first in fast preference list), got %q", d.SelectedProvider)
+	if d.Provider != "groq" {
+		t.Errorf("expected groq (first in fast preference list), got %q", d.Provider)
 	}
 }
 
@@ -989,8 +989,8 @@ func TestGlobalPolicy_PlannerRolePreferenceOrdering(t *testing.T) {
 	})
 
 	// cerebras is first in preference list → should win.
-	if d.SelectedProvider != "cerebras" {
-		t.Errorf("expected cerebras (first in planner preference list), got %q", d.SelectedProvider)
+	if d.Provider != "cerebras" {
+		t.Errorf("expected cerebras (first in planner preference list), got %q", d.Provider)
 	}
 }
 
@@ -1019,8 +1019,8 @@ func TestGlobalPolicy_FallbackRolePreferenceOrdering(t *testing.T) {
 	})
 
 	// openrouter is first in fallback preference list → should win.
-	if d.SelectedProvider != "openrouter" {
-		t.Errorf("expected openrouter (first in fallback preference list), got %q", d.SelectedProvider)
+	if d.Provider != "openrouter" {
+		t.Errorf("expected openrouter (first in fallback preference list), got %q", d.Provider)
 	}
 }
 
@@ -1051,13 +1051,13 @@ func TestGlobalPolicy_AllowExternalFalseBlocksExternalProviders(t *testing.T) {
 		AllowExternal: true, // caller requests external — policy overrides
 	})
 
-	if d.SelectedProvider != "ollama" {
-		t.Errorf("expected local ollama (global policy blocks external), got %q", d.SelectedProvider)
+	if d.Provider != "ollama" {
+		t.Errorf("expected local ollama (global policy blocks external), got %q", d.Provider)
 	}
-	for _, f := range d.FallbackChain {
-		p, ok := registry.Get(f)
+	for _, f := range d.Fallbacks {
+		p, ok := registry.Get(f.Provider)
 		if ok && p.IsExternal() {
-			t.Errorf("external provider %q in fallback chain when global policy allow_external=false", f)
+			t.Errorf("external provider %q in fallback chain when global policy allow_external=false", f.Provider)
 		}
 	}
 }
@@ -1086,8 +1086,8 @@ func TestGlobalPolicy_MaxFallbackChainFromPolicy(t *testing.T) {
 		AllowExternal: true,
 	})
 
-	if len(d.FallbackChain) > 2 {
-		t.Errorf("fallback chain exceeds policy max_fallback_chain=2: got %d entries", len(d.FallbackChain))
+	if len(d.Fallbacks) > 2 {
+		t.Errorf("fallback chain exceeds policy max_fallback_chain=2: got %d entries", len(d.Fallbacks))
 	}
 }
 
@@ -1124,18 +1124,18 @@ func TestGlobalPolicy_DegradePolicyOrderingInFallbackChain(t *testing.T) {
 	})
 
 	// Primary should be groq (highest preference).
-	if d.SelectedProvider != "groq" {
-		t.Errorf("expected groq as primary, got %q", d.SelectedProvider)
+	if d.Provider != "groq" {
+		t.Errorf("expected groq as primary, got %q", d.Provider)
 	}
 
 	// Fallback chain should have openrouter before ollama (degrade_policy: router < local).
 	openrouterIdx := -1
 	ollamaIdx := -1
-	for i, f := range d.FallbackChain {
-		if f == "openrouter" {
+	for i, f := range d.Fallbacks {
+		if f.Provider == "openrouter" {
 			openrouterIdx = i
 		}
-		if f == "ollama" {
+		if f.Provider == "ollama" {
 			ollamaIdx = i
 		}
 	}
@@ -1143,7 +1143,7 @@ func TestGlobalPolicy_DegradePolicyOrderingInFallbackChain(t *testing.T) {
 		t.Skip("openrouter not in fallback chain (may have been capped by MaxFallbackChain)")
 	}
 	if ollamaIdx != -1 && openrouterIdx > ollamaIdx {
-		t.Errorf("router (openrouter) should appear before local (ollama) per degrade_policy, fallback=%v", d.FallbackChain)
+		t.Errorf("router (openrouter) should appear before local (ollama) per degrade_policy, fallback=%v", d.Fallbacks)
 	}
 }
 
@@ -1188,13 +1188,13 @@ func TestLegacyEnv_OllamaProfileDoesNotAffectProviderRouting(t *testing.T) {
 	d2 := routerWithPolicy.Route(context.Background(), input)
 
 	// Both must return a valid provider (system is functional).
-	if d1.SelectedProvider == "" || d2.SelectedProvider == "" {
+	if d1.Provider == "" || d2.Provider == "" {
 		t.Error("expected a provider to be selected in both cases")
 	}
 
 	// With global policy, groq should be preferred (first in preference list).
-	if d2.SelectedProvider != "groq" {
-		t.Errorf("expected groq with global policy preference, got %q", d2.SelectedProvider)
+	if d2.Provider != "groq" {
+		t.Errorf("expected groq with global policy preference, got %q", d2.Provider)
 	}
 }
 
@@ -1224,13 +1224,13 @@ func TestGlobalPolicy_LocalOnlyModeRegression(t *testing.T) {
 	})
 
 	// Local-only mode must be respected; external must not be selected.
-	if d.SelectedProvider != "ollama" {
-		t.Errorf("expected ollama in local-only mode, got %q", d.SelectedProvider)
+	if d.Provider != "ollama" {
+		t.Errorf("expected ollama in local-only mode, got %q", d.Provider)
 	}
-	for _, f := range d.FallbackChain {
-		p, ok := registry.Get(f)
+	for _, f := range d.Fallbacks {
+		p, ok := registry.Get(f.Provider)
 		if ok && p.IsExternal() {
-			t.Errorf("external provider %q in fallback chain in local-only mode", f)
+			t.Errorf("external provider %q in fallback chain in local-only mode", f.Provider)
 		}
 	}
 }
@@ -1292,8 +1292,8 @@ func TestGlobalPolicy_PreferenceBoostBounded(t *testing.T) {
 		PreferredRole: RolePlanner,
 		AllowExternal: true,
 	})
-	if d.SelectedProvider != "preferred" {
-		t.Errorf("expected 'preferred', got %q", d.SelectedProvider)
+	if d.Provider != "preferred" {
+		t.Errorf("expected 'preferred', got %q", d.Provider)
 	}
 	// Verify score in trace does not exceed 1.0
 	for _, ranked := range d.Trace.RankedProviders {
@@ -1325,8 +1325,8 @@ func TestGlobalPolicy_NilPolicyPreservesExistingBehavior(t *testing.T) {
 	d1 := routerNoPolicy.Route(context.Background(), input)
 	d2 := routerNilPolicy.Route(context.Background(), input)
 
-	if d1.SelectedProvider != d2.SelectedProvider {
+	if d1.Provider != d2.Provider {
 		t.Errorf("nil policy should produce same result as no policy: got %q vs %q",
-			d1.SelectedProvider, d2.SelectedProvider)
+			d1.Provider, d2.Provider)
 	}
 }

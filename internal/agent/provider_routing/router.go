@@ -19,11 +19,12 @@ const MaxRecentDecisions = 100
 // Router is the provider routing engine. It selects the best provider for a task
 // while respecting quotas, enforcing determinism, and building bounded fallback chains.
 type Router struct {
-	registry *Registry
-	quotas   *QuotaTracker
-	auditor  audit.AuditRecorder
-	logger   *zap.Logger
-	policy   *GlobalPolicyConfig // optional; nil = use defaults
+	registry     *Registry
+	quotas       *QuotaTracker
+	auditor      audit.AuditRecorder
+	logger       *zap.Logger
+	policy       *GlobalPolicyConfig        // optional; nil = use defaults
+	modelExecMap map[string]ExecutionConfig // key = "provider/model" → execution config
 
 	mu              sync.Mutex
 	recentDecisions []RoutingRecord
@@ -49,9 +50,43 @@ func (r *Router) WithGlobalPolicy(cfg *GlobalPolicyConfig) *Router {
 	return r
 }
 
-// Route selects the best provider for the given input and builds a fallback chain.
+// WithModelExecutionMap attaches resolved execution configs from the provider catalog.
+// The map key is "provider/model" (or "provider" for provider-level defaults).
+// The router looks up execution config for the selected primary provider+model
+// when building the ExecutionPlan. If a key is not found, zero values are used
+// (meaning: use provider defaults). Safe to call with a nil map.
+func (r *Router) WithModelExecutionMap(m map[string]ExecutionConfig) *Router {
+	if m != nil {
+		r.modelExecMap = m
+	}
+	return r
+}
+
+// execConfigFor looks up the ExecutionConfig for a provider+model pair.
+// Falls back to "provider" key if "provider/model" is not found.
+// Returns zero-value ExecutionConfig when no match exists.
+func (r *Router) execConfigFor(provider, model string) ExecutionConfig {
+	if r.modelExecMap == nil {
+		return ExecutionConfig{}
+	}
+	key := provider
+	if model != "" {
+		key = provider + "/" + model
+	}
+	if cfg, ok := r.modelExecMap[key]; ok {
+		return cfg
+	}
+	// Fallback: provider-only key
+	if cfg, ok := r.modelExecMap[provider]; ok {
+		return cfg
+	}
+	return ExecutionConfig{}
+}
+
+// Route selects the best provider for the given input and returns a fully resolved
+// ExecutionPlan with provider+model, fallback chain, execution config, and trace.
 // This is the main entry point for all provider routing decisions.
-func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision {
+func (r *Router) Route(ctx context.Context, input RoutingInput) ExecutionPlan {
 	// Apply global policy gate: if the global policy disallows external providers,
 	// override the input's AllowExternal even when the caller requested external.
 	// This ensures providers/_global.yaml has final say on external access.
@@ -68,16 +103,15 @@ func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision 
 	// 1. Get all enabled providers
 	candidates := r.registry.Enabled()
 	if len(candidates) == 0 {
-		decision := RoutingDecision{
-			SelectedProvider: "",
-			Reason:           "no providers available in registry",
+		plan := ExecutionPlan{
+			Reason: "no providers available in registry",
 			Trace: RoutingTrace{
 				FinalReason: "empty registry or all providers disabled",
 			},
 		}
-		r.recordDecision(ctx, input, decision)
-		r.emitAudit(ctx, "provider.routing_decided", input, decision)
-		return decision
+		r.recordDecision(ctx, input, plan)
+		r.emitAudit(ctx, "provider.routing_decided", input, plan)
+		return plan
 	}
 
 	// 2. Filter candidates
@@ -96,18 +130,15 @@ func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision 
 	}
 
 	if len(valid) == 0 {
-		// Try local-only fallback if external was allowed but all failed
-		decision := RoutingDecision{
-			SelectedProvider: "",
-			Reason:           "all providers rejected by filtering",
-			Trace:            trace,
-		}
 		trace.FinalReason = "no valid providers after filtering"
-		decision.Trace = trace
-		r.recordDecision(ctx, input, decision)
-		r.emitAudit(ctx, "provider.routing_decided", input, decision)
-		r.emitAudit(ctx, "provider.degraded_to_local", input, decision)
-		return decision
+		plan := ExecutionPlan{
+			Reason: "all providers rejected by filtering",
+			Trace:  trace,
+		}
+		r.recordDecision(ctx, input, plan)
+		r.emitAudit(ctx, "provider.routing_decided", input, plan)
+		r.emitAudit(ctx, "provider.degraded_to_local", input, plan)
+		return plan
 	}
 
 	// 3. Score valid candidates
@@ -117,12 +148,15 @@ func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision 
 	// 4. Select primary (highest score, deterministic tie-break)
 	primary := scored[0]
 
-	// 5. Build fallback chain (remaining providers, no duplicates, bounded)
+	// 5. Build structured fallback chain (provider+model pairs, bounded)
 	primaryKey := primary.Provider
 	if primary.Model != "" {
 		primaryKey = primary.Provider + "/" + primary.Model
 	}
-	fallbackChain := r.buildFallbackChain(scored[1:], primaryKey, input)
+	fallbacks := r.buildFallbackPairs(scored[1:], primaryKey)
+
+	// 6. Resolve execution config from catalog model execution map.
+	execCfg := r.execConfigFor(primary.Provider, primary.Model)
 
 	reason := fmt.Sprintf("selected %s: %s", primary.Provider, primary.Reason)
 	if primary.Model != "" {
@@ -130,16 +164,18 @@ func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision 
 	}
 	trace.FinalReason = reason
 
-	decision := RoutingDecision{
-		SelectedProvider: primary.Provider,
-		SelectedModel:    primary.Model,
-		FallbackChain:    fallbackChain,
-		Reason:           reason,
-		Trace:            trace,
+	plan := ExecutionPlan{
+		Provider:  primary.Provider,
+		Model:     primary.Model,
+		Fallbacks: fallbacks,
+		Execution: execCfg,
+		Score:     primary.Score,
+		Reason:    reason,
+		Trace:     trace,
 	}
 
-	r.recordDecision(ctx, input, decision)
-	r.emitAudit(ctx, "provider.routing_decided", input, decision)
+	r.recordDecision(ctx, input, plan)
+	r.emitAudit(ctx, "provider.routing_decided", input, plan)
 
 	if primary.Provider != "" {
 		p, ok := r.registry.Get(primary.Provider)
@@ -147,14 +183,14 @@ func (r *Router) Route(ctx context.Context, input RoutingInput) RoutingDecision 
 			// Check if this was a forced local fallback
 			for _, rp := range trace.RejectedProviders {
 				if rp.Reason != "" {
-					r.emitAudit(ctx, "provider.degraded_to_local", input, decision)
+					r.emitAudit(ctx, "provider.degraded_to_local", input, plan)
 					break
 				}
 			}
 		}
 	}
 
-	return decision
+	return plan
 }
 
 // GetRecentDecisions returns recent routing decisions for observability.
@@ -264,13 +300,11 @@ func (r *Router) scoreProviders(providers []Provider, input RoutingInput) []Rank
 	return ranked
 }
 
-// buildFallbackChain creates a bounded, duplicate-free fallback chain.
+// buildFallbackPairs creates a bounded, duplicate-free fallback chain as
+// structured ProviderModelPair values.
 // When a global policy is attached, the chain is sorted by degrade_policy tier ordering
 // and bounded by policy.MaxFallbackChain (overriding MaxFallbackChainLength if > 0).
-//
-// Iteration 32: operates on provider+model pairs. Same provider with different
-// models is allowed; duplicate provider+model pairs are rejected.
-func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, input RoutingInput) []string {
+func (r *Router) buildFallbackPairs(remaining []RankedProvider, primary string) []ProviderModelPair {
 	// Determine effective max fallback chain length.
 	maxChain := MaxFallbackChainLength
 	if r.policy != nil && r.policy.MaxFallbackChain > 0 {
@@ -278,8 +312,6 @@ func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, 
 	}
 
 	// Apply degrade_policy tier ordering to the fallback chain when set.
-	// This re-sorts remaining candidates so that, e.g., external_strong providers
-	// appear before router providers before local — regardless of raw score order.
 	if r.policy != nil && len(r.policy.DegradePolicy) > 0 {
 		sort.SliceStable(remaining, func(i, j int) bool {
 			pi, oki := r.registry.Get(remaining[i].Provider)
@@ -293,12 +325,11 @@ func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, 
 		})
 	}
 
-	chain := make([]string, 0, maxChain)
-	primaryKey := primary
-	seen := map[string]bool{primaryKey: true}
+	pairs := make([]ProviderModelPair, 0, maxChain)
+	seen := map[string]bool{primary: true}
 
 	for _, rp := range remaining {
-		if len(chain) >= maxChain {
+		if len(pairs) >= maxChain {
 			break
 		}
 		key := rp.Provider
@@ -309,10 +340,10 @@ func (r *Router) buildFallbackChain(remaining []RankedProvider, primary string, 
 			continue
 		}
 		seen[key] = true
-		chain = append(chain, rp.Provider)
+		pairs = append(pairs, ProviderModelPair{Provider: rp.Provider, Model: rp.Model})
 	}
 
-	return chain
+	return pairs
 }
 
 // preferenceBoostFor returns a score boost for a provider based on its position
@@ -371,7 +402,7 @@ func (r *Router) degradeTierIndex(p Provider) int {
 	return len(r.policy.DegradePolicy) // not found → last
 }
 
-func (r *Router) recordDecision(ctx context.Context, input RoutingInput, decision RoutingDecision) {
+func (r *Router) recordDecision(ctx context.Context, input RoutingInput, plan ExecutionPlan) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -379,10 +410,12 @@ func (r *Router) recordDecision(ctx context.Context, input RoutingInput, decisio
 		ID:               uuid.New().String(),
 		GoalType:         input.GoalType,
 		TaskType:         input.TaskType,
-		SelectedProvider: decision.SelectedProvider,
-		SelectedModel:    decision.SelectedModel,
-		FallbackChain:    decision.FallbackChain,
-		Reason:           decision.Reason,
+		SelectedProvider: plan.Provider,
+		SelectedModel:    plan.Model,
+		Fallbacks:        plan.Fallbacks,
+		Execution:        plan.Execution,
+		Score:            plan.Score,
+		Reason:           plan.Reason,
 		CreatedAt:        time.Now(),
 	}
 
@@ -392,26 +425,33 @@ func (r *Router) recordDecision(ctx context.Context, input RoutingInput, decisio
 	}
 }
 
-func (r *Router) emitAudit(ctx context.Context, eventType string, input RoutingInput, decision RoutingDecision) {
+func (r *Router) emitAudit(ctx context.Context, eventType string, input RoutingInput, plan ExecutionPlan) {
 	if r.auditor == nil {
 		return
 	}
 
-	payload := map[string]any{
-		"goal_type":         input.GoalType,
-		"task_type":         input.TaskType,
-		"preferred_role":    input.PreferredRole,
-		"estimated_tokens":  input.EstimatedTokens,
-		"allow_external":    input.AllowExternal,
-		"selected_provider": decision.SelectedProvider,
-		"selected_model":    decision.SelectedModel,
-		"fallback_chain":    decision.FallbackChain,
-		"reason":            decision.Reason,
+	fallbackStrings := make([]string, 0, len(plan.Fallbacks))
+	for _, fb := range plan.Fallbacks {
+		fallbackStrings = append(fallbackStrings, fb.String())
 	}
 
-	if len(decision.Trace.RejectedProviders) > 0 {
-		rejected := make([]map[string]string, 0, len(decision.Trace.RejectedProviders))
-		for _, rp := range decision.Trace.RejectedProviders {
+	payload := map[string]any{
+		"goal_type":        input.GoalType,
+		"task_type":        input.TaskType,
+		"preferred_role":   input.PreferredRole,
+		"estimated_tokens": input.EstimatedTokens,
+		"allow_external":   input.AllowExternal,
+		"provider":         plan.Provider,
+		"model":            plan.Model,
+		"fallback_chain":   fallbackStrings,
+		"execution":        plan.Execution,
+		"score":            plan.Score,
+		"reason":           plan.Reason,
+	}
+
+	if len(plan.Trace.RejectedProviders) > 0 {
+		rejected := make([]map[string]string, 0, len(plan.Trace.RejectedProviders))
+		for _, rp := range plan.Trace.RejectedProviders {
 			rejected = append(rejected, map[string]string{
 				"provider": rp.Provider,
 				"reason":   rp.Reason,

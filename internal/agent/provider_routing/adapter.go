@@ -9,15 +9,15 @@ import (
 )
 
 // ProviderRoutingProvider is the interface exposed to the decision graph planner adapter.
-// Defined with primitive parameters to avoid import cycles.
-// Fail-open: if provider is nil, routing defaults to existing behavior.
+// Defined with the ExecutionPlan return type to carry full routing context.
+// Fail-open: if provider is nil, routing returns an empty ExecutionPlan.
 type ProviderRoutingProvider interface {
-	// RouteForTask selects the best provider+model for the given task parameters.
-	// Returns selected provider name, selected model name, fallback chain, and routing reason.
-	// Returns ("", "", nil, "no router") if routing is unavailable (fail-open).
+	// RouteForTask selects the best provider+model for the given task parameters
+	// and returns a fully resolved ExecutionPlan with fallback chain and execution config.
+	// Returns an empty ExecutionPlan (IsEmpty()==true) when routing is unavailable (fail-open).
 	RouteForTask(ctx context.Context, goalType, taskType, preferredRole string,
 		estimatedTokens, latencyBudgetMs int, confidenceRequired float64,
-		allowExternal bool) (selected string, selectedModel string, fallbackChain []string, reason string)
+		allowExternal bool) ExecutionPlan
 }
 
 // GraphAdapter implements ProviderRoutingProvider, bridging the Router
@@ -41,11 +41,13 @@ func NewGraphAdapter(router *Router, auditor audit.AuditRecorder, logger *zap.Lo
 }
 
 // RouteForTask implements ProviderRoutingProvider.
+// Returns the full ExecutionPlan for the given task parameters.
+// Fail-open: returns empty ExecutionPlan if router is not configured.
 func (a *GraphAdapter) RouteForTask(ctx context.Context, goalType, taskType, preferredRole string,
 	estimatedTokens, latencyBudgetMs int, confidenceRequired float64,
-	allowExternal bool) (string, string, []string, string) {
+	allowExternal bool) ExecutionPlan {
 	if a == nil || a.router == nil {
-		return "", "", nil, "provider router not configured"
+		return ExecutionPlan{Reason: "provider router not configured"}
 	}
 
 	input := RoutingInput{
@@ -58,8 +60,7 @@ func (a *GraphAdapter) RouteForTask(ctx context.Context, goalType, taskType, pre
 		AllowExternal:      allowExternal,
 	}
 
-	decision := a.router.Route(ctx, input)
-	return decision.SelectedProvider, decision.SelectedModel, decision.FallbackChain, decision.Reason
+	return a.router.Route(ctx, input)
 }
 
 // GetRouter returns the underlying router for direct access (API handlers).
