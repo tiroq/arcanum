@@ -88,10 +88,6 @@ func TestOllamaMultiModelDefaults(t *testing.T) {
 	assert.Equal(t, 120, cfg.Providers.Ollama.TimeoutSeconds)
 	assert.Equal(t, 0, cfg.Providers.Ollama.FastTimeoutSeconds)
 	assert.Equal(t, 0, cfg.Providers.Ollama.PlannerTimeoutSeconds)
-	assert.Empty(t, cfg.Providers.Ollama.DefaultProfile)
-	assert.Empty(t, cfg.Providers.Ollama.FastProfile)
-	assert.Empty(t, cfg.Providers.Ollama.PlannerProfile)
-	assert.Empty(t, cfg.Providers.Ollama.ReviewProfile)
 }
 
 func TestOllamaMultiModelOverrides(t *testing.T) {
@@ -172,50 +168,6 @@ func TestOllamaResolveTimeout(t *testing.T) {
 	assert.Equal(t, 90*time.Second, ollamaCfg.ResolveTimeout("fast"))
 	assert.Equal(t, 240*time.Second, ollamaCfg.ResolveTimeout("planner"))
 	assert.Equal(t, 180*time.Second, ollamaCfg.ResolveTimeout("review"))
-}
-
-func TestOllamaProfileEnvVars(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("MODEL_FAST_PROFILE", "model-a?think=thinking&timeout=120|model-b?timeout=60")
-	t.Setenv("MODEL_PLANNER_PROFILE", "planner-model?think=nothinking&timeout=300")
-	t.Setenv("MODEL_REVIEW_PROFILE", "review-a|review-b?json=true")
-
-	cfg, err := config.Load()
-	require.NoError(t, err)
-
-	assert.Equal(t, "model-a?think=thinking&timeout=120|model-b?timeout=60", cfg.Providers.Ollama.FastProfile)
-	assert.Equal(t, "planner-model?think=nothinking&timeout=300", cfg.Providers.Ollama.PlannerProfile)
-	assert.Equal(t, "review-a|review-b?json=true", cfg.Providers.Ollama.ReviewProfile)
-	assert.Empty(t, cfg.Providers.Ollama.DefaultProfile)
-}
-
-func TestOllamaProfileBackcompat(t *testing.T) {
-	setRequiredEnv(t)
-	// Set only the deprecated OLLAMA_*_PROFILE vars — MODEL_*_PROFILE are unset.
-	t.Setenv("OLLAMA_DEFAULT_PROFILE", "compat-default?think=off&timeout=90")
-	t.Setenv("OLLAMA_FAST_PROFILE", "compat-fast?timeout=30")
-	t.Setenv("OLLAMA_PLANNER_PROFILE", "compat-planner?think=on&timeout=240")
-	t.Setenv("OLLAMA_REVIEW_PROFILE", "compat-review?json=true")
-
-	cfg, err := config.Load()
-	require.NoError(t, err)
-
-	assert.Equal(t, "compat-default?think=off&timeout=90", cfg.Providers.Ollama.DefaultProfile)
-	assert.Equal(t, "compat-fast?timeout=30", cfg.Providers.Ollama.FastProfile)
-	assert.Equal(t, "compat-planner?think=on&timeout=240", cfg.Providers.Ollama.PlannerProfile)
-	assert.Equal(t, "compat-review?json=true", cfg.Providers.Ollama.ReviewProfile)
-}
-
-func TestOllamaProfileNewTakesPrecedenceOverOld(t *testing.T) {
-	setRequiredEnv(t)
-	// New MODEL_*_PROFILE must win over deprecated OLLAMA_*_PROFILE.
-	t.Setenv("MODEL_FAST_PROFILE", "new-fast?timeout=60")
-	t.Setenv("OLLAMA_FAST_PROFILE", "old-fast?timeout=30")
-
-	cfg, err := config.Load()
-	require.NoError(t, err)
-
-	assert.Equal(t, "new-fast?timeout=60", cfg.Providers.Ollama.FastProfile)
 }
 
 func TestOllamaCloudDefaults(t *testing.T) {
@@ -346,50 +298,74 @@ func TestOpenRouterFullConfig(t *testing.T) {
 }
 
 // =============================================================================
-// Legacy env deprecation tests (Iteration 33: legacy env isolation)
+// Legacy profile removal tests (Iteration 34: fail-fast validation)
 // =============================================================================
 
-// TestLegacyOllamaProfileDeprecationWarning verifies that OLLAMA_*_PROFILE
-// emits a deprecation warning containing "execution-only" to clarify that
-// these vars do NOT affect provider routing decisions.
-// Test 4.2.7: deprecation warning emitted when legacy env is present.
-func TestLegacyOllamaProfileDeprecationWarning(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("OLLAMA_DEFAULT_PROFILE", "test-model?think=off")
+// TestLegacyProfileVars_ModelProfileFailsFast verifies that MODEL_*_PROFILE env vars
+// are no longer accepted and cause Load() to fail with a clear error message.
+// Test requirement 2: MODEL_*_PROFILE no longer changes runtime behavior.
+// Test requirement 4: startup fails clearly if legacy profile env vars are present.
+func TestLegacyProfileVars_ModelProfileFailsFast(t *testing.T) {
+	for _, key := range []string{
+		"MODEL_DEFAULT_PROFILE",
+		"MODEL_FAST_PROFILE",
+		"MODEL_PLANNER_PROFILE",
+		"MODEL_REVIEW_PROFILE",
+	} {
+		t.Run(key, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(key, "some-model?think=off&timeout=60")
 
-	// Redirect stderr output — the warning is emitted to os.Stderr via fmt.Fprintf.
-	// We verify the config loads without error and the field is populated, confirming
-	// the backcompat path (and thus the warning path) was exercised.
-	cfg, err := config.Load()
-	require.NoError(t, err)
-
-	// Backcompat mapped the deprecated var to the new field.
-	assert.Equal(t, "test-model?think=off", cfg.Providers.Ollama.DefaultProfile,
-		"OLLAMA_DEFAULT_PROFILE backcompat must populate DefaultProfile")
+			_, err := config.Load()
+			require.Error(t, err, "expected Load() to fail when %s is set", key)
+			assert.Contains(t, err.Error(), key,
+				"error message must name the offending env var")
+			assert.Contains(t, err.Error(), "providers/ollama.yaml",
+				"error message must point to the migration target")
+		})
+	}
 }
 
-// TestLegacyOllamaProfileIsExecutionOnly verifies that MODEL_*_PROFILE env vars:
-//  1. Are read by the config layer (execution layer concern)
-//  2. Produce no effect on provider routing engine inputs
-//
-// The routing engine (Router.Route) accepts a RoutingInput which has NO field
-// for profiles — profiles are exclusively a worker-execution concern.
-// Test 4.2.6: legacy env allowed only for execution-only path.
-func TestLegacyOllamaProfileIsExecutionOnly(t *testing.T) {
+// TestLegacyProfileVars_OllamaProfileFailsFast verifies that OLLAMA_*_PROFILE
+// legacy aliases are also rejected with a clear error.
+// Test requirement 3: OLLAMA_*_PROFILE no longer changes runtime behavior.
+// Test requirement 4: startup fails clearly if legacy profile env vars are present.
+func TestLegacyProfileVars_OllamaProfileFailsFast(t *testing.T) {
+	for _, key := range []string{
+		"OLLAMA_DEFAULT_PROFILE",
+		"OLLAMA_FAST_PROFILE",
+		"OLLAMA_PLANNER_PROFILE",
+		"OLLAMA_REVIEW_PROFILE",
+	} {
+		t.Run(key, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv(key, "some-model?think=off")
+
+			_, err := config.Load()
+			require.Error(t, err, "expected Load() to fail when %s is set", key)
+			assert.Contains(t, err.Error(), key,
+				"error message must name the offending env var")
+			assert.Contains(t, err.Error(), "providers/ollama.yaml",
+				"error message must point to the migration target")
+		})
+	}
+}
+
+// TestLegacyProfileVars_NoneSetSucceeds verifies that when no legacy profile vars
+// are set, Load() succeeds normally.
+// Test requirement 2+3: absence of legacy vars does not break startup.
+func TestLegacyProfileVars_NoneSetSucceeds(t *testing.T) {
 	setRequiredEnv(t)
-	t.Setenv("MODEL_PLANNER_PROFILE", "qwen3:8b?think=on&timeout=240")
-	t.Setenv("MODEL_FAST_PROFILE", "qwen3:1.7b?think=off&timeout=60")
+	// Explicitly ensure no profile vars are set.
+	for _, key := range []string{
+		"MODEL_DEFAULT_PROFILE", "MODEL_FAST_PROFILE",
+		"MODEL_PLANNER_PROFILE", "MODEL_REVIEW_PROFILE",
+		"OLLAMA_DEFAULT_PROFILE", "OLLAMA_FAST_PROFILE",
+		"OLLAMA_PLANNER_PROFILE", "OLLAMA_REVIEW_PROFILE",
+	} {
+		t.Setenv(key, "") // ensure unset
+	}
 
-	cfg, err := config.Load()
-	require.NoError(t, err)
-
-	// Profile is stored in config for the execution layer.
-	assert.NotEmpty(t, cfg.Providers.Ollama.PlannerProfile)
-	assert.NotEmpty(t, cfg.Providers.Ollama.FastProfile)
-
-	// But the RoutingPolicyConfig (which feeds the routing engine) has NO profile fields.
-	// Profiles do not appear in ROUTING_* env vars or RoutingPolicyConfig struct.
-	// This structurally enforces the execution-only isolation.
-	routingCfg := cfg.Routing
-	_ = routingCfg // RoutingPolicyConfig has no profile fields — isolation is type-enforced.
+	_, err := config.Load()
+	require.NoError(t, err, "Load() must succeed when no legacy profile vars are set")
 }

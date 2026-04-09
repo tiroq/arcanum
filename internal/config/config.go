@@ -100,11 +100,6 @@ type OllamaConfig struct {
 	FastTimeoutSeconds    int `envconfig:"OLLAMA_FAST_TIMEOUT_SECONDS"`
 	PlannerTimeoutSeconds int `envconfig:"OLLAMA_PLANNER_TIMEOUT_SECONDS"`
 
-	DefaultProfile string `envconfig:"MODEL_DEFAULT_PROFILE"`
-	FastProfile    string `envconfig:"MODEL_FAST_PROFILE"`
-	PlannerProfile string `envconfig:"MODEL_PLANNER_PROFILE"`
-	ReviewProfile  string `envconfig:"MODEL_REVIEW_PROFILE"`
-
 	// Computed duration fields (derived from *Seconds fields in Load).
 	Timeout        time.Duration
 	FastTimeout    time.Duration
@@ -160,7 +155,8 @@ type SchedulerConfig struct {
 // Per-role escalation levels control how far a role may escalate through provider tiers:
 // local (cheapest/fastest) → cloud → OpenRouter (most capable/costly).
 //
-// Explicit DSL profile overrides (MODEL_*_PROFILE env vars) always take precedence over policy.
+// Execution settings (think mode, timeout, JSON output) are configured in
+// providers/<name>.yaml under the execution_profiles section, not via env vars.
 type RoutingPolicyConfig struct {
 	// Per-role escalation levels.
 	// Valid values: local_only, local_cloud, local_cloud_openrouter, local_openrouter.
@@ -180,45 +176,48 @@ type RoutingPolicyConfig struct {
 	OpenRouterModel string `envconfig:"ROUTING_OPENROUTER_MODEL"`
 }
 
-// applyProfileBackcompat copies deprecated OLLAMA_*_PROFILE env vars into the
-// new MODEL_*_PROFILE fields when the latter are unset. It returns one warning
-// string per deprecated var consumed so the caller can surface them.
-//
-// IMPORTANT: These profile vars are execution-only — they control which local
-// Ollama model and execution options (think mode, timeout, JSON mode) are used
-// within the worker execution engine. They do NOT affect provider routing
-// decisions in the agent decision graph (which uses providers/_global.yaml,
-// the provider catalog, and the scoring-based routing engine instead).
-func applyProfileBackcompat(cfg *OllamaConfig) []string {
-	type mapping struct {
-		oldKey  string
-		newKey  string
-		current *string
-	}
-	pairs := []mapping{
-		{"OLLAMA_DEFAULT_PROFILE", "MODEL_DEFAULT_PROFILE", &cfg.DefaultProfile},
-		{"OLLAMA_FAST_PROFILE", "MODEL_FAST_PROFILE", &cfg.FastProfile},
-		{"OLLAMA_PLANNER_PROFILE", "MODEL_PLANNER_PROFILE", &cfg.PlannerProfile},
-		{"OLLAMA_REVIEW_PROFILE", "MODEL_REVIEW_PROFILE", &cfg.ReviewProfile},
-	}
-	var warnings []string
-	for _, p := range pairs {
-		if *p.current == "" {
-			if v := os.Getenv(p.oldKey); v != "" {
-				*p.current = v
-				warnings = append(warnings, fmt.Sprintf(
-					"%s is deprecated; rename to %s"+
-						" (execution-only: affects local Ollama model selection and options, NOT provider routing)",
-					p.oldKey, p.newKey))
-			}
+// legacyProfileVars lists the env vars that were removed in Iteration 34.
+// If any of these are set at startup, Load() returns an explicit error so operators
+// know to migrate their configuration to providers/ollama.yaml execution_profiles.
+var legacyProfileVars = []string{
+	"MODEL_DEFAULT_PROFILE",
+	"MODEL_FAST_PROFILE",
+	"MODEL_PLANNER_PROFILE",
+	"MODEL_REVIEW_PROFILE",
+	"OLLAMA_DEFAULT_PROFILE",
+	"OLLAMA_FAST_PROFILE",
+	"OLLAMA_PLANNER_PROFILE",
+	"OLLAMA_REVIEW_PROFILE",
+}
+
+// checkLegacyProfileVars returns an error if any removed profile env vars are set.
+// Execution profiles must now be defined in providers/<name>.yaml.
+func checkLegacyProfileVars() error {
+	var found []string
+	for _, key := range legacyProfileVars {
+		if os.Getenv(key) != "" {
+			found = append(found, key)
 		}
 	}
-	return warnings
+	if len(found) > 0 {
+		return fmt.Errorf(
+			"legacy execution profile env vars are no longer supported: %v\n"+
+				"  migrate to providers/ollama.yaml execution_profiles section\n"+
+				"  see: docs/LEGACY_PROFILE_REMOVAL_REPORT.md",
+			found)
+	}
+	return nil
 }
 
 // Load reads configuration from environment variables using envconfig.
-// It fails fast on invalid required fields.
+// It fails fast on invalid required fields and on any removed legacy profile env vars.
 func Load() (*Config, error) {
+	// Fail fast: retired MODEL_*_PROFILE and OLLAMA_*_PROFILE vars must not be set.
+	// Execution profiles are now configured in providers/ollama.yaml.
+	if err := checkLegacyProfileVars(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+
 	var cfg Config
 
 	if err := envconfig.Process("", &cfg.Database); err != nil {
@@ -244,9 +243,6 @@ func Load() (*Config, error) {
 	}
 	if err := envconfig.Process("", &cfg.Providers.Ollama); err != nil {
 		return nil, fmt.Errorf("ollama config: %w", err)
-	}
-	for _, w := range applyProfileBackcompat(&cfg.Providers.Ollama) {
-		fmt.Fprintf(os.Stderr, "[config] DEPRECATED: %s\n", w)
 	}
 	if err := envconfig.Process("", &cfg.Providers.OllamaCloud); err != nil {
 		return nil, fmt.Errorf("ollama cloud config: %w", err)
