@@ -107,6 +107,13 @@ type GovernanceProvider interface {
 	GetMode(ctx context.Context) string
 }
 
+// SystemGoalAlignmentProvider scores an action against loaded system goals.
+// Defined here to avoid import cycles — implemented in goals package.
+// Returns: alignmentScore ∈ [0,1], matchedGoals IDs, rejected bool, rejectReason string.
+type SystemGoalAlignmentProvider interface {
+	ScoreAlignment(ctx context.Context, actionType string, pathRisk float64) (alignmentScore float64, matchedGoals []string, rejected bool, rejectReason string)
+}
+
 // ReplayPackRecorder records decision replay packs.
 // Defined here to avoid import cycles — implemented in governance package.
 // Uses primitive parameters to avoid type coupling.
@@ -190,6 +197,12 @@ type GraphPlannerAdapter struct {
 
 	// providerRouting selects provider+model for task execution (Iteration 32).
 	providerRouting ProviderRoutingProvider
+
+	// goalAlignment scores actions against system goals (Iteration 35).
+	goalAlignment SystemGoalAlignmentProvider
+
+	// lastGoalTrace stores the most recent goal alignment trace for API visibility (Iteration 35).
+	lastGoalTrace []map[string]any
 
 	// lastSelection stores the most recent path selection for API visibility.
 	lastSelection *PathSelection
@@ -291,6 +304,17 @@ func (a *GraphPlannerAdapter) WithReplayRecorder(rr ReplayPackRecorder) *GraphPl
 func (a *GraphPlannerAdapter) WithProviderRouting(pr ProviderRoutingProvider) *GraphPlannerAdapter {
 	a.providerRouting = pr
 	return a
+}
+
+// WithGoalAlignment sets the system goal alignment provider for goal-driven scoring (Iteration 35).
+func (a *GraphPlannerAdapter) WithGoalAlignment(ga SystemGoalAlignmentProvider) *GraphPlannerAdapter {
+	a.goalAlignment = ga
+	return a
+}
+
+// LastGoalTrace returns the most recent goal alignment trace for API visibility (Iteration 35).
+func (a *GraphPlannerAdapter) LastGoalTrace() []map[string]any {
+	return a.lastGoalTrace
 }
 
 // LastSelection returns the most recent path selection for API visibility.
@@ -603,6 +627,44 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		}
 	}
 
+	// --- Goal alignment scoring (Iteration 35) ---
+	// Apply goal-alignment bonuses/rejections to paths. Fail-open: if provider is nil, unchanged.
+	a.lastGoalTrace = nil
+	if a.goalAlignment != nil {
+		var goalTrace []map[string]any
+		for i, p := range scored {
+			if len(p.Nodes) == 0 {
+				continue
+			}
+			firstAction := p.Nodes[0].ActionType
+			alignScore, matchedGoals, rejected, rejectReason :=
+				a.goalAlignment.ScoreAlignment(ctx, firstAction, p.TotalRisk)
+			if rejected {
+				scored[i].FinalScore = 0.0
+				goalTrace = append(goalTrace, map[string]any{
+					"action":                  firstAction,
+					"rejected_by_constraints": true,
+					"reject_reason":           rejectReason,
+				})
+			} else if alignScore > 0 {
+				scored[i].FinalScore = clamp01(p.FinalScore + alignScore)
+				goalTrace = append(goalTrace, map[string]any{
+					"action":          firstAction,
+					"alignment_score": alignScore,
+					"matched_goals":   matchedGoals,
+				})
+			}
+		}
+		if len(goalTrace) > 0 {
+			a.lastGoalTrace = goalTrace
+			a.auditEvent(ctx, "goal_alignment.scored", map[string]any{
+				"goal_type": decision.GoalType,
+				"goal_id":   decision.GoalID,
+				"trace":     goalTrace,
+			})
+		}
+	}
+
 	// Select best path.
 	selection := SelectBestPath(scored, config)
 	a.lastSelection = &selection
@@ -619,6 +681,7 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		"exploration_used": selection.ExplorationUsed,
 		"meta_mode":        metaMode,
 		"reason":           selection.Reason,
+		"goal_trace":       a.lastGoalTrace,
 	})
 
 	if selection.Selected == nil || len(selection.Selected.Nodes) == 0 {

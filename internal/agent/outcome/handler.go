@@ -174,6 +174,10 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 		return fmt.Errorf("evaluate outcome: %w", err)
 	}
 
+	// Compute utility values (Iteration 35).
+	// These are set before Save so the full record is persisted atomically.
+	computeUtilityValues(action, o)
+
 	if err := h.store.Save(ctx, o); err != nil {
 		return fmt.Errorf("persist outcome: %w", err)
 	}
@@ -198,6 +202,7 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 		zap.String("outcome_status", string(o.OutcomeStatus)),
 		zap.Bool("effect_detected", o.EffectDetected),
 		zap.Bool("improvement", o.Improvement),
+		zap.Float64("utility_score", o.UtilityScore),
 	)
 
 	// Update action memory (best-effort).
@@ -259,6 +264,10 @@ func (h *Handler) HandleOutcome(ctx context.Context, action actions.Action, resu
 
 	// Record resource outcome metrics (Iteration 29, best-effort).
 	h.recordResourceOutcome(ctx, action, *o)
+
+	// Emit learning signal for goal-driven utility (Iteration 35, best-effort).
+	// This records which goals benefited and which actions were ineffective.
+	h.emitUtilityLearningSignal(ctx, action, *o)
 
 	return nil
 }
@@ -652,4 +661,76 @@ func (h *Handler) recordResourceOutcome(ctx context.Context, action actions.Acti
 	// the outcome's measured latency if available.
 	// Use 0 for unmeasured values — tracker will compute proxies.
 	h.resourceOutcomeRecorder.RecordResourceOutcome(ctx, metaMode, goalType, 0, 1.0, pathLength, 0, 0)
+}
+
+// computeUtilityValues derives utility dimensions from goal type and outcome status
+// and writes them into the ActionOutcome in-place (Iteration 35).
+// Deterministic: same goal type + status → same values. Default = 0.
+func computeUtilityValues(action actions.Action, o *ActionOutcome) {
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	if goalType == "" {
+		// Fall back to goal_id prefix if no explicit goal type.
+		goalType = o.GoalID
+	}
+
+	// Outcome multiplier: success=1.0, neutral=0.3, failure=0.
+	var multiplier float64
+	switch o.OutcomeStatus {
+	case OutcomeSuccess:
+		multiplier = 1.0
+	case OutcomeNeutral:
+		multiplier = 0.3
+	case OutcomeFailure:
+		o.RiskCost = 0.5
+	}
+
+	switch goalType {
+	case "income", "monthly_income_growth":
+		o.IncomeValue = 1.0 * multiplier
+	case "safety", "family_stability":
+		o.FamilyValue = 1.0 * multiplier
+	case "efficiency", "owner_load_reduction":
+		o.OwnerReliefValue = 1.0 * multiplier
+	case "operational", "system_reliability":
+		o.FamilyValue = 0.5 * multiplier
+		o.IncomeValue = 0.3 * multiplier
+	case "learning", "system_learning":
+		o.OwnerReliefValue = 0.3 * multiplier
+	case "evolution", "system_improvement":
+		o.OwnerReliefValue = 0.5 * multiplier
+	}
+
+	o.UtilityScore = o.IncomeValue + o.FamilyValue + o.OwnerReliefValue - o.RiskCost
+}
+
+// emitUtilityLearningSignal records a utility.signal_recorded audit event that
+// the learning layer can consume. Matches goal IDs if available in action params.
+// Best-effort: if auditor is nil, silently no-ops (Iteration 35).
+func (h *Handler) emitUtilityLearningSignal(ctx context.Context, action actions.Action, o ActionOutcome) {
+	if h.auditor == nil {
+		return
+	}
+	if o.UtilityScore == 0 {
+		return // No meaningful signal — skip noise.
+	}
+
+	entityID, err := uuid.Parse(action.ID)
+	if err != nil {
+		entityID = uuid.New()
+	}
+
+	goalType, _ := action.Params["_ctx_goal_type"].(string)
+	effective := o.UtilityScore > 0
+	_ = h.auditor.RecordEvent(ctx, "action", entityID, "utility.signal_recorded", "system", "outcome_handler", map[string]any{
+		"action_id":          action.ID,
+		"action_type":        o.ActionType,
+		"goal_id":            o.GoalID,
+		"goal_type":          goalType,
+		"income_value":       o.IncomeValue,
+		"family_value":       o.FamilyValue,
+		"owner_relief_value": o.OwnerReliefValue,
+		"risk_cost":          o.RiskCost,
+		"utility_score":      o.UtilityScore,
+		"effective":          effective,
+	})
 }

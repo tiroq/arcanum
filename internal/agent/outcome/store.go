@@ -33,14 +33,16 @@ func (s *Store) Save(ctx context.Context, o *ActionOutcome) error {
 	const q = `
 		INSERT INTO agent_action_outcomes
 			(id, action_id, goal_id, action_type, target_type, target_id,
-			 outcome_status, effect_detected, improvement, before_state, after_state, evaluated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+			 outcome_status, effect_detected, improvement, before_state, after_state, evaluated_at,
+			 income_value, family_value, owner_relief_value, risk_cost, utility_score)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 
 	_, err = s.db.Exec(ctx, q,
 		o.ID, o.ActionID, o.GoalID, o.ActionType,
 		o.TargetType, o.TargetID, string(o.OutcomeStatus),
 		o.EffectDetected, o.Improvement,
 		beforeJSON, afterJSON, o.EvaluatedAt,
+		o.IncomeValue, o.FamilyValue, o.OwnerReliefValue, o.RiskCost, o.UtilityScore,
 	)
 	if err != nil {
 		return fmt.Errorf("insert outcome: %w", err)
@@ -64,7 +66,8 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]ActionOutcome, error)
 
 	query := `
 		SELECT id, action_id, goal_id, action_type, target_type, target_id,
-		       outcome_status, effect_detected, improvement, before_state, after_state, evaluated_at
+		       outcome_status, effect_detected, improvement, before_state, after_state, evaluated_at,
+		       income_value, family_value, owner_relief_value, risk_cost, utility_score
 		FROM agent_action_outcomes
 		WHERE 1=1`
 	args := []any{}
@@ -100,6 +103,7 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]ActionOutcome, error)
 			&o.TargetType, &o.TargetID, &o.OutcomeStatus,
 			&o.EffectDetected, &o.Improvement,
 			&beforeJSON, &afterJSON, &o.EvaluatedAt,
+			&o.IncomeValue, &o.FamilyValue, &o.OwnerReliefValue, &o.RiskCost, &o.UtilityScore,
 		); err != nil {
 			return nil, fmt.Errorf("scan outcome: %w", err)
 		}
