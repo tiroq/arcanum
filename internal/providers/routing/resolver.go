@@ -12,7 +12,9 @@ type Input struct {
 	// Policy is the routing policy to apply for all roles.
 	Policy RoutingPolicy
 
-	// Local model names per role. Empty strings fall back to LocalDefaultModel.
+	// Local model names per role. Used as a single-model local candidate when
+	// CatalogLocalCandidates is not set for the role.
+	// Empty strings fall back to LocalDefaultModel.
 	LocalDefaultModel string
 	LocalFastModel    string
 	LocalPlannerModel string
@@ -30,10 +32,12 @@ type Input struct {
 	// Must be non-empty when OpenRouter escalation is required and OpenRouterEnabled is true.
 	OpenRouterModel string
 
-	// DSLOverrides maps model roles to explicit profile DSL strings.
-	// When non-empty for a role the routing policy is bypassed for that role.
-	// DSL format: "model?provider=N&timeout=T|model2?provider=N2"
-	DSLOverrides map[providers.ModelRole]string
+	// CatalogLocalCandidates provides pre-built local execution candidates per role,
+	// loaded from the provider catalog (providers/<name>.yaml execution_profiles section).
+	// When set for a role, these candidates replace the single-model LocalFastModel /
+	// LocalPlannerModel / etc. approach for the local tier.
+	// Cloud and OpenRouter escalation candidates are still appended per escalation policy.
+	CatalogLocalCandidates map[providers.ModelRole][]profile.ModelCandidate
 }
 
 // RouteDecision records the routing decision made for a single model role.
@@ -44,7 +48,7 @@ type RouteDecision struct {
 	Role string
 
 	// EscalationLevel is the policy escalation applied.
-	// Empty when ProfileSource is "dsl_override".
+	// Empty when ProfileSource is "catalog".
 	EscalationLevel EscalationLevel
 
 	// Candidates is the resolved ordered candidate chain — primary first, fallbacks after.
@@ -57,7 +61,7 @@ type RouteDecision struct {
 	// Providers simply not in the escalation path are not listed here.
 	SkippedProviders []string
 
-	// ProfileSource is "dsl_override" when an explicit DSL string was used,
+	// ProfileSource is "catalog" when local candidates were loaded from the provider catalog,
 	// or "policy" when the routing policy built the candidate chain.
 	ProfileSource string
 
@@ -66,11 +70,12 @@ type RouteDecision struct {
 	Justification string
 }
 
-// ResolveProfiles builds a RoleProfiles from explicit DSL overrides (higher priority)
-// and routing policy (applied when no DSL override is set for a role).
+// ResolveProfiles builds a RoleProfiles from catalog-provided local candidates (higher priority)
+// and routing policy (applied when no catalog candidates are provided for a role).
 //
-// DSL overrides correspond to OLLAMA_*_PROFILE environment variables and always win
-// over policy — they allow per-role fine-grained control without editing the policy.
+// Catalog candidates come from the provider catalog's execution_profiles section and define
+// per-role model candidate chains with execution settings (think mode, timeout, JSON output).
+// Cloud and OpenRouter escalation candidates are appended per the routing policy.
 //
 // Returns:
 //   - RoleProfiles keyed by role, ready to pass into the execution engine.
@@ -103,21 +108,67 @@ func ResolveProfiles(input Input) (profile.RoleProfiles, []RouteDecision, error)
 
 // resolveRole returns the RouteDecision for a single role.
 func resolveRole(input Input, role providers.ModelRole) (RouteDecision, error) {
-	// Explicit DSL override wins over policy for this role.
-	if dsl, ok := input.DSLOverrides[role]; ok && dsl != "" {
-		candidates, err := profile.ParseProfile(dsl)
-		if err != nil {
-			return RouteDecision{}, fmt.Errorf("DSL override for role %q: %w", role, err)
+	// Catalog-provided local candidates take precedence over single-model config.
+	if catCandidates, ok := input.CatalogLocalCandidates[role]; ok && len(catCandidates) > 0 {
+		candidates := make([]profile.ModelCandidate, len(catCandidates))
+		copy(candidates, catCandidates)
+
+		available := []string{"ollama"}
+		var skipped []string
+
+		// Still apply escalation policy to append cloud/openrouter candidates.
+		rp := policyForRole(input.Policy, role)
+
+		if rp.Escalation.allowsCloud() {
+			if input.CloudEnabled {
+				cloudModel := input.CloudModel
+				if cloudModel == "" && len(catCandidates) > 0 {
+					cloudModel = catCandidates[0].ModelName
+				}
+				candidates = append(candidates, profile.ModelCandidate{
+					ModelName:    cloudModel,
+					ProviderName: "ollama-cloud",
+				})
+				available = append(available, "ollama-cloud")
+			} else {
+				skipped = append(skipped, "ollama-cloud (disabled)")
+			}
 		}
+
+		if rp.Escalation.allowsOpenRouter() {
+			if input.OpenRouterEnabled {
+				if input.OpenRouterModel == "" {
+					return RouteDecision{}, fmt.Errorf(
+						"role %q allows OpenRouter escalation but no model is configured"+
+							" (set ROUTING_OPENROUTER_MODEL or OPENROUTER_DEFAULT_MODEL)",
+						role,
+					)
+				}
+				candidates = append(candidates, profile.ModelCandidate{
+					ModelName:    input.OpenRouterModel,
+					ProviderName: "openrouter",
+				})
+				available = append(available, "openrouter")
+			} else {
+				skipped = append(skipped, "openrouter (disabled)")
+			}
+		}
+
 		return RouteDecision{
-			Role:          string(role),
-			Candidates:    candidates,
-			ProfileSource: "dsl_override",
-			Justification: fmt.Sprintf("explicit DSL profile set; policy bypassed for role %q", role),
+			Role:               string(role),
+			EscalationLevel:    rp.Escalation,
+			Candidates:         candidates,
+			AvailableProviders: available,
+			SkippedProviders:   skipped,
+			ProfileSource:      "catalog",
+			Justification: fmt.Sprintf(
+				"catalog profile applied: %d local candidates, escalation=%s",
+				len(catCandidates), rp.Escalation,
+			),
 		}, nil
 	}
 
-	// Build candidate chain from routing policy.
+	// Build candidate chain from routing policy (single-model fallback).
 	rp := policyForRole(input.Policy, role)
 	localModel := localModelForRole(input, role)
 

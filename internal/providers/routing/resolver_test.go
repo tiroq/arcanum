@@ -2,11 +2,13 @@ package routing_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tiroq/arcanum/internal/providers"
+	"github.com/tiroq/arcanum/internal/providers/profile"
 	"github.com/tiroq/arcanum/internal/providers/routing"
 )
 
@@ -89,27 +91,36 @@ func TestResolveProfiles_OpenRouterMissingModel_WhenEnabled(t *testing.T) {
 	assert.Contains(t, err.Error(), "OpenRouter")
 }
 
-// ── ResolveProfiles — DSL override ───────────────────────────────────────────
+// ── ResolveProfiles — catalog local candidates ───────────────────────────────
 
-func TestResolveProfiles_DSLOverrideWins(t *testing.T) {
-	// Even with planner policy set to local_cloud, a DSL override takes precedence.
+func TestResolveProfiles_CatalogCandidatesWin(t *testing.T) {
+	// When CatalogLocalCandidates are provided for a role, they replace the
+	// single-model LocalPlannerModel approach. Cloud escalation is still appended.
 	policy, _ := routing.NewRoutingPolicy("local_only", "local_only", "local_cloud", "local_cloud")
 
 	rp, decisions, err := routing.ResolveProfiles(routing.Input{
 		Policy:            policy,
 		LocalDefaultModel: "llama3.2",
 		CloudEnabled:      true,
-		CloudModel:        "llama3.2",
-		DSLOverrides: map[providers.ModelRole]string{
-			providers.RolePlanner: "qwen2.5:14b-instruct?provider=ollama&timeout=300",
+		CloudModel:        "qwen3:8b",
+		CatalogLocalCandidates: map[providers.ModelRole][]profile.ModelCandidate{
+			providers.RolePlanner: {
+				{ModelName: "qwen3:8b", ProviderName: "ollama", ThinkMode: profile.ThinkEnabled, Timeout: 4 * time.Minute},
+				{ModelName: "qwen3:1.7b", ProviderName: "ollama", ThinkMode: profile.ThinkEnabled, Timeout: 150 * time.Second},
+			},
 		},
 	})
 	require.NoError(t, err)
 
 	plannerCandidates := rp.CandidatesForRole(providers.RolePlanner)
-	require.Len(t, plannerCandidates, 1, "DSL override should produce exactly 1 candidate")
-	assert.Equal(t, "qwen2.5:14b-instruct", plannerCandidates[0].ModelName)
+	// 2 catalog candidates + 1 cloud escalation candidate.
+	require.Len(t, plannerCandidates, 3, "catalog candidates + cloud escalation")
+	assert.Equal(t, "qwen3:8b", plannerCandidates[0].ModelName)
 	assert.Equal(t, "ollama", plannerCandidates[0].ProviderName)
+	assert.Equal(t, profile.ThinkEnabled, plannerCandidates[0].ThinkMode)
+	assert.Equal(t, "qwen3:1.7b", plannerCandidates[1].ModelName)
+	assert.Equal(t, "qwen3:8b", plannerCandidates[2].ModelName)
+	assert.Equal(t, "ollama-cloud", plannerCandidates[2].ProviderName)
 
 	var plannerDecision *routing.RouteDecision
 	for i := range decisions {
@@ -119,7 +130,41 @@ func TestResolveProfiles_DSLOverrideWins(t *testing.T) {
 		}
 	}
 	require.NotNil(t, plannerDecision)
-	assert.Equal(t, "dsl_override", plannerDecision.ProfileSource)
+	assert.Equal(t, "catalog", plannerDecision.ProfileSource)
+	assert.Equal(t, []string{"ollama", "ollama-cloud"}, plannerDecision.AvailableProviders)
+}
+
+func TestResolveProfiles_CatalogCandidates_CloudDisabled(t *testing.T) {
+	// With catalog candidates but cloud disabled, only catalog candidates are used.
+	policy, _ := routing.NewRoutingPolicy("local_only", "local_only", "local_cloud", "local_cloud")
+
+	rp, decisions, err := routing.ResolveProfiles(routing.Input{
+		Policy:            policy,
+		LocalDefaultModel: "llama3.2",
+		CloudEnabled:      false,
+		CatalogLocalCandidates: map[providers.ModelRole][]profile.ModelCandidate{
+			providers.RolePlanner: {
+				{ModelName: "qwen3:8b", ProviderName: "ollama"},
+				{ModelName: "qwen3:1.7b", ProviderName: "ollama"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	candidates := rp.CandidatesForRole(providers.RolePlanner)
+	require.Len(t, candidates, 2, "cloud disabled: only catalog candidates")
+	assert.Equal(t, "ollama", candidates[0].ProviderName)
+	assert.Equal(t, "ollama", candidates[1].ProviderName)
+
+	var d *routing.RouteDecision
+	for i := range decisions {
+		if decisions[i].Role == "planner" {
+			d = &decisions[i]
+			break
+		}
+	}
+	require.NotNil(t, d)
+	assert.Contains(t, d.SkippedProviders, "ollama-cloud (disabled)")
 }
 
 // ── ResolveProfiles — local-only roles ───────────────────────────────────────
