@@ -338,6 +338,67 @@ func validateSingleEntry(entry ProviderCatalogFile, filename string) []Validatio
 	issues = append(issues, validateLimitsFields(entry, filename)...)
 	issues = append(issues, validateRoutingFields(entry, filename)...)
 	issues = append(issues, validateModels(entry, filename)...)
+	issues = append(issues, validateExecutionProfiles(entry, filename)...)
+	return issues
+}
+
+// validateExecutionProfiles validates that execution_profiles entries use ref:
+// and that every ref points to an enabled model in models[].
+func validateExecutionProfiles(entry ProviderCatalogFile, filename string) []ValidationIssue {
+	if len(entry.ExecutionProfiles) == 0 {
+		return nil
+	}
+
+	pName := entry.Provider.Name
+	var issues []ValidationIssue
+
+	// Build a set of enabled model names for fast lookup.
+	enabledModels := make(map[string]bool, len(entry.Models))
+	modelsWithExecution := make(map[string]bool, len(entry.Models))
+	for _, m := range entry.Models {
+		if m.Enabled {
+			enabledModels[m.Name] = true
+			// A model has execution config if any field is non-zero.
+			if m.Execution.TimeoutSeconds > 0 || m.Execution.Think != "" || m.Execution.JSONMode {
+				modelsWithExecution[m.Name] = true
+			}
+		}
+	}
+
+	for role, candidates := range entry.ExecutionProfiles {
+		for i, c := range candidates {
+			// Rule 1: ref must not be empty.
+			if c.Ref == "" {
+				issues = append(issues, ValidationIssue{
+					File:     filename,
+					Provider: pName,
+					Field:    fmt.Sprintf("execution_profiles.%s[%d].ref", role, i),
+					Code:     "execution_profile_ref_missing",
+					Message: fmt.Sprintf(
+						"execution_profiles.%s[%d]: ref is required — "+
+							"use 'ref: model_name' to reference a model in models[]",
+						role, i),
+					Severity: SeverityError,
+				})
+				continue
+			}
+
+			// Rule 2: ref must point to an enabled model.
+			if !enabledModels[c.Ref] {
+				issues = append(issues, ValidationIssue{
+					File:     filename,
+					Provider: pName,
+					Field:    fmt.Sprintf("execution_profiles.%s[%d].ref", role, i),
+					Code:     "execution_profile_ref_not_found",
+					Message: fmt.Sprintf(
+						"execution_profiles.%s[%d]: ref %q does not match any enabled model in models[]",
+						role, i, c.Ref),
+					Severity: SeverityError,
+				})
+			}
+		}
+	}
+
 	return issues
 }
 

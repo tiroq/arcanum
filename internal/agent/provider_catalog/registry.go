@@ -157,3 +157,24 @@ func (cr *CatalogRegistry) Targets() []RoutingTarget {
 	}
 	return result
 }
+
+// BuildModelExecutionMap constructs a map of "provider/model" → ModelExecutionSpec
+// for all enabled provider+model pairs in all catalog files.
+// Used by cmd/api-gateway/main.go to populate the router's execution config map
+// without creating an import cycle between provider_catalog and provider_routing.
+func BuildModelExecutionMap(catalogs []ProviderCatalogFile) map[string]ModelExecutionSpec {
+	m := make(map[string]ModelExecutionSpec)
+	for _, cat := range catalogs {
+		if !cat.Provider.Enabled {
+			continue
+		}
+		for _, model := range cat.Models {
+			if !model.Enabled {
+				continue
+			}
+			key := cat.Provider.Name + "/" + model.Name
+			m[key] = model.Execution
+		}
+	}
+	return m
+}
