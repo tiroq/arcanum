@@ -23,6 +23,7 @@ type Config struct {
 	GoogleTasks GoogleTasksConfig
 	Routing     RoutingPolicyConfig
 	Scheduler   SchedulerConfig
+	Agent       AgentConfig
 }
 
 type DatabaseConfig struct {
@@ -151,6 +152,13 @@ type SchedulerConfig struct {
 	TimeoutSeconds  int  `envconfig:"AGENT_SCHEDULER_TIMEOUT_SECONDS" default:"45"`
 }
 
+// AgentConfig holds configuration for the autonomous agent core behavior.
+type AgentConfig struct {
+	// SystemGoalsPath is the path to the system goals YAML file.
+	// Default: configs/system_goals.yaml
+	SystemGoalsPath string `envconfig:"AGENT_SYSTEM_GOALS_PATH" default:"configs/system_goals.yaml"`
+}
+
 // RoutingPolicyConfig holds the explicit routing policy for model/provider selection.
 // Per-role escalation levels control how far a role may escalate through provider tiers:
 // local (cheapest/fastest) → cloud → OpenRouter (most capable/costly).
@@ -264,6 +272,9 @@ func Load() (*Config, error) {
 	}
 	if err := envconfig.Process("", &cfg.Scheduler); err != nil {
 		return nil, fmt.Errorf("scheduler config: %w", err)
+	}
+	if err := envconfig.Process("", &cfg.Agent); err != nil {
+		return nil, fmt.Errorf("agent config: %w", err)
 	}
 
 	// Derive computed fields
