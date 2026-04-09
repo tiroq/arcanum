@@ -10,6 +10,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/arbitration"
 	"github.com/tiroq/arcanum/internal/agent/planning"
+	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/audit"
 )
 
@@ -131,12 +132,15 @@ type ResourceOptimizationProvider interface {
 	RecordOutcome(ctx context.Context, mode, goalType string, latencyMs, reasoningDepth, pathLength, tokenCost, executionCost float64)
 }
 
-// ProviderRoutingProvider selects the best provider+model for a task (Iteration 32).
-// Defined here to avoid import cycles — implemented in provider_routing package.
+// ProviderRoutingProvider selects the best provider+model for a task.
+// Returns a fully resolved ExecutionPlan with provider, model, fallback chain,
+// execution config (timeout, think mode, json_mode), score, and routing trace.
+// Implemented by provider_routing.GraphAdapter.
+// Fail-open: returns empty ExecutionPlan when routing is unavailable.
 type ProviderRoutingProvider interface {
 	RouteForTask(ctx context.Context, goalType, taskType, preferredRole string,
 		estimatedTokens, latencyBudgetMs int, confidenceRequired float64,
-		allowExternal bool) (selected string, selectedModel string, fallbackChain []string, reason string)
+		allowExternal bool) providerrouting.ExecutionPlan
 }
 
 // GraphPlannerAdapter adapts the decision graph layer to the
@@ -647,20 +651,27 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		override.StrategyType = "decision_graph"
 		override.Reason = "graph_path: " + selection.Reason
 
-		// --- Provider+model routing (Iteration 32) ---
+		// --- Provider+model routing via ExecutionPlan ---
 		// Select the best provider+model for this task. Fail-open: if routing
-		// is unavailable, provider/model fields remain empty.
+		// is unavailable, ExecutionPlan is empty and provider/model remain unset.
 		if a.providerRouting != nil {
-			selectedProvider, selectedModel, _, routeReason := a.providerRouting.RouteForTask(
+			plan := a.providerRouting.RouteForTask(
 				ctx, decision.GoalType, decision.GoalType, "", 0, 0, 0, true)
-			override.SelectedProvider = selectedProvider
-			override.SelectedModel = selectedModel
-			if selectedProvider != "" {
+			override.SelectedProvider = plan.Provider
+			override.SelectedModel = plan.Model
+			if !plan.IsEmpty() {
+				fallbackStrs := make([]string, 0, len(plan.Fallbacks))
+				for _, fb := range plan.Fallbacks {
+					fallbackStrs = append(fallbackStrs, fb.String())
+				}
 				a.auditEvent(ctx, "provider.target_selected", map[string]any{
-					"goal_type":         decision.GoalType,
-					"selected_provider": selectedProvider,
-					"selected_model":    selectedModel,
-					"reason":            routeReason,
+					"goal_type":      decision.GoalType,
+					"provider":       plan.Provider,
+					"model":          plan.Model,
+					"fallback_chain": fallbackStrs,
+					"execution":      plan.Execution,
+					"score":          plan.Score,
+					"reason":         plan.Reason,
 				})
 			}
 		}
