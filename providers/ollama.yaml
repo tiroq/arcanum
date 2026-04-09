@@ -18,27 +18,38 @@ routing:
   fallback_priority: 100
   allow_external: false
 
-models:
-  - name: qwen3:1.7b
-    enabled: true
-    roles: [fast]
-    capabilities: [json_mode, low_latency]
+cost:
+  cost_class: local
+  relative_cost: 0.0
+
+health:
+  enabled: true
+  reachable: true
+  degraded: false
+
+model_defaults:
+  enabled: true
+  capabilities: [json_mode]
+  max_output_tokens: 4096
+  cost:
     cost_class: local
     relative_cost: 0.0
+
+models:
+  - name: qwen3:1.7b
+    roles: [fast]
+    capabilities: [json_mode, low_latency]
+    preferred_for: [fast_tasks, classification, lightweight_generation]
     max_output_tokens: 4096
 
   - name: qwen2.5:7b-instruct
-    enabled: true
     roles: [planner, reviewer]
     capabilities: [json_mode]
-    cost_class: local
-    relative_cost: 0.0
+    preferred_for: [planning, reasoning, structured_tasks]
     max_output_tokens: 8192
 
   - name: llama3.2:3b
-    enabled: true
-    roles: [fast, batch]
+    roles: [fast, batch, fallback]
     capabilities: [json_mode, low_latency]
-    cost_class: local
-    relative_cost: 0.0
+    preferred_for: [batch_processing, cheap_fallback, parallel_tasks]
     max_output_tokens: 4096
