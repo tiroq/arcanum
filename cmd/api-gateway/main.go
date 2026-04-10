@@ -756,8 +756,13 @@ func run() error {
 		WithScheduling(schedAdapter).
 		WithMetaReflection(metaAdapter, metaReportStore).
 		WithObjective(objectiveGraphAdapter).
-		WithActuation(actuationGraphAdapter).
-		WithAutonomy(autonomyAdapter)
+		WithActuation(actuationGraphAdapter)
+
+	// Conditionally wire autonomy (avoids nil interface gotcha).
+	if autonomyAdapter != nil {
+		handlers = handlers.WithAutonomy(autonomyAdapter)
+	}
+
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -1349,4 +1354,221 @@ func (a actuationObjectiveAdapter) GetOverloadRisk(ctx context.Context) float64 
 		return 0
 	}
 	return risk.OverloadRisk
+}
+
+// --- Autonomy bridge adapters (Iteration 52) ---
+// These thin adapters bridge existing engines to autonomy.* provider interfaces
+// to avoid import cycles.
+
+type autonomyReflectionBridge struct {
+	me *reflection.MetaEngine
+}
+
+func (a autonomyReflectionBridge) RunReflection(ctx context.Context, force bool) (autonomy.ReflectionResult, error) {
+	if a.me == nil {
+		return autonomy.ReflectionResult{}, nil
+	}
+	report, err := a.me.RunReflection(ctx, force)
+	if err != nil {
+		return autonomy.ReflectionResult{}, err
+	}
+	return autonomy.ReflectionResult{
+		SignalCount: len(report.Inefficiencies) + len(report.Improvements),
+		RiskFlags:   len(report.RiskFlags),
+	}, nil
+}
+
+type autonomyObjectiveBridge struct {
+	oe *objective.Engine
+}
+
+func (a autonomyObjectiveBridge) Recompute(ctx context.Context) (autonomy.ObjectiveResult, error) {
+	if a.oe == nil {
+		return autonomy.ObjectiveResult{}, nil
+	}
+	summary, err := a.oe.Recompute(ctx)
+	if err != nil {
+		return autonomy.ObjectiveResult{}, err
+	}
+	return autonomy.ObjectiveResult{
+		NetUtility: summary.NetUtility,
+		RiskScore:  summary.RiskScore,
+	}, nil
+}
+
+type autonomyActuationBridge struct {
+	ae *actuation.Engine
+}
+
+func (a autonomyActuationBridge) Run(ctx context.Context) (autonomy.ActuationResult, error) {
+	if a.ae == nil {
+		return autonomy.ActuationResult{}, nil
+	}
+	result, err := a.ae.Run(ctx)
+	if err != nil {
+		return autonomy.ActuationResult{}, err
+	}
+	reviewNeeded := 0
+	for _, d := range result.Decisions {
+		if d.RequiresReview {
+			reviewNeeded++
+		}
+	}
+	return autonomy.ActuationResult{
+		DecisionCount: len(result.Decisions),
+		ReviewNeeded:  reviewNeeded,
+	}, nil
+}
+
+func (a autonomyActuationBridge) ListDecisions(ctx context.Context, limit int) ([]autonomy.ActuationDecisionInfo, error) {
+	if a.ae == nil {
+		return nil, nil
+	}
+	decisions, err := a.ae.ListDecisions(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]autonomy.ActuationDecisionInfo, len(decisions))
+	for i, d := range decisions {
+		result[i] = autonomy.ActuationDecisionInfo{
+			ID:             d.ID,
+			Type:           string(d.Type),
+			Status:         string(d.Status),
+			RequiresReview: d.RequiresReview,
+			Priority:       d.Priority,
+			ProposedAt:     d.ProposedAt,
+		}
+	}
+	return result, nil
+}
+
+type autonomySchedulingBridge struct {
+	se *scheduling.Engine
+}
+
+func (a autonomySchedulingBridge) RecomputeSlots(ctx context.Context) error {
+	if a.se == nil {
+		return nil
+	}
+	_, err := a.se.RecomputeSlots(ctx)
+	return err
+}
+
+type autonomyPortfolioBridge struct {
+	pe *portfolio.Engine
+}
+
+func (a autonomyPortfolioBridge) Rebalance(ctx context.Context) error {
+	if a.pe == nil {
+		return nil
+	}
+	_, err := a.pe.Rebalance(ctx)
+	return err
+}
+
+type autonomyDiscoveryBridge struct {
+	de *discovery.Engine
+}
+
+func (a autonomyDiscoveryBridge) Run(ctx context.Context) (autonomy.DiscoveryResult, error) {
+	if a.de == nil {
+		return autonomy.DiscoveryResult{}, nil
+	}
+	result := a.de.Run(ctx)
+	return autonomy.DiscoveryResult{
+		CandidatesFound: result.CandidatesCreated,
+	}, nil
+}
+
+type autonomySelfExtBridge struct {
+	se *selfextension.Engine
+}
+
+func (a autonomySelfExtBridge) ListProposals(ctx context.Context, limit int) ([]autonomy.SelfExtProposalInfo, error) {
+	if a.se == nil {
+		return nil, nil
+	}
+	proposals, err := a.se.ListProposals(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]autonomy.SelfExtProposalInfo, len(proposals))
+	for i, p := range proposals {
+		result[i] = autonomy.SelfExtProposalInfo{
+			ID:     p.ID,
+			Status: p.Status,
+			Title:  p.Title,
+		}
+	}
+	return result, nil
+}
+
+type autonomyPressureBridge struct {
+	fp *financialpressure.GraphAdapter
+}
+
+func (a autonomyPressureBridge) GetPressure(ctx context.Context) (float64, string) {
+	if a.fp == nil {
+		return 0, "low"
+	}
+	return a.fp.GetPressure(ctx)
+}
+
+type autonomyCapacityBridge struct {
+	ca *capacity.GraphAdapter
+}
+
+func (a autonomyCapacityBridge) GetOwnerLoadScore(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.OwnerLoadScore
+}
+
+type autonomyGovernanceBridge struct {
+	gc *governance.Controller
+}
+
+func (a autonomyGovernanceBridge) GetMode(ctx context.Context) string {
+	if a.gc == nil {
+		return "normal"
+	}
+	state := a.gc.GetState(ctx)
+	return state.Mode
+}
+
+func (a autonomyGovernanceBridge) SetMode(ctx context.Context, mode, reason string) error {
+	if a.gc == nil {
+		return nil
+	}
+	switch mode {
+	case "frozen":
+		b := true
+		_, err := a.gc.Freeze(ctx, governance.FreezeRequest{
+			RequestedBy:       "autonomy_orchestrator",
+			Reason:            reason,
+			FreezeLearning:    &b,
+			FreezePolicy:      &b,
+			FreezeExploration: &b,
+		})
+		return err
+	case "supervised_autonomy", "bounded_autonomy", "autonomous":
+		// Unfreeze and set to normal governance mode.
+		// The autonomy orchestrator handles the actual mode distinction.
+		_, err := a.gc.Unfreeze(ctx, governance.UnfreezeRequest{
+			RequestedBy: "autonomy_orchestrator",
+			Reason:      reason,
+		})
+		return err
+	default:
+		_, err := a.gc.Unfreeze(ctx, governance.UnfreezeRequest{
+			RequestedBy: "autonomy_orchestrator",
+			Reason:      reason,
+		})
+		return err
+	}
 }
