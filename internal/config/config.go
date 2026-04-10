@@ -243,6 +243,15 @@ func Load() (*Config, error) {
 	if err := envconfig.Process("", &cfg.Logging); err != nil {
 		return nil, fmt.Errorf("logging config: %w", err)
 	}
+	// Process CatalogDir (lives on ProvidersConfig, not a nested sub-struct).
+	var provTop struct {
+		CatalogDir string `envconfig:"PROVIDERS_CATALOG_DIR" default:"providers"`
+	}
+	if err := envconfig.Process("", &provTop); err != nil {
+		return nil, fmt.Errorf("providers config: %w", err)
+	}
+	cfg.Providers.CatalogDir = provTop.CatalogDir
+
 	if err := envconfig.Process("", &cfg.Providers.OpenAI); err != nil {
 		return nil, fmt.Errorf("openai config: %w", err)
 	}
