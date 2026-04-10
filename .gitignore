@@ -3,3 +3,5 @@ benchmarks/bench_*/*
 bin/
 .arcanum/pids/*.pid
 logs/*.log
+docs/*.s*.md
+docs/*.p*.md
