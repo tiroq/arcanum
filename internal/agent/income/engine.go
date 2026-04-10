@@ -26,14 +26,14 @@ type EngineFinancialTruthProvider interface {
 //
 //	create opportunity → score → generate proposals → persist → audit
 type Engine struct {
-	oppStore       *OpportunityStore
-	propStore      *ProposalStore
-	outcomeStr     *OutcomeStore
-	learningStore  *LearningStore
-	governance     EngineGovernanceProvider
-	truthProvider  EngineFinancialTruthProvider
-	auditor        audit.AuditRecorder
-	logger         *zap.Logger
+	oppStore      *OpportunityStore
+	propStore     *ProposalStore
+	outcomeStr    *OutcomeStore
+	learningStore *LearningStore
+	governance    EngineGovernanceProvider
+	truthProvider EngineFinancialTruthProvider
+	auditor       audit.AuditRecorder
+	logger        *zap.Logger
 }
 
 // NewEngine creates an Engine with required stores.
@@ -243,14 +243,14 @@ func (e *Engine) processAttribution(ctx context.Context, outcome IncomeOutcome) 
 	}
 
 	auditPayload := map[string]any{
-		"outcome_id":            attr.OutcomeID,
-		"opportunity_id":        attr.OpportunityID,
-		"opportunity_type":      attr.OpportunityType,
-		"estimated_value":       attr.EstimatedValue,
-		"actual_value":          attr.ActualValue,
-		"accuracy":              attr.Accuracy,
-		"outcome_status":        attr.OutcomeStatus,
-		"financially_verified":  financiallyVerified,
+		"outcome_id":           attr.OutcomeID,
+		"opportunity_id":       attr.OpportunityID,
+		"opportunity_type":     attr.OpportunityType,
+		"estimated_value":      attr.EstimatedValue,
+		"actual_value":         attr.ActualValue,
+		"accuracy":             attr.Accuracy,
+		"outcome_status":       attr.OutcomeStatus,
+		"financially_verified": financiallyVerified,
 	}
 	if financiallyVerified {
 		auditPayload["verified_value"] = verifiedValue
