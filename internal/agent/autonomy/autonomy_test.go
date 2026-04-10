@@ -569,6 +569,16 @@ func TestOrchestrator_HighFailureRateDowngrades(t *testing.T) {
 	cfg.Risk.AutoDowngrade = true
 	cfg.Risk.DowngradeMode = "supervised_autonomy"
 
+	// Disable all cycles except reflection so only it triggers.
+	cfg.Governance.AllowObjectiveRecompute = false
+	cfg.Governance.AllowPortfolioRebalance = false
+	cfg.Governance.AllowDiscovery = false
+	cfg.Governance.AllowSchedulingRecompute = false
+	cfg.Actuation.Enabled = false
+	cfg.Scheduling.Enabled = false
+	cfg.SelfExt.Enabled = false
+	cfg.Reporting.Enabled = false
+
 	auditor := &mockAuditor{}
 	// Wire a provider that always fails so cycles will fail.
 	ref := &mockReflection{err: fmt.Errorf("simulated failure")}
@@ -581,13 +591,13 @@ func TestOrchestrator_HighFailureRateDowngrades(t *testing.T) {
 	err := orch.Start(ctx)
 	require.NoError(t, err)
 
-	// Force cycles to be due by setting last run to distant past.
+	// First tick: reflection is due (never run), it fails → ConsecutiveFailures=1.
+	orch.tick()
+	// Reset last cycle time so reflection is due again.
 	orch.state.mu.Lock()
 	orch.state.LastCycleTimes["reflection"] = time.Now().Add(-48 * time.Hour)
 	orch.state.mu.Unlock()
-
-	// Two ticks with failure → should trigger downgrade.
-	orch.tick()
+	// Second tick: reflection fails again → ConsecutiveFailures=2 → downgrade.
 	orch.tick()
 
 	state := orch.GetState()
