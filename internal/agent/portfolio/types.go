@@ -64,7 +64,7 @@ const (
 // --- Strategy types ---
 
 const (
-	TypeConsulting          = "consulting"
+	TypeConsulting         = "consulting"
 	TypeAutomation         = "automation"
 	TypeAutomationServices = "automation_services"
 	TypeProduct            = "product"
@@ -76,7 +76,7 @@ const (
 
 // ValidStrategyTypes is the set of acceptable strategy types.
 var ValidStrategyTypes = map[string]bool{
-	TypeConsulting:          true,
+	TypeConsulting:         true,
 	TypeAutomation:         true,
 	TypeAutomationServices: true,
 	TypeProduct:            true,
@@ -121,16 +121,16 @@ type StrategyAllocation struct {
 
 // StrategyPerformance tracks real performance of a strategy over time.
 type StrategyPerformance struct {
-	StrategyID          string    `json:"strategy_id"`
-	OpportunityCount    int       `json:"opportunity_count"`
-	QualifiedCount      int       `json:"qualified_count"`
-	WonCount            int       `json:"won_count"`
-	LostCount           int       `json:"lost_count"`
-	TotalVerifiedRevenue float64  `json:"total_verified_revenue"`
-	TotalEstimatedHours float64   `json:"total_estimated_hours"`
-	ROIPerHour          float64   `json:"roi_per_hour"`
-	ConversionRate      float64   `json:"conversion_rate"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	StrategyID           string    `json:"strategy_id"`
+	OpportunityCount     int       `json:"opportunity_count"`
+	QualifiedCount       int       `json:"qualified_count"`
+	WonCount             int       `json:"won_count"`
+	LostCount            int       `json:"lost_count"`
+	TotalVerifiedRevenue float64   `json:"total_verified_revenue"`
+	TotalEstimatedHours  float64   `json:"total_estimated_hours"`
+	ROIPerHour           float64   `json:"roi_per_hour"`
+	ConversionRate       float64   `json:"conversion_rate"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // PortfolioSummary provides a top-level view of the portfolio state.
@@ -186,12 +186,12 @@ type RebalanceResult struct {
 // OpportunityStrategyMap maps income opportunity types to strategy types.
 var OpportunityStrategyMap = map[string]string{
 	// Spec-required mappings.
-	"consulting_lead":                TypeConsulting,
-	"automation_candidate":           TypeAutomationServices,
-	"product_feature_candidate":      TypeProduct,
-	"content_opportunity":            TypeContent,
-	"cost_saving_candidate":          TypeCostEfficiency,
-	"resale_or_repackage_candidate":  TypeAutomationServices, // deterministic: automation_services
+	"consulting_lead":               TypeConsulting,
+	"automation_candidate":          TypeAutomationServices,
+	"product_feature_candidate":     TypeProduct,
+	"content_opportunity":           TypeContent,
+	"cost_saving_candidate":         TypeCostEfficiency,
+	"resale_or_repackage_candidate": TypeAutomationServices, // deterministic: automation_services
 	// Backward-compatible short-form mappings.
 	"consulting":          TypeConsulting,
 	"automation":          TypeAutomation,
@@ -214,7 +214,7 @@ func MapOpportunityToStrategy(opportunityType string) string {
 
 // StrategyActionTypes maps strategy types to agent action types.
 var StrategyActionTypes = map[string][]string{
-	TypeConsulting:          {"propose_income_action", "schedule_work"},
+	TypeConsulting:         {"propose_income_action", "schedule_work"},
 	TypeAutomation:         {"propose_income_action", "analyze_opportunity"},
 	TypeAutomationServices: {"propose_income_action", "analyze_opportunity"},
 	TypeProduct:            {"propose_income_action", "analyze_opportunity", "schedule_work"},

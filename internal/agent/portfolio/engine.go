@@ -89,12 +89,12 @@ func (e *Engine) CreateStrategy(ctx context.Context, st Strategy) (Strategy, err
 	}
 
 	e.auditEvent(ctx, "strategy", saved.ID, "strategy.created", map[string]any{
-		"strategy_id":      saved.ID,
-		"name":             saved.Name,
-		"type":             saved.Type,
-		"expected_rph":     saved.ExpectedReturnPerHr,
-		"stability_score":  saved.StabilityScore,
-		"confidence":       saved.Confidence,
+		"strategy_id":         saved.ID,
+		"name":                saved.Name,
+		"type":                saved.Type,
+		"expected_rph":        saved.ExpectedReturnPerHr,
+		"stability_score":     saved.StabilityScore,
+		"confidence":          saved.Confidence,
 		"time_to_first_value": saved.TimeToFirstValue,
 	})
 
@@ -187,7 +187,7 @@ func (e *Engine) GetPortfolio(ctx context.Context) (Portfolio, error) {
 	divIdx := ComputeDiversificationIndex(allocHrsMap)
 
 	return Portfolio{
-		Entries:            entries,
+		Entries: entries,
 		Summary: PortfolioSummary{
 			TotalActiveStrategies: len(strategies),
 			TotalAllocatedHours:   totalAllocated,
@@ -227,14 +227,14 @@ func (e *Engine) RecordPerformance(ctx context.Context, perf StrategyPerformance
 	}
 
 	e.auditEvent(ctx, "strategy_performance", perf.StrategyID, "strategy.performance_updated", map[string]any{
-		"strategy_id":           perf.StrategyID,
+		"strategy_id":            perf.StrategyID,
 		"total_verified_revenue": perf.TotalVerifiedRevenue,
-		"total_estimated_hours": perf.TotalEstimatedHours,
-		"roi_per_hour":          perf.ROIPerHour,
-		"conversion_rate":       perf.ConversionRate,
-		"opportunity_count":     perf.OpportunityCount,
-		"won_count":             perf.WonCount,
-		"lost_count":            perf.LostCount,
+		"total_estimated_hours":  perf.TotalEstimatedHours,
+		"roi_per_hour":           perf.ROIPerHour,
+		"conversion_rate":        perf.ConversionRate,
+		"opportunity_count":      perf.OpportunityCount,
+		"won_count":              perf.WonCount,
+		"lost_count":             perf.LostCount,
 	})
 
 	return nil
@@ -316,11 +316,11 @@ func (e *Engine) Rebalance(ctx context.Context) (RebalanceResult, error) {
 		newAllocs = append(newAllocs, saved)
 
 		e.auditEvent(ctx, "strategy_allocation", st.ID, "portfolio.allocation_updated", map[string]any{
-			"strategy_id":      st.ID,
-			"allocated_hours":  hrs,
+			"strategy_id":       st.ID,
+			"allocated_hours":   hrs,
 			"allocation_weight": wt,
-			"roi_per_hour":     rawScores[st.ID],
-			"reason":           "rebalance",
+			"roi_per_hour":      rawScores[st.ID],
+			"reason":            "rebalance",
 		})
 	}
 
