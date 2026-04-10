@@ -33,11 +33,13 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/portfolio"
+	"github.com/tiroq/arcanum/internal/agent/pricing"
 	providercatalog "github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	"github.com/tiroq/arcanum/internal/agent/scheduling"
 	selfextension "github.com/tiroq/arcanum/internal/agent/self_extension"
 	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
@@ -581,6 +583,52 @@ func run() error {
 	graphAdapter.WithPortfolio(portfolioGraphAdapter)
 	logger.Info("strategic revenue portfolio initialised")
 
+	// Negotiation / pricing intelligence (Iteration 47).
+	// Creates the pricing pipeline: stores + engine + adapter.
+	// Integrates with financial pressure + capacity for informed floor pricing.
+	// Fail-open: if DB is unavailable, pricing engine starts but queries fail gracefully.
+	pricingProfileStore := pricing.NewProfileStore(pool)
+	pricingNegotiationStore := pricing.NewNegotiationStore(pool)
+	pricingOutcomeStore := pricing.NewOutcomeStore(pool)
+	pricingPerformanceStore := pricing.NewPerformanceStore(pool)
+	pricingEngine := pricing.NewEngine(pricingProfileStore, pricingNegotiationStore, pricingOutcomeStore, pricingPerformanceStore, auditor, logger)
+	pricingEngine.WithPressure(pricingFinancialPressureAdapter{fp: financialPressureAdapter})
+	pricingEngine.WithCapacity(pricingCapacityAdapter{ca: capacityGraphAdapter})
+	pricingGraphAdapter := pricing.NewGraphAdapter(pricingEngine, logger)
+	logger.Info("pricing intelligence initialised")
+
+	// Autonomous scheduling & calendar control (Iteration 48).
+	// Creates the scheduling pipeline: stores + slot generation config + engine + adapter.
+	// Integrates with capacity (owner load) and portfolio (strategy priority).
+	// Fail-open: if no calendar connector is set, recommendations still work.
+	schedSlotStore := scheduling.NewSlotStore(pool)
+	schedCandidateStore := scheduling.NewCandidateStore(pool)
+	schedDecisionStore := scheduling.NewDecisionStore(pool)
+	schedCalendarStore := scheduling.NewCalendarStore(pool)
+	schedFamilyCfg := scheduling.SlotGenerationConfig{
+		MaxDailyWorkHours:  familyCfg.MaxDailyWorkHours,
+		MinFamilyTimeHours: familyCfg.MinFamilyTimeHours,
+		WorkingWindows:     familyCfg.WorkingWindows,
+		DaysAhead:          1,
+	}
+	for _, br := range familyCfg.BlockedRanges {
+		schedFamilyCfg.BlockedRanges = append(schedFamilyCfg.BlockedRanges, scheduling.BlockedRange{
+			Reason: br.Reason,
+			Range:  br.Range,
+		})
+	}
+	schedEngine := scheduling.NewEngine(
+		schedSlotStore, schedCandidateStore, schedDecisionStore, schedCalendarStore,
+		schedFamilyCfg, auditor, logger,
+	)
+	schedEngine.WithCapacity(schedulingCapacityAdapter{ca: capacityGraphAdapter})
+	schedEngine.WithPortfolio(schedulingPortfolioAdapter{pa: portfolioGraphAdapter})
+	schedAdapter := scheduling.NewGraphAdapter(schedEngine, logger)
+	logger.Info("autonomous scheduling layer initialised",
+		zap.Float64("max_daily_hours", schedFamilyCfg.MaxDailyWorkHours),
+		zap.Int("blocked_ranges", len(schedFamilyCfg.BlockedRanges)),
+	)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -623,7 +671,9 @@ func run() error {
 		WithFinancialTruth(financialTruthEngine).
 		WithSelfExtension(selfExtAdapter).
 		WithExternalActions(extActAdapter).
-		WithPortfolio(portfolioGraphAdapter)
+		WithPortfolio(portfolioGraphAdapter).
+		WithPricing(pricingGraphAdapter).
+		WithScheduling(schedAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -698,4 +748,71 @@ func (a portfolioCapacityAdapter) GetAvailableHoursWeek(ctx context.Context) flo
 		return 0
 	}
 	return state.AvailableHoursWeek
+}
+
+// --- Scheduling bridge adapters (Iteration 48) ---
+// Bridge capacity and portfolio adapters to scheduling engine interfaces.
+
+type schedulingCapacityAdapter struct {
+	ca *capacity.GraphAdapter
+}
+
+func (a schedulingCapacityAdapter) GetAvailableHoursToday(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.AvailableHoursToday
+}
+
+func (a schedulingCapacityAdapter) GetOwnerLoadScore(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.OwnerLoadScore
+}
+
+type schedulingPortfolioAdapter struct {
+	pa *portfolio.GraphAdapter
+}
+
+func (a schedulingPortfolioAdapter) GetStrategyPriority(ctx context.Context, itemType string) float64 {
+	if a.pa == nil {
+		return 0
+	}
+	boost := a.pa.GetStrategyBoost(ctx, itemType)
+	return boost
+}
+
+// --- Pricing bridge adapters (Iteration 47) ---
+// These thin adapters bridge existing adapters to the pricing.FinancialPressureProvider
+// and pricing.CapacityProvider interfaces without introducing import cycles.
+
+type pricingFinancialPressureAdapter struct {
+	fp *financialpressure.GraphAdapter
+}
+
+func (a pricingFinancialPressureAdapter) GetPressure(ctx context.Context) (float64, string) {
+	if a.fp == nil {
+		return 0, "low"
+	}
+	return a.fp.GetPressure(ctx)
+}
+
+type pricingCapacityAdapter struct {
+	ca *capacity.GraphAdapter
+}
+
+func (a pricingCapacityAdapter) GetCapacityPenalty(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	return a.ca.GetCapacityPenalty(ctx)
 }
