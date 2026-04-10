@@ -186,6 +186,17 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/income/proposals", chain(handlers.IncomeProposals))
 	mux.Handle("/api/v1/agent/income/outcomes", chain(handlers.IncomeOutcomes))
 	mux.Handle("/api/v1/agent/income/signal", chain(handlers.IncomeSignal))
+	mux.Handle("/api/v1/agent/income/performance", chain(handlers.IncomePerformance))
+
+	// Agent signal ingestion (perception layer, Iteration 37)
+	mux.Handle("/api/v1/agent/signals/ingest", chain(handlers.SignalsIngest))
+	mux.Handle("/api/v1/agent/signals", chain(handlers.SignalsList))
+	mux.Handle("/api/v1/agent/signals/derived", chain(handlers.SignalsDerived))
+	mux.Handle("/api/v1/agent/signals/recompute", chain(handlers.SignalsRecompute))
+
+	// Agent financial pressure (Iteration 38)
+	mux.Handle("/api/v1/agent/financial/state", chain(handlers.FinancialState))
+	mux.Handle("/api/v1/agent/financial/pressure", chain(handlers.FinancialPressure))
 
 	return requestIDMiddleware(mux)
 }

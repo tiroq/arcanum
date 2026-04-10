@@ -21,6 +21,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
+	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
@@ -35,6 +36,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
 	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
@@ -87,6 +89,8 @@ type Handlers struct {
 	providerRouter     *providerrouting.GraphAdapter
 	catalogRegistry    *providercatalog.CatalogRegistry
 	incomeEngine       *income.Engine
+	signalEngine       *signals.Engine
+	financialPressure  *financialpressure.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -266,6 +270,18 @@ func (h *Handlers) WithProviderCatalog(cr *providercatalog.CatalogRegistry) *Han
 // WithIncomeEngine attaches the income engine for income pipeline API (Iteration 36).
 func (h *Handlers) WithIncomeEngine(ie *income.Engine) *Handlers {
 	h.incomeEngine = ie
+	return h
+}
+
+// WithSignalEngine attaches the signal engine for signal ingestion API (Iteration 37).
+func (h *Handlers) WithSignalEngine(se *signals.Engine) *Handlers {
+	h.signalEngine = se
+	return h
+}
+
+// WithFinancialPressure attaches the financial pressure adapter for pressure API (Iteration 38).
+func (h *Handlers) WithFinancialPressure(fp *financialpressure.GraphAdapter) *Handlers {
+	h.financialPressure = fp
 	return h
 }
 
@@ -3465,4 +3481,201 @@ func (h *Handlers) IncomeSignal(w http.ResponseWriter, r *http.Request) {
 	}
 	sig := h.incomeEngine.GetSignal(r.Context())
 	writeJSON(w, http.StatusOK, sig)
+}
+
+// IncomePerformance returns income attribution performance stats (Iteration 39).
+func (h *Handlers) IncomePerformance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.incomeEngine == nil {
+		writeJSON(w, http.StatusOK, income.PerformanceStats{})
+		return
+	}
+	stats := h.incomeEngine.GetPerformance(r.Context())
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// --- Signal Ingestion Handlers (Iteration 37) ---
+
+// SignalsIngest handles POST /api/v1/agent/signals/ingest.
+// Ingests a raw event through the signal pipeline.
+func (h *Handlers) SignalsIngest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.signalEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "signal engine not available")
+		return
+	}
+
+	var event signals.RawEvent
+	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if event.Source == "" {
+		writeError(w, r, http.StatusBadRequest, "source is required")
+		return
+	}
+	if event.EventType == "" {
+		writeError(w, r, http.StatusBadRequest, "event_type is required")
+		return
+	}
+
+	sig, err := h.signalEngine.Ingest(r.Context(), event)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	result := map[string]any{"event_id": event.ID, "normalized": sig != nil}
+	if sig != nil {
+		result["signal"] = sig
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+// SignalsList handles GET /api/v1/agent/signals.
+// Returns paginated normalised signals.
+func (h *Handlers) SignalsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.signalEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"signals": []any{}})
+		return
+	}
+
+	pg := parsePagination(r)
+	sigs, err := h.signalEngine.ListSignals(r.Context(), pg.PerPage, pg.Offset)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if sigs == nil {
+		sigs = []signals.Signal{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"signals": sigs})
+}
+
+// SignalsDerived handles GET /api/v1/agent/signals/derived.
+// Returns all derived state entries.
+func (h *Handlers) SignalsDerived(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.signalEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"derived": []any{}})
+		return
+	}
+
+	entries, err := h.signalEngine.ListDerived(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []signals.DerivedState{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"derived": entries})
+}
+
+// SignalsRecompute handles POST /api/v1/agent/signals/recompute.
+// Triggers a full recompute of derived state from active signals.
+func (h *Handlers) SignalsRecompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.signalEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "signal engine not available")
+		return
+	}
+
+	if err := h.signalEngine.RecomputeDerived(r.Context()); err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	entries, err := h.signalEngine.ListDerived(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []signals.DerivedState{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recomputed": true, "derived": entries})
+}
+
+// --- Financial pressure API (Iteration 38) ---
+
+// FinancialState handles GET (read) and POST (update) for the financial state.
+func (h *Handlers) FinancialState(w http.ResponseWriter, r *http.Request) {
+	if h.financialPressure == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "financial pressure not available")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		state, pressure, err := h.financialPressure.GetState(r.Context())
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"state":    state,
+			"pressure": pressure,
+		})
+
+	case http.MethodPost:
+		var req financialpressure.FinancialState
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if req.TargetIncomeMonth < 0 || req.MonthlyExpenses < 0 || req.CashBuffer < 0 || req.CurrentIncomeMonth < 0 {
+			writeError(w, r, http.StatusBadRequest, "all financial values must be ≥ 0")
+			return
+		}
+		saved, pressure, err := h.financialPressure.UpdateState(r.Context(), req)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"state":    saved,
+			"pressure": pressure,
+		})
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// FinancialPressure returns the current computed financial pressure.
+func (h *Handlers) FinancialPressure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.financialPressure == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pressure_score": 0,
+			"urgency_level":  "low",
+		})
+		return
+	}
+	_, pressure, err := h.financialPressure.GetState(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, pressure)
 }

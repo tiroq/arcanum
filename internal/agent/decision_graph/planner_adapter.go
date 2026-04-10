@@ -114,12 +114,51 @@ type SystemGoalAlignmentProvider interface {
 	ScoreAlignment(ctx context.Context, actionType string, pathRisk float64) (alignmentScore float64, matchedGoals []string, rejected bool, rejectReason string)
 }
 
+// SignalIngestionProvider supplies active signals and derived state from
+// the signal ingestion layer. Defined here to avoid import cycles —
+// implemented in signals package. Fail-open: returns nil/nil when unavailable.
+type SignalIngestionProvider interface {
+	// GetActiveSignals returns current signals and derived state map.
+	GetActiveSignals(ctx context.Context) ([]SignalIngestionExport, map[string]float64)
+	// CountSignalsForGoal returns how many active signals match the goal.
+	CountSignalsForGoal(ctx context.Context, goalType string) int
+}
+
+// SignalIngestionExport carries signal data across the provider boundary.
+type SignalIngestionExport struct {
+	SignalType  string
+	Severity    string
+	Confidence  float64
+	Value       float64
+	Source      string
+	ContextTags []string
+}
+
 // IncomeSignalProvider supplies a live income signal from the income engine.
 // Defined here to avoid import cycles — implemented in income package.
 // Fail-open: returns (0, 0) when nil or unavailable.
 type IncomeSignalProvider interface {
 	// GetIncomeSignal returns bestOpenScore ∈ [0,1] and the count of open opportunities.
 	GetIncomeSignal(ctx context.Context) (bestOpenScore float64, openOpportunities int)
+	// IsIncomeRelated reports whether the action type is income-oriented.
+	IsIncomeRelated(actionType string) bool
+}
+
+// OutcomeAttributionProvider supplies outcome-based feedback for income-related paths (Iteration 39).
+// Defined here to avoid import cycles — implemented in income package.
+// Fail-open: returns 0 when nil or unavailable.
+type OutcomeAttributionProvider interface {
+	// GetOutcomeFeedback returns a bounded score adjustment for the given action type
+	// based on real outcome learning data. Range: [-0.10, +0.10].
+	GetOutcomeFeedback(ctx context.Context, actionType string) float64
+}
+
+// FinancialPressureProvider supplies financial pressure signals.
+// Defined here to avoid import cycles — implemented in financial_pressure package.
+// Fail-open: returns (0, "low") when nil or unavailable.
+type FinancialPressureProvider interface {
+	// GetPressure returns pressureScore ∈ [0,1] and urgencyLevel (low|medium|high|critical).
+	GetPressure(ctx context.Context) (pressureScore float64, urgencyLevel string)
 	// IsIncomeRelated reports whether the action type is income-oriented.
 	IsIncomeRelated(actionType string) bool
 }
@@ -213,6 +252,15 @@ type GraphPlannerAdapter struct {
 
 	// incomeSignals provides a live income signal for path scoring (Iteration 36).
 	incomeSignals IncomeSignalProvider
+
+	// outcomeAttribution provides outcome-based feedback for income paths (Iteration 39).
+	outcomeAttribution OutcomeAttributionProvider
+
+	// financialPressure provides financial pressure signals for income path boosting (Iteration 38).
+	financialPressure FinancialPressureProvider
+
+	// signalIngestion provides active signals from the perception layer (Iteration 37).
+	signalIngestion SignalIngestionProvider
 
 	// lastGoalTrace stores the most recent goal alignment trace for API visibility (Iteration 35).
 	lastGoalTrace []map[string]any
@@ -328,6 +376,26 @@ func (a *GraphPlannerAdapter) WithGoalAlignment(ga SystemGoalAlignmentProvider) 
 // WithIncomeSignals sets the income signal provider for income-aware path scoring (Iteration 36).
 func (a *GraphPlannerAdapter) WithIncomeSignals(is IncomeSignalProvider) *GraphPlannerAdapter {
 	a.incomeSignals = is
+	return a
+}
+
+// WithOutcomeAttribution sets the outcome attribution provider for learning-based
+// feedback into income path scoring (Iteration 39).
+func (a *GraphPlannerAdapter) WithOutcomeAttribution(oa OutcomeAttributionProvider) *GraphPlannerAdapter {
+	a.outcomeAttribution = oa
+	return a
+}
+
+// WithFinancialPressure sets the financial pressure provider for pressure-aware scoring (Iteration 38).
+func (a *GraphPlannerAdapter) WithFinancialPressure(fp FinancialPressureProvider) *GraphPlannerAdapter {
+	a.financialPressure = fp
+	return a
+}
+
+// WithSignalIngestion sets the signal ingestion provider for perception-aware
+// path scoring (Iteration 37).
+func (a *GraphPlannerAdapter) WithSignalIngestion(si SignalIngestionProvider) *GraphPlannerAdapter {
+	a.signalIngestion = si
 	return a
 }
 
@@ -708,6 +776,83 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 				"best_open_score":    bestScore,
 				"open_opportunities": openCount,
 				"boost":              boost,
+			})
+		}
+	}
+
+	// --- Outcome attribution feedback (Iteration 39) ---
+	// Applies a bounded additive adjustment to income-related paths based on
+	// real outcome learning data. Positive outcomes boost; negative penalise.
+	// Fail-open: if provider is nil or insufficient data, paths unchanged.
+	if a.outcomeAttribution != nil {
+		for i, p := range scored {
+			if len(p.Nodes) == 0 {
+				continue
+			}
+			firstAction := p.Nodes[0].ActionType
+			if a.incomeSignals != nil && a.incomeSignals.IsIncomeRelated(firstAction) {
+				feedback := a.outcomeAttribution.GetOutcomeFeedback(ctx, firstAction)
+				if feedback != 0 {
+					scored[i].FinalScore = clamp01(p.FinalScore + feedback)
+				}
+			}
+		}
+		a.auditEvent(ctx, "outcome.attribution_applied", map[string]any{
+			"goal_type": decision.GoalType,
+		})
+	}
+
+	// --- Signal ingestion boost (Iteration 37) ---
+	// Applies a bounded additive boost to paths whose first action matches
+	// active signals for the current goal type. Fail-open: paths unchanged
+	// if provider is nil or no matching signals.
+	if a.signalIngestion != nil {
+		matchCount := a.signalIngestion.CountSignalsForGoal(ctx, decision.GoalType)
+		if matchCount > 0 {
+			const signalBoostPerMatch = 0.03
+			const signalBoostMax = 0.10
+			boost := float64(matchCount) * signalBoostPerMatch
+			if boost > signalBoostMax {
+				boost = signalBoostMax
+			}
+			for i, p := range scored {
+				if len(p.Nodes) > 0 {
+					scored[i].FinalScore = clamp01(p.FinalScore + boost)
+				}
+			}
+			a.auditEvent(ctx, "signals.boost_applied", map[string]any{
+				"goal_type":   decision.GoalType,
+				"match_count": matchCount,
+				"boost":       boost,
+			})
+		}
+	}
+
+	// --- Financial pressure boost (Iteration 38) ---
+	// Applies a bounded additive boost to income-related paths based on the
+	// current financial pressure score (pressure × PressurePathBoostMax).
+	// Only paths whose first action is income-oriented receive the boost.
+	// Must NOT override safety: boost is clamped so total score ≤ 1.0.
+	// Fail-open: if provider is nil or pressure is 0, paths unchanged.
+	if a.financialPressure != nil {
+		pressure, urgency := a.financialPressure.GetPressure(ctx)
+		if pressure > 0 {
+			// PressurePathBoostMax = 0.20 (defined in financial_pressure package).
+			const pressurePathBoostMax = 0.20
+			boost := pressure * pressurePathBoostMax
+			for i, p := range scored {
+				if len(p.Nodes) == 0 {
+					continue
+				}
+				if a.financialPressure.IsIncomeRelated(p.Nodes[0].ActionType) {
+					scored[i].FinalScore = clamp01(p.FinalScore + boost)
+				}
+			}
+			a.auditEvent(ctx, "financial.pressure_applied", map[string]any{
+				"goal_type":      decision.GoalType,
+				"pressure_score": pressure,
+				"urgency_level":  urgency,
+				"path_boost":     boost,
 			})
 		}
 	}

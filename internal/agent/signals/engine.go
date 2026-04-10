@@ -83,11 +83,11 @@ func (e *Engine) Ingest(ctx context.Context, event RawEvent) (*Signal, error) {
 		return &sig, err
 	}
 	e.auditEvent(ctx, "signals.normalized", map[string]any{
-		"signal_id":   sig.ID,
-		"signal_type": sig.SignalType,
-		"severity":    sig.Severity,
-		"confidence":  sig.Confidence,
-		"value":       sig.Value,
+		"signal_id":    sig.ID,
+		"signal_type":  sig.SignalType,
+		"severity":     sig.Severity,
+		"confidence":   sig.Confidence,
+		"value":        sig.Value,
 		"raw_event_id": event.ID,
 	})
 

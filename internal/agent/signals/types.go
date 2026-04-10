@@ -5,13 +5,13 @@ import "time"
 // --- Signal types ---
 
 const (
-	SignalFailedJobs       = "failed_jobs"
-	SignalDeadLetterSpike  = "dead_letter_spike"
-	SignalPendingTasks     = "pending_tasks"
-	SignalOverdueTasks     = "overdue_tasks"
-	SignalCostSpike        = "cost_spike"
-	SignalIncomeGap        = "income_gap"
-	SignalNewOpportunity   = "new_opportunity"
+	SignalFailedJobs        = "failed_jobs"
+	SignalDeadLetterSpike   = "dead_letter_spike"
+	SignalPendingTasks      = "pending_tasks"
+	SignalOverdueTasks      = "overdue_tasks"
+	SignalCostSpike         = "cost_spike"
+	SignalIncomeGap         = "income_gap"
+	SignalNewOpportunity    = "new_opportunity"
 	SignalHighCognitiveLoad = "high_cognitive_load"
 )
 
@@ -56,12 +56,12 @@ const (
 
 // RawEvent represents an ingested raw event before normalisation.
 type RawEvent struct {
-	ID         string            `json:"id"`
-	Source     string            `json:"source"`
-	EventType  string            `json:"event_type"`
-	Payload    map[string]any    `json:"payload"`
-	ObservedAt time.Time         `json:"observed_at"`
-	CreatedAt  time.Time         `json:"created_at"`
+	ID         string         `json:"id"`
+	Source     string         `json:"source"`
+	EventType  string         `json:"event_type"`
+	Payload    map[string]any `json:"payload"`
+	ObservedAt time.Time      `json:"observed_at"`
+	CreatedAt  time.Time      `json:"created_at"`
 }
 
 // Signal represents a normalised signal derived from a raw event.
@@ -103,7 +103,7 @@ var GoalImpact = map[string][]string{
 
 // ActiveSignals is the set of current signals exposed to the planner.
 type ActiveSignals struct {
-	Signals []Signal          `json:"signals"`
+	Signals []Signal           `json:"signals"`
 	Derived map[string]float64 `json:"derived"`
 }
 

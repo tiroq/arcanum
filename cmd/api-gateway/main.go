@@ -18,6 +18,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
+	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
@@ -32,6 +33,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
 	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
@@ -447,13 +449,35 @@ func run() error {
 	incomeOppStore := income.NewOpportunityStore(pool)
 	incomePropStore := income.NewProposalStore(pool)
 	incomeOutcomeStore := income.NewOutcomeStore(pool)
+	incomeLearningStore := income.NewLearningStore(pool)
 	incomeEngine := income.NewEngine(incomeOppStore, incomePropStore, incomeOutcomeStore, auditor, logger)
+	incomeEngine.WithLearning(incomeLearningStore)
 	if govAdapter != nil {
 		incomeEngine.WithGovernance(govAdapter)
 	}
 	incomeGraphAdapter := income.NewGraphAdapter(incomeEngine, logger)
 	graphAdapter.WithIncomeSignals(incomeGraphAdapter)
+	graphAdapter.WithOutcomeAttribution(incomeGraphAdapter)
 	logger.Info("income engine initialised")
+
+	// Signal ingestion (Iteration 37).
+	// Creates the signal pipeline: stores + engine + graph adapter.
+	// Fail-open: if DB is unavailable, signal engine still starts but queries fail gracefully.
+	rawEventStore := signals.NewRawEventStore(pool)
+	signalStore := signals.NewSignalStore(pool)
+	derivedStateStore := signals.NewDerivedStateStore(pool)
+	signalEngine := signals.NewEngine(rawEventStore, signalStore, derivedStateStore, auditor, logger)
+	signalGraphAdapter := signals.NewGraphAdapter(signalEngine, logger)
+	graphAdapter.WithSignalIngestion(signalGraphAdapter)
+	logger.Info("signal ingestion engine initialised")
+
+	// Financial pressure (Iteration 38).
+	// Creates the financial pressure pipeline: store + adapter.
+	// Fail-open: if DB is unavailable, pressure returns 0 (no boost).
+	financialPressureStore := financialpressure.NewStore(pool)
+	financialPressureAdapter := financialpressure.NewGraphAdapter(financialPressureStore, auditor, logger)
+	graphAdapter.WithFinancialPressure(financialPressureAdapter)
+	logger.Info("financial pressure layer initialised")
 
 	adaptivePlanner.WithStrategy(graphAdapter)
 
@@ -489,7 +513,9 @@ func run() error {
 		WithGovernance(govController, govReplayBuilder).
 		WithProviderRouting(providerRoutingAdapter).
 		WithProviderCatalog(catalogRegistry).
-		WithIncomeEngine(incomeEngine)
+		WithIncomeEngine(incomeEngine).
+		WithSignalEngine(signalEngine).
+		WithFinancialPressure(financialPressureAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{

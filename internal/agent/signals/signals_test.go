@@ -62,10 +62,10 @@ func TestNormalize_DeadLetterSpike(t *testing.T) {
 
 func TestNormalize_PendingTasks(t *testing.T) {
 	e := RawEvent{
-		ID:        "e3",
-		Source:    "scheduler",
-		EventType: "pending_tasks",
-		Payload:   map[string]any{"count": float64(15)},
+		ID:         "e3",
+		Source:     "scheduler",
+		EventType:  "pending_tasks",
+		Payload:    map[string]any{"count": float64(15)},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -82,10 +82,10 @@ func TestNormalize_PendingTasks(t *testing.T) {
 
 func TestNormalize_OverdueTasks(t *testing.T) {
 	e := RawEvent{
-		ID:        "e4",
-		Source:    "scheduler",
-		EventType: "overdue_tasks",
-		Payload:   map[string]any{"count": float64(12)},
+		ID:         "e4",
+		Source:     "scheduler",
+		EventType:  "overdue_tasks",
+		Payload:    map[string]any{"count": float64(12)},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -102,10 +102,10 @@ func TestNormalize_OverdueTasks(t *testing.T) {
 
 func TestNormalize_CostSpike(t *testing.T) {
 	e := RawEvent{
-		ID:        "e5",
-		Source:    "billing",
-		EventType: "cost_spike",
-		Payload:   map[string]any{"amount": float64(75)},
+		ID:         "e5",
+		Source:     "billing",
+		EventType:  "cost_spike",
+		Payload:    map[string]any{"amount": float64(75)},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -122,10 +122,10 @@ func TestNormalize_CostSpike(t *testing.T) {
 
 func TestNormalize_IncomeGap(t *testing.T) {
 	e := RawEvent{
-		ID:        "e6",
-		Source:    "income_tracker",
-		EventType: "income_gap",
-		Payload:   map[string]any{"gap": float64(3000)},
+		ID:         "e6",
+		Source:     "income_tracker",
+		EventType:  "income_gap",
+		Payload:    map[string]any{"gap": float64(3000)},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -142,10 +142,10 @@ func TestNormalize_IncomeGap(t *testing.T) {
 
 func TestNormalize_NewOpportunity(t *testing.T) {
 	e := RawEvent{
-		ID:        "e7",
-		Source:    "scout",
-		EventType: "new_opportunity",
-		Payload:   map[string]any{"estimated_value": float64(2000), "opportunity_type": "consulting"},
+		ID:         "e7",
+		Source:     "scout",
+		EventType:  "new_opportunity",
+		Payload:    map[string]any{"estimated_value": float64(2000), "opportunity_type": "consulting"},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -162,10 +162,10 @@ func TestNormalize_NewOpportunity(t *testing.T) {
 
 func TestNormalize_HighCognitiveLoad(t *testing.T) {
 	e := RawEvent{
-		ID:        "e8",
-		Source:    "self_monitor",
-		EventType: "high_cognitive_load",
-		Payload:   map[string]any{"score": float64(0.9)},
+		ID:         "e8",
+		Source:     "self_monitor",
+		EventType:  "high_cognitive_load",
+		Payload:    map[string]any{"score": float64(0.9)},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -182,10 +182,10 @@ func TestNormalize_HighCognitiveLoad(t *testing.T) {
 
 func TestNormalize_UnknownEventType(t *testing.T) {
 	e := RawEvent{
-		ID:        "e9",
-		Source:    "unknown",
-		EventType: "something_random",
-		Payload:   map[string]any{},
+		ID:         "e9",
+		Source:     "unknown",
+		EventType:  "something_random",
+		Payload:    map[string]any{},
 		ObservedAt: time.Now().UTC(),
 	}
 	_, ok := Normalize(e)
@@ -196,10 +196,10 @@ func TestNormalize_UnknownEventType(t *testing.T) {
 
 func TestNormalize_MissingPayloadField(t *testing.T) {
 	e := RawEvent{
-		ID:        "e10",
-		Source:    "worker",
-		EventType: "job_failed",
-		Payload:   map[string]any{},
+		ID:         "e10",
+		Source:     "worker",
+		EventType:  "job_failed",
+		Payload:    map[string]any{},
 		ObservedAt: time.Now().UTC(),
 	}
 	sig, ok := Normalize(e)
@@ -393,10 +393,10 @@ func TestGraphAdapter_NilEngine(t *testing.T) {
 
 func TestSeverityFromValue(t *testing.T) {
 	tests := []struct {
-		value   float64
-		med     float64
-		high    float64
-		want    string
+		value float64
+		med   float64
+		high  float64
+		want  string
 	}{
 		{1, 3, 10, SeverityLow},
 		{5, 3, 10, SeverityMedium},
