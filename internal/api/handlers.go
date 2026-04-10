@@ -106,8 +106,10 @@ type Handlers struct {
 	externalActions    *externalactions.GraphAdapter
 	portfolioAdapter   *portfolio.GraphAdapter
 	pricingAdapter     *pricing.GraphAdapter
-	schedulingAdapter  *scheduling.GraphAdapter
-	logger             *zap.Logger
+	schedulingAdapter      *scheduling.GraphAdapter
+	metaReflectionAdapter  *reflection.MetaGraphAdapter
+	metaReportStore        *reflection.ReportStore
+	logger                 *zap.Logger
 }
 
 // NewHandlers creates Handlers with required dependencies.
@@ -346,6 +348,13 @@ func (h *Handlers) WithPricing(pa *pricing.GraphAdapter) *Handlers {
 // WithScheduling attaches the scheduling adapter for calendar-aware scheduling (Iteration 48).
 func (h *Handlers) WithScheduling(sa *scheduling.GraphAdapter) *Handlers {
 	h.schedulingAdapter = sa
+	return h
+}
+
+// WithMetaReflection attaches the meta-reflection adapter and report store (Iteration 49).
+func (h *Handlers) WithMetaReflection(adapter *reflection.MetaGraphAdapter, store *reflection.ReportStore) *Handlers {
+	h.metaReflectionAdapter = adapter
+	h.metaReportStore = store
 	return h
 }
 
@@ -1649,7 +1658,69 @@ func (h *Handlers) ListReflections(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListJournalDecisions lists durable planning decisions (GET /api/v1/agent/journal).
+// MetaReflectionReports lists meta-reflection reports (GET /api/v1/agent/reflection/reports).
+func (h *Handlers) MetaReflectionReports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.metaReportStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "meta-reflection not configured")
+		return
+	}
+	pg := parsePagination(r)
+	reports, err := h.metaReportStore.ListReports(r.Context(), pg.PerPage)
+	if err != nil {
+		h.logger.Error("meta_reflection_list_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reports": reports,
+	})
+}
+
+// MetaReflectionRun triggers a meta-reflection cycle (POST /api/v1/agent/reflection/run).
+func (h *Handlers) MetaReflectionRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.metaReflectionAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "meta-reflection not configured")
+		return
+	}
+	report, err := h.metaReflectionAdapter.RunReflection(r.Context(), true)
+	if err != nil {
+		h.logger.Error("meta_reflection_run_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "meta-reflection run failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+// MetaReflectionLatest returns the latest meta-reflection report (GET /api/v1/agent/reflection/latest).
+func (h *Handlers) MetaReflectionLatest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.metaReportStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "meta-reflection not configured")
+		return
+	}
+	report, err := h.metaReportStore.GetLatest(r.Context())
+	if err != nil {
+		h.logger.Error("meta_reflection_latest_failed", zap.Error(err))
+		writeError(w, r, http.StatusInternalServerError, "query failed")
+		return
+	}
+	if report == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"report": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
 func (h *Handlers) ListJournalDecisions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")

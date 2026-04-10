@@ -629,6 +629,19 @@ func run() error {
 		zap.Int("blocked_ranges", len(schedFamilyCfg.BlockedRanges)),
 	)
 
+	// Meta-reflection & meta-learning layer (Iteration 49).
+	metaReportStore := reflection.NewReportStore(pool)
+	metaAggregator := reflection.NewAggregator(logger).
+		WithIncome(reflectionIncomeAdapter{ie: incomeEngine}).
+		WithFinancialTruth(reflectionTruthAdapter{ft: financialTruthEngine}).
+		WithSignals(reflectionSignalAdapter{se: signalEngine}).
+		WithCapacity(reflectionCapacityAdapter{ca: capacityGraphAdapter}).
+		WithExternalActions(reflectionExtActAdapter{ea: extActAdapter})
+	metaTrigger := reflection.NewTrigger(reflection.DefaultTriggerConfig())
+	metaReflectionEngine := reflection.NewMetaEngine(metaAggregator, metaTrigger, metaReportStore, auditor, logger)
+	metaAdapter := reflection.NewMetaGraphAdapter(metaReflectionEngine, logger)
+	logger.Info("meta-reflection layer initialised")
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -673,7 +686,8 @@ func run() error {
 		WithExternalActions(extActAdapter).
 		WithPortfolio(portfolioGraphAdapter).
 		WithPricing(pricingGraphAdapter).
-		WithScheduling(schedAdapter)
+		WithScheduling(schedAdapter).
+		WithMetaReflection(metaAdapter, metaReportStore)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -815,4 +829,100 @@ func (a pricingCapacityAdapter) GetCapacityPenalty(ctx context.Context) float64 
 		return 0
 	}
 	return a.ca.GetCapacityPenalty(ctx)
+}
+
+// --- Meta-reflection bridge adapters (Iteration 49) ---
+// These thin adapters bridge existing engines/adapters to reflection.* interfaces
+// to avoid import cycles.
+
+type reflectionIncomeAdapter struct {
+	ie *income.Engine
+}
+
+func (a reflectionIncomeAdapter) GetPerformanceStats(ctx context.Context) (totalOutcomes int, successRate, avgAccuracy, estimatedIncome float64) {
+	if a.ie == nil {
+		return 0, 0, 0, 0
+	}
+	perf := a.ie.GetPerformance(ctx)
+	sig := a.ie.GetSignal(ctx)
+	return perf.TotalOutcomes, perf.OverallSuccessRate, perf.OverallAccuracy, float64(sig.OpenOpportunities) * sig.BestOpenScore
+}
+
+func (a reflectionIncomeAdapter) GetOpportunityCount(ctx context.Context) int {
+	if a.ie == nil {
+		return 0
+	}
+	sig := a.ie.GetSignal(ctx)
+	return sig.OpenOpportunities
+}
+
+type reflectionTruthAdapter struct {
+	ft *financialtruth.Engine
+}
+
+func (a reflectionTruthAdapter) GetVerifiedIncome(ctx context.Context) float64 {
+	if a.ft == nil {
+		return 0
+	}
+	ts := a.ft.GetTruthSignal(ctx)
+	return ts.VerifiedMonthlyIncome
+}
+
+type reflectionSignalAdapter struct {
+	se *signals.Engine
+}
+
+func (a reflectionSignalAdapter) GetDerivedState(ctx context.Context) map[string]float64 {
+	if a.se == nil {
+		return nil
+	}
+	active := a.se.GetActiveSignals(ctx)
+	return active.Derived
+}
+
+type reflectionCapacityAdapter struct {
+	ca *capacity.GraphAdapter
+}
+
+func (a reflectionCapacityAdapter) GetOwnerLoadScore(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.OwnerLoadScore
+}
+
+func (a reflectionCapacityAdapter) GetAvailableHoursToday(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.AvailableHoursToday
+}
+
+type reflectionExtActAdapter struct {
+	ea *externalactions.GraphAdapter
+}
+
+func (a reflectionExtActAdapter) GetRecentActionCounts(ctx context.Context, since time.Time) map[string]int {
+	if a.ea == nil {
+		return nil
+	}
+	actions, err := a.ea.ListActions(ctx, 200)
+	if err != nil {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, act := range actions {
+		if act.CreatedAt.After(since) {
+			counts[act.ActionType]++
+		}
+	}
+	return counts
 }

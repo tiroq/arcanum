@@ -255,5 +255,10 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/pricing/outcomes", chain(handlers.PricingOutcomes))
 	mux.Handle("/api/v1/agent/pricing/performance", chain(handlers.PricingPerformance))
 
+	// Agent meta-reflection & meta-learning (Iteration 49)
+	mux.Handle("/api/v1/agent/reflection/reports", chain(handlers.MetaReflectionReports))
+	mux.Handle("/api/v1/agent/reflection/run", chain(handlers.MetaReflectionRun))
+	mux.Handle("/api/v1/agent/reflection/latest", chain(handlers.MetaReflectionLatest))
+
 	return requestIDMiddleware(mux)
 }
