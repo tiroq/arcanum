@@ -6,13 +6,13 @@ import "fmt"
 
 // Analysis thresholds — all constants, no randomness.
 const (
-	LowEfficiencyThreshold     = 15.0  // value_per_hour below this → inefficiency
-	OverloadThreshold          = 0.7   // owner_load_score above this → risk
-	PricingMisalignmentThresh  = 0.7   // avg_accuracy below this → pricing issue
-	IncomeInstabilityMinWins   = 3     // fewer verified wins → instability risk
-	AutomationMinRepeats       = 3     // repeated manual actions ≥ this → automation opportunity
-	ReflectionSignalBoostMax   = 0.10  // max scoring boost from reflection signals
-	ReflectionSignalBoostScale = 0.05  // per-signal strength multiplier
+	LowEfficiencyThreshold     = 15.0 // value_per_hour below this → inefficiency
+	OverloadThreshold          = 0.7  // owner_load_score above this → risk
+	PricingMisalignmentThresh  = 0.7  // avg_accuracy below this → pricing issue
+	IncomeInstabilityMinWins   = 3    // fewer verified wins → instability risk
+	AutomationMinRepeats       = 3    // repeated manual actions ≥ this → automation opportunity
+	ReflectionSignalBoostMax   = 0.10 // max scoring boost from reflection signals
+	ReflectionSignalBoostScale = 0.05 // per-signal strength multiplier
 )
 
 // MetaAnalyze runs deterministic analysis rules on aggregated data

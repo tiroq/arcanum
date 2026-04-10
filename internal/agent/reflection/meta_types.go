@@ -10,17 +10,17 @@ import (
 type ReflectionSignalType string
 
 const (
-	SignalLowEfficiency        ReflectionSignalType = "low_efficiency"
-	SignalPricingMisalignment  ReflectionSignalType = "pricing_misalignment"
-	SignalOverloadRisk         ReflectionSignalType = "overload_risk"
-	SignalIncomeInstability    ReflectionSignalType = "income_instability"
+	SignalLowEfficiency         ReflectionSignalType = "low_efficiency"
+	SignalPricingMisalignment   ReflectionSignalType = "pricing_misalignment"
+	SignalOverloadRisk          ReflectionSignalType = "overload_risk"
+	SignalIncomeInstability     ReflectionSignalType = "income_instability"
 	SignalAutomationOpportunity ReflectionSignalType = "automation_opportunity"
 )
 
 // ReflectionSignal carries a scored insight for the decision graph.
 type ReflectionSignal struct {
 	SignalType  ReflectionSignalType `json:"signal_type"`
-	Strength    float64              `json:"strength"`     // [0,1]
+	Strength    float64              `json:"strength"` // [0,1]
 	ContextTags []string             `json:"context_tags"`
 }
 

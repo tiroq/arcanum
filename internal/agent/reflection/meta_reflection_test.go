@@ -144,7 +144,7 @@ func TestAggregation_SignalsSummary(t *testing.T) {
 	agg := NewAggregator(nil).
 		WithSignals(mockSignalProvider{derived: map[string]float64{
 			"failure_rate":    0.15,
-			"owner_load":     0.65,
+			"owner_load":      0.65,
 			"income_pressure": 0.3,
 		}})
 
@@ -836,10 +836,10 @@ func TestIntegration_MultipleTriggerTypes(t *testing.T) {
 func TestSignalTypes_Complete(t *testing.T) {
 	// Verify all 5 signal types can be generated
 	data := AggregatedData{
-		ValuePerHour:   5.0,    // low_efficiency
-		OwnerLoadScore: 0.9,    // overload_risk
-		AvgAccuracy:    0.3,    // pricing_misalignment
-		ActionsCount:   10,     // income_instability (0 successes)
+		ValuePerHour:   5.0, // low_efficiency
+		OwnerLoadScore: 0.9, // overload_risk
+		AvgAccuracy:    0.3, // pricing_misalignment
+		ActionsCount:   10,  // income_instability (0 successes)
 		SuccessRate:    0.0,
 		ManualActionCounts: map[string]int{
 			"manual_task": 5, // automation_opportunity

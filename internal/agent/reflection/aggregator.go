@@ -38,12 +38,12 @@ type ExternalActionsProvider interface {
 
 // Aggregator collects and computes data from all sources for a time window.
 type Aggregator struct {
-	income         IncomeDataProvider
-	financialTruth FinancialTruthProvider
-	signals        SignalDataProvider
-	capacity       CapacityDataProvider
+	income          IncomeDataProvider
+	financialTruth  FinancialTruthProvider
+	signals         SignalDataProvider
+	capacity        CapacityDataProvider
 	externalActions ExternalActionsProvider
-	logger         *zap.Logger
+	logger          *zap.Logger
 }
 
 // NewAggregator creates an Aggregator with all data source providers.
