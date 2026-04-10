@@ -15,17 +15,25 @@ type EngineGovernanceProvider interface {
 	GetMode(ctx context.Context) string
 }
 
+// EngineFinancialTruthProvider supplies verified financial values for learning.
+// Defined here to avoid import cycles — implemented in financial_truth package.
+// Fail-open: returns 0 when nil or unavailable.
+type EngineFinancialTruthProvider interface {
+	GetVerifiedValueForOpportunity(ctx context.Context, oppID string) float64
+}
+
 // Engine orchestrates the full income pipeline:
 //
 //	create opportunity → score → generate proposals → persist → audit
 type Engine struct {
-	oppStore      *OpportunityStore
-	propStore     *ProposalStore
-	outcomeStr    *OutcomeStore
-	learningStore *LearningStore
-	governance    EngineGovernanceProvider
-	auditor       audit.AuditRecorder
-	logger        *zap.Logger
+	oppStore       *OpportunityStore
+	propStore      *ProposalStore
+	outcomeStr     *OutcomeStore
+	learningStore  *LearningStore
+	governance     EngineGovernanceProvider
+	truthProvider  EngineFinancialTruthProvider
+	auditor        audit.AuditRecorder
+	logger         *zap.Logger
 }
 
 // NewEngine creates an Engine with required stores.
@@ -54,6 +62,13 @@ func (e *Engine) WithGovernance(gp EngineGovernanceProvider) *Engine {
 // WithLearning attaches the learning store for outcome attribution (Iteration 39).
 func (e *Engine) WithLearning(ls *LearningStore) *Engine {
 	e.learningStore = ls
+	return e
+}
+
+// WithTruthProvider attaches a verified financial truth provider (Iteration 42).
+// When present, learning and attribution prefer verified values.
+func (e *Engine) WithTruthProvider(tp EngineFinancialTruthProvider) *Engine {
+	e.truthProvider = tp
 	return e
 }
 
@@ -212,16 +227,36 @@ func (e *Engine) processAttribution(ctx context.Context, outcome IncomeOutcome) 
 
 	attr := BuildAttribution(opp, outcome)
 
+	// Iteration 42: prefer verified financial truth over attributed value.
+	// If a verified value exists for this opportunity, use it for accuracy
+	// computation while preserving the original attributed actual_value.
+	var verifiedValue float64
+	var financiallyVerified bool
+	if e.truthProvider != nil {
+		vv := e.truthProvider.GetVerifiedValueForOpportunity(ctx, outcome.OpportunityID)
+		if vv > 0 {
+			verifiedValue = vv
+			financiallyVerified = true
+			// Recompute accuracy using verified value as ground truth.
+			attr.Accuracy = ComputeAccuracy(opp.EstimatedValue, vv, outcome.OutcomeStatus)
+		}
+	}
+
+	auditPayload := map[string]any{
+		"outcome_id":            attr.OutcomeID,
+		"opportunity_id":        attr.OpportunityID,
+		"opportunity_type":      attr.OpportunityType,
+		"estimated_value":       attr.EstimatedValue,
+		"actual_value":          attr.ActualValue,
+		"accuracy":              attr.Accuracy,
+		"outcome_status":        attr.OutcomeStatus,
+		"financially_verified":  financiallyVerified,
+	}
+	if financiallyVerified {
+		auditPayload["verified_value"] = verifiedValue
+	}
 	e.auditor.RecordEvent(ctx, "income_outcome", uuid.MustParse(outcome.ID), //nolint:errcheck
-		"outcome.attributed", "income_engine", "engine", map[string]any{
-			"outcome_id":       attr.OutcomeID,
-			"opportunity_id":   attr.OpportunityID,
-			"opportunity_type": attr.OpportunityType,
-			"estimated_value":  attr.EstimatedValue,
-			"actual_value":     attr.ActualValue,
-			"accuracy":         attr.Accuracy,
-			"outcome_status":   attr.OutcomeStatus,
-		})
+		"outcome.attributed", "income_engine", "engine", auditPayload)
 
 	// Update learning store if available.
 	if e.learningStore == nil {

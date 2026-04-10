@@ -24,7 +24,9 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/discovery"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
+	financialtruth "github.com/tiroq/arcanum/internal/agent/financial_truth"
 	"github.com/tiroq/arcanum/internal/agent/goals"
+	selfextension "github.com/tiroq/arcanum/internal/agent/self_extension"
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
@@ -95,6 +97,8 @@ type Handlers struct {
 	financialPressure  *financialpressure.GraphAdapter
 	discoveryEngine    *discovery.Engine
 	capacityAdapter    *capacity.GraphAdapter
+	financialTruth     *financialtruth.Engine
+	selfExtension      *selfextension.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -298,6 +302,18 @@ func (h *Handlers) WithDiscoveryEngine(de *discovery.Engine) *Handlers {
 // WithCapacity attaches the capacity adapter for time allocation API (Iteration 41).
 func (h *Handlers) WithCapacity(ca *capacity.GraphAdapter) *Handlers {
 	h.capacityAdapter = ca
+	return h
+}
+
+// WithFinancialTruth attaches the financial truth engine for truth layer API (Iteration 42).
+func (h *Handlers) WithFinancialTruth(ft *financialtruth.Engine) *Handlers {
+	h.financialTruth = ft
+	return h
+}
+
+// WithSelfExtension attaches the self-extension adapter for sandbox API (Iteration 43).
+func (h *Handlers) WithSelfExtension(se *selfextension.GraphAdapter) *Handlers {
+	h.selfExtension = se
 	return h
 }
 
@@ -3875,4 +3891,318 @@ func (h *Handlers) CapacitySummary(w http.ResponseWriter, r *http.Request) {
 		DeferredCount:       deferred,
 		TotalEstimatedHours: totalHours,
 	})
+}
+
+// --- Financial Truth API (Iteration 42) ---
+
+// FinancialEvents handles POST (ingest) and GET (list) for financial events.
+func (h *Handlers) FinancialEvents(w http.ResponseWriter, r *http.Request) {
+	if h.financialTruth == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "financial truth engine not available")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		var event financialtruth.FinancialEvent
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		savedEvent, fact, err := h.financialTruth.IngestEvent(r.Context(), event)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"event": savedEvent,
+			"fact":  fact,
+		})
+
+	case http.MethodGet:
+		pg := parsePagination(r)
+		events, err := h.financialTruth.ListEvents(r.Context(), pg.PerPage, pg.Offset)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if events == nil {
+			events = []financialtruth.FinancialEvent{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": events})
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// FinancialFacts handles GET /api/v1/agent/financial/facts.
+func (h *Handlers) FinancialFacts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.financialTruth == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"facts": []financialtruth.FinancialFact{}})
+		return
+	}
+	pg := parsePagination(r)
+	facts, err := h.financialTruth.ListFacts(r.Context(), pg.PerPage, pg.Offset)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if facts == nil {
+		facts = []financialtruth.FinancialFact{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"facts": facts})
+}
+
+// FinancialLink handles POST /api/v1/agent/financial/link.
+func (h *Handlers) FinancialLink(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.financialTruth == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "financial truth engine not available")
+		return
+	}
+	var req financialtruth.LinkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	match, err := h.financialTruth.LinkFactToOpportunity(r.Context(), req)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, match)
+}
+
+// FinancialTruthSummary handles GET /api/v1/agent/financial/truth/summary.
+func (h *Handlers) FinancialTruthSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.financialTruth == nil {
+		writeJSON(w, http.StatusOK, financialtruth.FinancialSummary{})
+		return
+	}
+	summary := h.financialTruth.GetSummary(r.Context())
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// FinancialTruthRecompute handles POST /api/v1/agent/financial/truth/recompute.
+func (h *Handlers) FinancialTruthRecompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.financialTruth == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "financial truth engine not available")
+		return
+	}
+	summary := h.financialTruth.RecomputeSummary(r.Context())
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// --- Controlled Self-Extension Sandbox API (Iteration 43) ---
+
+// SelfProposals handles POST/GET /api/v1/agent/self/proposals.
+func (h *Handlers) SelfProposals(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if h.selfExtension == nil {
+			writeJSON(w, http.StatusOK, []selfextension.ComponentProposal{})
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 100 {
+			limit = 50
+		}
+		proposals, err := h.selfExtension.ListProposals(r.Context(), limit)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if proposals == nil {
+			proposals = []selfextension.ComponentProposal{}
+		}
+		writeJSON(w, http.StatusOK, proposals)
+
+	case http.MethodPost:
+		if h.selfExtension == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "self-extension engine not available")
+			return
+		}
+		var p selfextension.ComponentProposal
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		saved, err := h.selfExtension.CreateProposal(r.Context(), p)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// SelfSpec handles POST /api/v1/agent/self/spec/{proposal_id}.
+func (h *Handlers) SelfSpec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.selfExtension == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "self-extension engine not available")
+		return
+	}
+	proposalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/self/spec/")
+	if proposalID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing proposal_id")
+		return
+	}
+	spec, err := h.selfExtension.GenerateSpec(r.Context(), proposalID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, spec)
+}
+
+// SelfSandboxRun handles POST /api/v1/agent/self/sandbox/run/{proposal_id}.
+func (h *Handlers) SelfSandboxRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.selfExtension == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "self-extension engine not available")
+		return
+	}
+	proposalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/self/sandbox/run/")
+	if proposalID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing proposal_id")
+		return
+	}
+	run, err := h.selfExtension.RunSandbox(r.Context(), proposalID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+// SelfSandboxResults handles GET /api/v1/agent/self/sandbox/results/{proposal_id}.
+func (h *Handlers) SelfSandboxResults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.selfExtension == nil {
+		writeJSON(w, http.StatusOK, []selfextension.SandboxRun{})
+		return
+	}
+	proposalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/self/sandbox/results/")
+	if proposalID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing proposal_id")
+		return
+	}
+	runs, err := h.selfExtension.GetSandboxResults(r.Context(), proposalID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if runs == nil {
+		runs = []selfextension.SandboxRun{}
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+// SelfDeploy handles POST /api/v1/agent/self/deploy/{proposal_id}.
+func (h *Handlers) SelfDeploy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.selfExtension == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "self-extension engine not available")
+		return
+	}
+	proposalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/self/deploy/")
+	if proposalID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing proposal_id")
+		return
+	}
+	deployment, err := h.selfExtension.Deploy(r.Context(), proposalID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, deployment)
+}
+
+// SelfRollback handles POST /api/v1/agent/self/rollback/{deployment_id}.
+func (h *Handlers) SelfRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.selfExtension == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "self-extension engine not available")
+		return
+	}
+	deploymentID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/self/rollback/")
+	if deploymentID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing deployment_id")
+		return
+	}
+	if err := h.selfExtension.Rollback(r.Context(), deploymentID); err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "rolled_back", "deployment_id": deploymentID})
+}
+
+// SelfApprove handles POST /api/v1/agent/self/approve/{proposal_id}.
+func (h *Handlers) SelfApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.selfExtension == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "self-extension engine not available")
+		return
+	}
+	proposalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/self/approve/")
+	if proposalID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing proposal_id")
+		return
+	}
+	var body struct {
+		ApprovedBy string `json:"approved_by"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if body.ApprovedBy == "" {
+		writeError(w, r, http.StatusBadRequest, "approved_by is required")
+		return
+	}
+	decision, err := h.selfExtension.Approve(r.Context(), proposalID, body.ApprovedBy, body.Reason)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, decision)
 }

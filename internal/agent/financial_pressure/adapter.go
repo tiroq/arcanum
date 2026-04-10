@@ -9,12 +9,21 @@ import (
 	"github.com/tiroq/arcanum/internal/audit"
 )
 
+// FinancialTruthProvider supplies verified financial truth to override
+// inferred financial state. Defined here to avoid import cycles —
+// implemented in financial_truth package. Fail-open: returns zero values when nil.
+type FinancialTruthProvider interface {
+	// GetVerifiedMonthlyIncome returns verified monthly income and whether data exists.
+	GetVerifiedMonthlyIncome(ctx context.Context) (income float64, hasData bool)
+}
+
 // GraphAdapter implements decision_graph.FinancialPressureProvider using the store.
 // Fail-open: returns zero pressure when store is nil or DB unavailable.
 type GraphAdapter struct {
-	store   *Store
-	auditor audit.AuditRecorder
-	logger  *zap.Logger
+	store         *Store
+	auditor       audit.AuditRecorder
+	logger        *zap.Logger
+	truthProvider FinancialTruthProvider
 }
 
 // NewGraphAdapter creates a GraphAdapter backed by the given store.
@@ -22,7 +31,15 @@ func NewGraphAdapter(store *Store, auditor audit.AuditRecorder, logger *zap.Logg
 	return &GraphAdapter{store: store, auditor: auditor, logger: logger}
 }
 
+// WithTruthProvider attaches a verified financial truth provider (Iteration 42).
+// When present, GetPressure prefers verified income over the inferred state.
+func (a *GraphAdapter) WithTruthProvider(tp FinancialTruthProvider) *GraphAdapter {
+	a.truthProvider = tp
+	return a
+}
+
 // GetPressure returns the current financial pressure score and urgency level.
+// Prefers verified financial truth when available; falls back to inferred state.
 // Fail-open: returns (0, "low") if store is nil or state unavailable.
 func (a *GraphAdapter) GetPressure(ctx context.Context) (pressureScore float64, urgencyLevel string) {
 	if a == nil || a.store == nil {
@@ -32,6 +49,15 @@ func (a *GraphAdapter) GetPressure(ctx context.Context) (pressureScore float64, 
 	if err != nil || state.ID == "" {
 		return 0, UrgencyLow
 	}
+
+	// Iteration 42: prefer verified income from financial truth layer.
+	if a.truthProvider != nil {
+		verifiedIncome, hasData := a.truthProvider.GetVerifiedMonthlyIncome(ctx)
+		if hasData {
+			state.CurrentIncomeMonth = verifiedIncome
+		}
+	}
+
 	p := ComputePressure(state)
 	return p.PressureScore, p.UrgencyLevel
 }

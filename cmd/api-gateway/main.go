@@ -21,6 +21,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/discovery"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
+	financialtruth "github.com/tiroq/arcanum/internal/agent/financial_truth"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
@@ -35,6 +36,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	selfextension "github.com/tiroq/arcanum/internal/agent/self_extension"
 	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
@@ -481,6 +483,23 @@ func run() error {
 	graphAdapter.WithFinancialPressure(financialPressureAdapter)
 	logger.Info("financial pressure layer initialised")
 
+	// Financial truth layer (Iteration 42).
+	// Creates the financial truth pipeline: stores + engine + adapters.
+	// Fail-open: if DB is unavailable, truth engine starts but queries fail gracefully.
+	financialEventStore := financialtruth.NewEventStore(pool)
+	financialFactStore := financialtruth.NewFactStore(pool)
+	financialMatchStore := financialtruth.NewMatchStore(pool)
+	financialTruthEngine := financialtruth.NewEngine(financialEventStore, financialFactStore, financialMatchStore, auditor, logger)
+
+	// Wire truth provider into financial pressure (prefer verified income).
+	pressureTruthAdapter := financialtruth.NewPressureTruthAdapter(financialTruthEngine)
+	financialPressureAdapter.WithTruthProvider(pressureTruthAdapter)
+
+	// Wire truth provider into income engine (prefer verified value for learning).
+	learningTruthAdapter := financialtruth.NewLearningTruthAdapter(financialTruthEngine)
+	incomeEngine.WithTruthProvider(learningTruthAdapter)
+	logger.Info("financial truth layer initialised")
+
 	// Opportunity discovery engine (Iteration 40).
 	// Creates the discovery pipeline: store + adapters + dedup + promoter + engine.
 	// Fail-open: if DB is unavailable, discovery engine starts but queries fail gracefully.
@@ -517,6 +536,16 @@ func run() error {
 		zap.Float64("min_family_hours", familyCfg.MinFamilyTimeHours),
 		zap.Int("blocked_ranges", len(familyCfg.BlockedRanges)),
 	)
+
+	// Controlled self-extension sandbox (Iteration 43).
+	// Creates the self-extension pipeline: store + engine + adapter.
+	// Integrates with capacity layer to gate sandbox builds on owner availability.
+	// Fail-safe for deployment: requires explicit approval, never auto-deploys.
+	selfExtStore := selfextension.NewStore(pool)
+	selfExtEngine := selfextension.NewEngine(selfExtStore, auditor, logger)
+	selfExtEngine.WithCapacity(capacityGraphAdapter)
+	selfExtAdapter := selfextension.NewGraphAdapter(selfExtEngine, logger)
+	logger.Info("self-extension sandbox initialised")
 
 	adaptivePlanner.WithStrategy(graphAdapter)
 
@@ -556,7 +585,9 @@ func run() error {
 		WithSignalEngine(signalEngine).
 		WithFinancialPressure(financialPressureAdapter).
 		WithDiscoveryEngine(discoveryEngine).
-		WithCapacity(capacityGraphAdapter)
+		WithCapacity(capacityGraphAdapter).
+		WithFinancialTruth(financialTruthEngine).
+		WithSelfExtension(selfExtAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{

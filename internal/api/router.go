@@ -198,6 +198,13 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/financial/state", chain(handlers.FinancialState))
 	mux.Handle("/api/v1/agent/financial/pressure", chain(handlers.FinancialPressure))
 
+	// Agent financial truth (Iteration 42)
+	mux.Handle("/api/v1/agent/financial/events", chain(handlers.FinancialEvents))
+	mux.Handle("/api/v1/agent/financial/facts", chain(handlers.FinancialFacts))
+	mux.Handle("/api/v1/agent/financial/link", chain(handlers.FinancialLink))
+	mux.Handle("/api/v1/agent/financial/truth/summary", chain(handlers.FinancialTruthSummary))
+	mux.Handle("/api/v1/agent/financial/truth/recompute", chain(handlers.FinancialTruthRecompute))
+
 	// Agent opportunity discovery (Iteration 40)
 	mux.Handle("/api/v1/agent/income/discovery/candidates", chain(handlers.DiscoveryCandidates))
 	mux.Handle("/api/v1/agent/income/discovery/run", chain(handlers.DiscoveryRun))
@@ -209,6 +216,15 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/capacity/recompute", chain(handlers.CapacityRecompute))
 	mux.Handle("/api/v1/agent/capacity/recommendations", chain(handlers.CapacityRecommendations))
 	mux.Handle("/api/v1/agent/capacity/summary", chain(handlers.CapacitySummary))
+
+	// Agent controlled self-extension sandbox (Iteration 43)
+	mux.Handle("/api/v1/agent/self/proposals", chain(handlers.SelfProposals))
+	mux.Handle("/api/v1/agent/self/spec/", chain(handlers.SelfSpec))
+	mux.Handle("/api/v1/agent/self/sandbox/run/", chain(handlers.SelfSandboxRun))
+	mux.Handle("/api/v1/agent/self/sandbox/results/", chain(handlers.SelfSandboxResults))
+	mux.Handle("/api/v1/agent/self/deploy/", chain(handlers.SelfDeploy))
+	mux.Handle("/api/v1/agent/self/rollback/", chain(handlers.SelfRollback))
+	mux.Handle("/api/v1/agent/self/approve/", chain(handlers.SelfApprove))
 
 	return requestIDMiddleware(mux)
 }
