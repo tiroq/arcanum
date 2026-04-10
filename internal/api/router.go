@@ -266,5 +266,12 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/objective/summary", chain(handlers.ObjectiveSummary))
 	mux.Handle("/api/v1/agent/objective/recompute", chain(handlers.ObjectiveRecompute))
 
+	// Agent closed feedback actuation (Iteration 51)
+	mux.Handle("/api/v1/agent/actuation/decisions", chain(handlers.ActuationDecisions))
+	mux.Handle("/api/v1/agent/actuation/run", chain(handlers.ActuationRun))
+	mux.Handle("/api/v1/agent/actuation/approve/", chain(handlers.ActuationApprove))
+	mux.Handle("/api/v1/agent/actuation/reject/", chain(handlers.ActuationReject))
+	mux.Handle("/api/v1/agent/actuation/execute/", chain(handlers.ActuationExecute))
+
 	return requestIDMiddleware(mux)
 }

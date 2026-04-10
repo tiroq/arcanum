@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/actuation"
 	"github.com/tiroq/arcanum/internal/agent/arbitration"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
 	"github.com/tiroq/arcanum/internal/agent/capacity"
@@ -111,6 +112,7 @@ type Handlers struct {
 	metaReflectionAdapter *reflection.MetaGraphAdapter
 	metaReportStore       *reflection.ReportStore
 	objectiveAdapter      *objective.GraphAdapter
+	actuationAdapter      *actuation.GraphAdapter
 	logger                *zap.Logger
 }
 
@@ -363,6 +365,12 @@ func (h *Handlers) WithMetaReflection(adapter *reflection.MetaGraphAdapter, stor
 // WithObjective attaches the global objective function adapter (Iteration 50).
 func (h *Handlers) WithObjective(oa *objective.GraphAdapter) *Handlers {
 	h.objectiveAdapter = oa
+	return h
+}
+
+// WithActuation attaches the closed feedback actuation adapter (Iteration 51).
+func (h *Handlers) WithActuation(aa *actuation.GraphAdapter) *Handlers {
+	h.actuationAdapter = aa
 	return h
 }
 
@@ -5024,4 +5032,120 @@ func (h *Handlers) ObjectiveRecompute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+// --- Closed Feedback Actuation handlers (Iteration 51) ---
+
+// ActuationDecisions handles GET /api/v1/agent/actuation/decisions.
+func (h *Handlers) ActuationDecisions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actuationAdapter == nil {
+		writeJSON(w, http.StatusOK, []actuation.ActuationDecision{})
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	decisions, err := h.actuationAdapter.ListDecisions(r.Context(), limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if decisions == nil {
+		decisions = []actuation.ActuationDecision{}
+	}
+	writeJSON(w, http.StatusOK, decisions)
+}
+
+// ActuationRun handles POST /api/v1/agent/actuation/run.
+func (h *Handlers) ActuationRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actuationAdapter == nil {
+		writeJSON(w, http.StatusOK, actuation.ActuationRunResult{})
+		return
+	}
+	result, err := h.actuationAdapter.Run(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ActuationApprove handles POST /api/v1/agent/actuation/approve/{id}.
+func (h *Handlers) ActuationApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actuationAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "actuation engine not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/actuation/approve/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "decision id is required")
+		return
+	}
+	d, err := h.actuationAdapter.ApproveDecision(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// ActuationReject handles POST /api/v1/agent/actuation/reject/{id}.
+func (h *Handlers) ActuationReject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actuationAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "actuation engine not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/actuation/reject/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "decision id is required")
+		return
+	}
+	d, err := h.actuationAdapter.RejectDecision(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// ActuationExecute handles POST /api/v1/agent/actuation/execute/{id}.
+func (h *Handlers) ActuationExecute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.actuationAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "actuation engine not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/actuation/execute/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "decision id is required")
+		return
+	}
+	d, err := h.actuationAdapter.ExecuteDecision(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
 }

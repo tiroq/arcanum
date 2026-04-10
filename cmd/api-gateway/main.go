@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
+	"github.com/tiroq/arcanum/internal/agent/actuation"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
 	"github.com/tiroq/arcanum/internal/agent/capacity"
 	"github.com/tiroq/arcanum/internal/agent/causal"
@@ -662,6 +663,18 @@ func run() error {
 	graphAdapter.WithObjectiveFunction(objectiveFunctionBridge{oa: objectiveGraphAdapter})
 	logger.Info("global objective function initialised")
 
+	// Closed feedback actuation (Iteration 51).
+	// Creates the actuation pipeline: store + engine + adapter.
+	// Consumes reflection signals (Iteration 49) and objective state (Iteration 50).
+	// Produces proposed corrective actions routed to existing subsystems.
+	// Fail-open: if providers are unavailable, no actions are proposed.
+	actuationStore := actuation.NewDecisionStore(pool)
+	actuationEngine := actuation.NewEngine(actuationStore, auditor, logger)
+	actuationEngine.WithReflection(actuationReflectionAdapter{ma: metaAdapter})
+	actuationEngine.WithObjective(actuationObjectiveAdapter{oa: objectiveGraphAdapter})
+	actuationGraphAdapter := actuation.NewGraphAdapter(actuationEngine, logger)
+	logger.Info("closed feedback actuation initialised")
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -708,7 +721,8 @@ func run() error {
 		WithPricing(pricingGraphAdapter).
 		WithScheduling(schedAdapter).
 		WithMetaReflection(metaAdapter, metaReportStore).
-		WithObjective(objectiveGraphAdapter)
+		WithObjective(objectiveGraphAdapter).
+		WithActuation(actuationGraphAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -1198,4 +1212,89 @@ func (b objectiveFunctionBridge) GetObjectiveSignal(ctx context.Context) decisio
 		Explanation: sig.Explanation,
 		ContextTags: sig.ContextTags,
 	}
+}
+
+// --- Actuation bridge adapters (Iteration 51) ---
+// These thin adapters bridge existing adapters to the actuation.* interfaces
+// to avoid import cycles.
+
+type actuationReflectionAdapter struct {
+	ma *reflection.MetaGraphAdapter
+}
+
+func (a actuationReflectionAdapter) GetReflectionSignals(ctx context.Context) ([]actuation.ReflectionSignalInput, error) {
+	if a.ma == nil {
+		return nil, nil
+	}
+	signals, err := a.ma.GetReflectionSignals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]actuation.ReflectionSignalInput, len(signals))
+	for i, s := range signals {
+		result[i] = actuation.ReflectionSignalInput{
+			SignalType: string(s.SignalType),
+			Strength:   s.Strength,
+		}
+	}
+	return result, nil
+}
+
+type actuationObjectiveAdapter struct {
+	oa *objective.GraphAdapter
+}
+
+func (a actuationObjectiveAdapter) GetNetUtility(ctx context.Context) float64 {
+	if a.oa == nil {
+		return 0
+	}
+	summary, err := a.oa.GetSummary(ctx)
+	if err != nil {
+		return 0
+	}
+	return summary.NetUtility
+}
+
+func (a actuationObjectiveAdapter) GetUtilityScore(ctx context.Context) float64 {
+	if a.oa == nil {
+		return 0
+	}
+	summary, err := a.oa.GetSummary(ctx)
+	if err != nil {
+		return 0
+	}
+	return summary.UtilityScore
+}
+
+func (a actuationObjectiveAdapter) GetRiskScore(ctx context.Context) float64 {
+	if a.oa == nil {
+		return 0
+	}
+	summary, err := a.oa.GetSummary(ctx)
+	if err != nil {
+		return 0
+	}
+	return summary.RiskScore
+}
+
+func (a actuationObjectiveAdapter) GetFinancialRisk(ctx context.Context) float64 {
+	if a.oa == nil {
+		return 0
+	}
+	risk, err := a.oa.GetRiskState(ctx)
+	if err != nil {
+		return 0
+	}
+	return risk.FinancialInstabilityRisk
+}
+
+func (a actuationObjectiveAdapter) GetOverloadRisk(ctx context.Context) float64 {
+	if a.oa == nil {
+		return 0
+	}
+	risk, err := a.oa.GetRiskState(ctx)
+	if err != nil {
+		return 0
+	}
+	return risk.OverloadRisk
 }
