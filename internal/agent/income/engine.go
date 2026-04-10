@@ -19,12 +19,13 @@ type EngineGovernanceProvider interface {
 //
 //	create opportunity → score → generate proposals → persist → audit
 type Engine struct {
-	oppStore   *OpportunityStore
-	propStore  *ProposalStore
-	outcomeStr *OutcomeStore
-	governance EngineGovernanceProvider
-	auditor    audit.AuditRecorder
-	logger     *zap.Logger
+	oppStore      *OpportunityStore
+	propStore     *ProposalStore
+	outcomeStr    *OutcomeStore
+	learningStore *LearningStore
+	governance    EngineGovernanceProvider
+	auditor       audit.AuditRecorder
+	logger        *zap.Logger
 }
 
 // NewEngine creates an Engine with required stores.
@@ -47,6 +48,12 @@ func NewEngine(
 // WithGovernance attaches a governance provider to enable governance-aware proposal gating.
 func (e *Engine) WithGovernance(gp EngineGovernanceProvider) *Engine {
 	e.governance = gp
+	return e
+}
+
+// WithLearning attaches the learning store for outcome attribution (Iteration 39).
+func (e *Engine) WithLearning(ls *LearningStore) *Engine {
+	e.learningStore = ls
 	return e
 }
 
@@ -145,13 +152,17 @@ func (e *Engine) EvaluateOpportunity(ctx context.Context, id string) ([]IncomeAc
 	return saved, nil
 }
 
-// RecordOutcome persists an income outcome and closes the opportunity.
+// RecordOutcome persists an income outcome, closes the opportunity, and updates
+// learning signals from the real outcome attribution (Iteration 39).
 func (e *Engine) RecordOutcome(ctx context.Context, o IncomeOutcome) (IncomeOutcome, error) {
 	if o.ID == "" {
 		o.ID = uuid.New().String()
 	}
 	if o.OutcomeStatus == "" {
 		return IncomeOutcome{}, fmt.Errorf("outcome_status is required")
+	}
+	if o.OutcomeSource != "" && !validOutcomeSources[o.OutcomeSource] {
+		return IncomeOutcome{}, fmt.Errorf("invalid outcome_source %q; must be manual|system|external", o.OutcomeSource)
 	}
 
 	saved, err := e.outcomeStr.Create(ctx, o)
@@ -162,21 +173,94 @@ func (e *Engine) RecordOutcome(ctx context.Context, o IncomeOutcome) (IncomeOutc
 	_ = e.oppStore.UpdateStatus(ctx, o.OpportunityID, StatusClosed)
 
 	e.auditor.RecordEvent(ctx, "income_outcome", uuid.MustParse(saved.ID), //nolint:errcheck
-		"income.outcome_recorded", "income_engine", "engine", map[string]any{
+		"outcome.recorded", "income_engine", "engine", map[string]any{
 			"outcome_id":       saved.ID,
 			"opportunity_id":   saved.OpportunityID,
 			"proposal_id":      saved.ProposalID,
 			"outcome_status":   saved.OutcomeStatus,
 			"actual_value":     saved.ActualValue,
 			"owner_time_saved": saved.OwnerTimeSaved,
+			"outcome_source":   saved.OutcomeSource,
+			"verified":         saved.Verified,
 		})
+
+	// Attribution: link outcome back to opportunity and update learning (Iteration 39).
+	e.processAttribution(ctx, saved)
 
 	e.logger.Info("income outcome recorded",
 		zap.String("id", saved.ID),
 		zap.String("opportunity_id", saved.OpportunityID),
 		zap.Float64("actual_value", saved.ActualValue),
+		zap.String("outcome_source", saved.OutcomeSource),
+		zap.Bool("verified", saved.Verified),
 	)
 	return saved, nil
+}
+
+// processAttribution links the outcome to the opportunity, computes accuracy,
+// and updates per-type learning records. Fail-open: logs errors but does not
+// propagate them to the caller.
+func (e *Engine) processAttribution(ctx context.Context, outcome IncomeOutcome) {
+	opp, err := e.oppStore.GetByID(ctx, outcome.OpportunityID)
+	if err != nil {
+		e.logger.Warn("attribution: could not retrieve opportunity",
+			zap.String("opportunity_id", outcome.OpportunityID),
+			zap.Error(err),
+		)
+		return
+	}
+
+	attr := BuildAttribution(opp, outcome)
+
+	e.auditor.RecordEvent(ctx, "income_outcome", uuid.MustParse(outcome.ID), //nolint:errcheck
+		"outcome.attributed", "income_engine", "engine", map[string]any{
+			"outcome_id":       attr.OutcomeID,
+			"opportunity_id":   attr.OpportunityID,
+			"opportunity_type": attr.OpportunityType,
+			"estimated_value":  attr.EstimatedValue,
+			"actual_value":     attr.ActualValue,
+			"accuracy":         attr.Accuracy,
+			"outcome_status":   attr.OutcomeStatus,
+		})
+
+	// Update learning store if available.
+	if e.learningStore == nil {
+		return
+	}
+
+	existing, err := e.learningStore.GetByType(ctx, attr.OpportunityType)
+	if err != nil {
+		e.logger.Warn("attribution: could not load learning record",
+			zap.String("opportunity_type", attr.OpportunityType),
+			zap.Error(err),
+		)
+		return
+	}
+
+	updated := UpdateLearningFromAttribution(existing, attr)
+	if err := e.learningStore.Upsert(ctx, updated); err != nil {
+		e.logger.Warn("attribution: could not persist learning record",
+			zap.String("opportunity_type", attr.OpportunityType),
+			zap.Error(err),
+		)
+		return
+	}
+
+	e.auditor.RecordEvent(ctx, "income_learning", uuid.Nil, //nolint:errcheck
+		"learning.updated", "income_engine", "engine", map[string]any{
+			"opportunity_type":      updated.OpportunityType,
+			"total_outcomes":        updated.TotalOutcomes,
+			"success_rate":          updated.SuccessRate,
+			"avg_accuracy":          updated.AvgAccuracy,
+			"confidence_adjustment": updated.ConfidenceAdjustment,
+		})
+
+	e.logger.Info("income learning updated",
+		zap.String("opportunity_type", updated.OpportunityType),
+		zap.Int("total_outcomes", updated.TotalOutcomes),
+		zap.Float64("success_rate", updated.SuccessRate),
+		zap.Float64("avg_accuracy", updated.AvgAccuracy),
+	)
 }
 
 // ListOpportunities returns paginated opportunities.
@@ -205,6 +289,47 @@ func (e *Engine) GetSignal(ctx context.Context) IncomeSignal {
 		BestOpenScore:     e.oppStore.BestOpenScore(ctx),
 		OpenOpportunities: e.oppStore.CountOpen(ctx),
 	}
+}
+
+// GetPerformance returns a summary of income attribution performance (Iteration 39).
+// Returns a zero-value PerformanceStats if learning store is not available (fail-open).
+func (e *Engine) GetPerformance(ctx context.Context) PerformanceStats {
+	stats := PerformanceStats{}
+	if e.learningStore == nil {
+		return stats
+	}
+	records, err := e.learningStore.GetAll(ctx)
+	if err != nil {
+		e.logger.Warn("get performance: could not load learning records", zap.Error(err))
+		return stats
+	}
+	stats.ByType = records
+	stats.VerifiedOutcomes = e.outcomeStr.CountVerified(ctx)
+
+	var totalOutcomes int
+	var totalSuccess int
+	var totalAccuracy float64
+	for _, r := range records {
+		totalOutcomes += r.TotalOutcomes
+		totalSuccess += r.SuccessCount
+		totalAccuracy += r.TotalAccuracy
+	}
+	stats.TotalOutcomes = totalOutcomes
+	if totalOutcomes > 0 {
+		stats.OverallAccuracy = totalAccuracy / float64(totalOutcomes)
+		stats.OverallSuccessRate = float64(totalSuccess) / float64(totalOutcomes)
+	}
+	return stats
+}
+
+// GetLearningForType returns the learning record for a given opportunity type.
+// Returns a zero-value record if learning store is nil or type not found (fail-open).
+func (e *Engine) GetLearningForType(ctx context.Context, oppType string) LearningRecord {
+	if e.learningStore == nil {
+		return LearningRecord{OpportunityType: oppType}
+	}
+	r, _ := e.learningStore.GetByType(ctx, oppType)
+	return r
 }
 
 // --- validation ---

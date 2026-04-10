@@ -21,18 +21,23 @@ func NewOutcomeStore(pool *pgxpool.Pool) *OutcomeStore {
 // Create inserts a new income outcome.
 func (s *OutcomeStore) Create(ctx context.Context, o IncomeOutcome) (IncomeOutcome, error) {
 	o.CreatedAt = time.Now().UTC()
+	if o.OutcomeSource == "" {
+		o.OutcomeSource = OutcomeSourceManual
+	}
 
 	const q = `
 INSERT INTO agent_income_outcomes
   (id, opportunity_id, proposal_id, outcome_status,
-   actual_value, owner_time_saved, notes, created_at)
-VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,NULLIF($7,''),$8)
+   actual_value, owner_time_saved, outcome_source, verified, notes, created_at)
+VALUES ($1,$2,NULLIF($3,''),$4,$5,$6,$7,$8,NULLIF($9,''),$10)
 RETURNING id, opportunity_id, COALESCE(proposal_id,''), outcome_status,
-          actual_value, owner_time_saved, COALESCE(notes,''), created_at`
+          actual_value, owner_time_saved, outcome_source, verified,
+          COALESCE(notes,''), created_at`
 
 	row := s.pool.QueryRow(ctx, q,
 		o.ID, o.OpportunityID, o.ProposalID, o.OutcomeStatus,
-		o.ActualValue, o.OwnerTimeSaved, o.Notes, o.CreatedAt,
+		o.ActualValue, o.OwnerTimeSaved, o.OutcomeSource, o.Verified,
+		o.Notes, o.CreatedAt,
 	)
 	return scanOutcome(row)
 }
@@ -41,7 +46,8 @@ RETURNING id, opportunity_id, COALESCE(proposal_id,''), outcome_status,
 func (s *OutcomeStore) ListByOpportunity(ctx context.Context, opportunityID string) ([]IncomeOutcome, error) {
 	const q = `
 SELECT id, opportunity_id, COALESCE(proposal_id,''), outcome_status,
-       actual_value, owner_time_saved, COALESCE(notes,''), created_at
+       actual_value, owner_time_saved, outcome_source, verified,
+       COALESCE(notes,''), created_at
 FROM agent_income_outcomes
 WHERE opportunity_id = $1
 ORDER BY created_at DESC`
@@ -63,11 +69,20 @@ ORDER BY created_at DESC`
 	return out, rows.Err()
 }
 
+// CountVerified returns the number of verified outcomes.
+func (s *OutcomeStore) CountVerified(ctx context.Context) int {
+	const q = `SELECT COUNT(*) FROM agent_income_outcomes WHERE verified = true`
+	var n int
+	s.pool.QueryRow(ctx, q).Scan(&n) //nolint:errcheck
+	return n
+}
+
 // List returns outcomes ordered by created_at DESC with pagination.
 func (s *OutcomeStore) List(ctx context.Context, limit, offset int) ([]IncomeOutcome, error) {
 	const q = `
 SELECT id, opportunity_id, COALESCE(proposal_id,''), outcome_status,
-       actual_value, owner_time_saved, COALESCE(notes,''), created_at
+       actual_value, owner_time_saved, outcome_source, verified,
+       COALESCE(notes,''), created_at
 FROM agent_income_outcomes
 ORDER BY created_at DESC
 LIMIT $1 OFFSET $2`
@@ -93,7 +108,8 @@ func scanOutcome(row rowScanner) (IncomeOutcome, error) {
 	var o IncomeOutcome
 	err := row.Scan(
 		&o.ID, &o.OpportunityID, &o.ProposalID, &o.OutcomeStatus,
-		&o.ActualValue, &o.OwnerTimeSaved, &o.Notes, &o.CreatedAt,
+		&o.ActualValue, &o.OwnerTimeSaved, &o.OutcomeSource, &o.Verified,
+		&o.Notes, &o.CreatedAt,
 	)
 	if err != nil {
 		return IncomeOutcome{}, fmt.Errorf("scan outcome: %w", err)
