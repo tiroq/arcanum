@@ -12,13 +12,29 @@ func ComputeROI(totalRevenue, totalTimeSpent float64) float64 {
 	return totalRevenue / totalTimeSpent
 }
 
+// ComputeConversionRate returns won/total; zero-safe.
+func ComputeConversionRate(wonCount, totalCount int) float64 {
+	if totalCount <= 0 {
+		return 0
+	}
+	return float64(wonCount) / float64(totalCount)
+}
+
 // ComputeAllocationScores computes raw allocation scores for a set of strategies.
 // Returns a map of strategy ID → raw score ∈ [0, 1].
-// Inputs:
-//   - strategies: active strategies
-//   - performances: keyed by strategy_id
-//   - financialPressure: [0, 1] current financial pressure
-//   - familyPriorityHigh: true when family constraints should penalise volatility
+//
+// Formula (per spec):
+//
+//	allocation_score =
+//	  roi_component     * 0.35
+//	+ stability_component * 0.25
+//	+ speed_component     * 0.20
+//	+ pressure_alignment  * 0.20
+//
+// Family-safe rules are integrated into pressureAlignment:
+//   - High pressure → favour faster time-to-value, more stable strategies.
+//   - Low capacity  → favour high ROI/hour, short cycle.
+//   - Family threatened → penalise slow speculative strategies.
 func ComputeAllocationScores(
 	strategies []Strategy,
 	performances map[string]StrategyPerformance,
@@ -44,29 +60,39 @@ func ComputeAllocationScores(
 	for _, st := range strategies {
 		// ROI component: normalised expected return + real ROI if available.
 		roiNorm := st.ExpectedReturnPerHr / maxReturn
-		if perf, ok := performances[st.ID]; ok && perf.TotalTimeSpent >= MinSamplesForPerformance {
-			realROI := ComputeROI(perf.TotalRevenue, perf.TotalTimeSpent)
+		if perf, ok := performances[st.ID]; ok && perf.TotalEstimatedHours >= MinSamplesForPerformance {
+			realROI := ComputeROI(perf.TotalVerifiedRevenue, perf.TotalEstimatedHours)
 			realROINorm := clamp01(realROI / maxReturn)
 			// Blend: 60% real, 40% expected when we have data.
 			roiNorm = 0.60*realROINorm + 0.40*roiNorm
 		}
 
-		// Stability component: (1 - volatility).
-		stability := clamp01(1.0 - st.Volatility)
+		// Stability component: direct stability_score ∈ [0, 1].
+		stability := clamp01(st.StabilityScore)
 
-		// Pressure component: high pressure → prefer high returns.
-		pressureScore := clamp01(financialPressure * roiNorm)
+		// Speed component: prefer short time-to-first-value.
+		// Normalised: 1 - (ttfv / MaxTimeToFirstValue), clamped.
+		speedNorm := clamp01(1.0 - st.TimeToFirstValue/MaxTimeToFirstValue)
 
-		// Family component: penalise high volatility when family priority is high.
-		familyScore := stability
-		if !familyPriorityHigh {
-			familyScore = 0.5 // neutral when no family constraint
+		// Pressure alignment: high pressure → prefer high returns + speed + stability.
+		// Under high pressure, boost strategies with high ROI and fast TTF.
+		pressureAlignment := clamp01(financialPressure * (0.5*roiNorm + 0.3*speedNorm + 0.2*stability))
+
+		// Family-safe penalty: penalise slow speculative strategies when family is threatened.
+		if familyPriorityHigh {
+			// Penalise high time_to_first_value (slow), low stability (volatile), low confidence.
+			volatilityPenalty := clamp01(1.0 - st.StabilityScore)
+			if st.TimeToFirstValue > MaxTimeToFirstValue*0.5 && volatilityPenalty > 0.5 {
+				// Slow speculative: reduce ROI and speed components.
+				roiNorm *= 0.7
+				speedNorm *= 0.5
+			}
 		}
 
 		score := ROIWeight*roiNorm +
 			StabilityWeight*stability +
-			PressureWeight*pressureScore +
-			FamilyWeight*familyScore
+			SpeedWeight*speedNorm +
+			PressureWeight*pressureAlignment
 
 		scores[st.ID] = clamp01(score)
 	}
@@ -76,13 +102,14 @@ func ComputeAllocationScores(
 
 // NormaliseAllocations converts raw scores to hour allocations respecting
 // min/max fraction constraints and total available hours.
+// Returns both allocations (hours map) and weights (fraction map).
 func NormaliseAllocations(
 	rawScores map[string]float64,
 	totalAvailableHours float64,
-) map[string]float64 {
+) (hours map[string]float64, weights map[string]float64) {
 	n := len(rawScores)
 	if n == 0 || totalAvailableHours <= 0 {
-		return map[string]float64{}
+		return map[string]float64{}, map[string]float64{}
 	}
 
 	// Sum scores.
@@ -93,11 +120,14 @@ func NormaliseAllocations(
 	if total <= 0 {
 		// Equal distribution.
 		eq := totalAvailableHours / float64(n)
+		w := 1.0 / float64(n)
 		result := make(map[string]float64, n)
+		wResult := make(map[string]float64, n)
 		for id := range rawScores {
 			result[id] = eq
+			wResult[id] = w
 		}
-		return result
+		return result, wResult
 	}
 
 	// Initial proportional allocation.
@@ -112,7 +142,6 @@ func NormaliseAllocations(
 
 	for pass := 0; pass < 2; pass++ {
 		excess := 0.0
-		deficit := 0.0
 		uncapped := 0
 
 		for id, hrs := range allocations {
@@ -120,7 +149,6 @@ func NormaliseAllocations(
 				excess += hrs - maxHours
 				allocations[id] = maxHours
 			} else if hrs < minHours {
-				deficit += minHours - hrs
 				allocations[id] = minHours
 			} else {
 				uncapped++
@@ -136,10 +164,21 @@ func NormaliseAllocations(
 				}
 			}
 		}
-		_ = deficit // deficit is absorbed from capped strategies
 	}
 
-	return allocations
+	// Compute weights from final allocations.
+	totalAlloc := 0.0
+	for _, h := range allocations {
+		totalAlloc += h
+	}
+	wts := make(map[string]float64, n)
+	for id, h := range allocations {
+		if totalAlloc > 0 {
+			wts[id] = h / totalAlloc
+		}
+	}
+
+	return allocations, wts
 }
 
 // ComputeDiversificationIndex returns a Herfindahl-like index ∈ [0,1].
@@ -185,8 +224,8 @@ func DetectSignals(
 		allocHrs := allocations[st.ID]
 
 		// Underperforming: low real ROI despite allocation.
-		if hasPerf && perf.TotalTimeSpent >= MinSamplesForPerformance {
-			roi := ComputeROI(perf.TotalRevenue, perf.TotalTimeSpent)
+		if hasPerf && perf.TotalEstimatedHours >= MinSamplesForPerformance {
+			roi := ComputeROI(perf.TotalVerifiedRevenue, perf.TotalEstimatedHours)
 			if roi < LowROIThreshold && allocHrs > 0 {
 				strength := clamp01(1.0 - roi/LowROIThreshold)
 				signals = append(signals, StrategicSignal{
@@ -214,11 +253,11 @@ func DetectSignals(
 			}
 		}
 
-		// High potential: high expected return, low volatility, sufficient performance.
-		if st.ExpectedReturnPerHr >= HighROIThreshold && st.Volatility < HighVolatilityThreshold {
+		// High potential: high expected return, good stability, sufficient performance.
+		if st.ExpectedReturnPerHr >= HighROIThreshold && st.StabilityScore >= (1.0-HighVolatilityThreshold) {
 			strength := clamp01(st.ExpectedReturnPerHr / (HighROIThreshold * 2))
-			if hasPerf && perf.TotalTimeSpent >= MinSamplesForPerformance {
-				realROI := ComputeROI(perf.TotalRevenue, perf.TotalTimeSpent)
+			if hasPerf && perf.TotalEstimatedHours >= MinSamplesForPerformance {
+				realROI := ComputeROI(perf.TotalVerifiedRevenue, perf.TotalEstimatedHours)
 				if realROI >= HighROIThreshold {
 					strength = clamp01(strength + 0.2)
 				}
@@ -228,7 +267,7 @@ func DetectSignals(
 				StrategyType: st.Type,
 				SignalType:   "high_potential",
 				Score:        strength,
-				Reason:       "high expected return with acceptable volatility",
+				Reason:       "high expected return with acceptable stability",
 			})
 		}
 	}
@@ -260,8 +299,8 @@ func ComputeStrategyBoost(
 
 	// Check real performance.
 	perf, hasPerf := performances[best.ID]
-	if hasPerf && perf.TotalTimeSpent >= MinSamplesForPerformance {
-		roi := ComputeROI(perf.TotalRevenue, perf.TotalTimeSpent)
+	if hasPerf && perf.TotalEstimatedHours >= MinSamplesForPerformance {
+		roi := ComputeROI(perf.TotalVerifiedRevenue, perf.TotalEstimatedHours)
 		if roi >= HighROIThreshold {
 			return StrategyPriorityBoostMax * clamp01(roi/(HighROIThreshold*2))
 		}

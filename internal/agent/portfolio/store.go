@@ -31,14 +31,17 @@ func (s *StrategyStore) Create(ctx context.Context, st Strategy) (Strategy, erro
 	if st.Status == "" {
 		st.Status = StatusActive
 	}
+	if st.Confidence <= 0 {
+		st.Confidence = DefaultConfidence
+	}
 
 	const q = `
-		INSERT INTO agent_strategies (id, name, type, expected_return_per_hour, volatility, time_to_first_value, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+		INSERT INTO agent_strategies (id, name, type, expected_return_per_hour, stability_score, confidence, time_to_first_value, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 
 	_, err := s.pool.Exec(ctx, q,
 		st.ID, st.Name, st.Type,
-		st.ExpectedReturnPerHr, st.Volatility, st.TimeToFirstValue,
+		st.ExpectedReturnPerHr, st.StabilityScore, st.Confidence, st.TimeToFirstValue,
 		st.Status, st.CreatedAt, st.UpdatedAt,
 	)
 	if err != nil {
@@ -47,18 +50,38 @@ func (s *StrategyStore) Create(ctx context.Context, st Strategy) (Strategy, erro
 	return st, nil
 }
 
-// Get retrieves a strategy by ID.
-func (s *StrategyStore) Get(ctx context.Context, id string) (Strategy, error) {
-	const q = `
-		SELECT id, name, type, expected_return_per_hour, volatility, time_to_first_value, status, created_at, updated_at
-		FROM agent_strategies WHERE id = $1`
+const strategyCols = `id, name, type, expected_return_per_hour, stability_score, confidence, time_to_first_value, status, created_at, updated_at`
 
+func scanStrategy(row pgx.Row) (Strategy, error) {
 	var st Strategy
-	err := s.pool.QueryRow(ctx, q, id).Scan(
+	err := row.Scan(
 		&st.ID, &st.Name, &st.Type,
-		&st.ExpectedReturnPerHr, &st.Volatility, &st.TimeToFirstValue,
+		&st.ExpectedReturnPerHr, &st.StabilityScore, &st.Confidence, &st.TimeToFirstValue,
 		&st.Status, &st.CreatedAt, &st.UpdatedAt,
 	)
+	return st, err
+}
+
+func scanStrategyRows(rows pgx.Rows) ([]Strategy, error) {
+	var result []Strategy
+	for rows.Next() {
+		var st Strategy
+		if err := rows.Scan(
+			&st.ID, &st.Name, &st.Type,
+			&st.ExpectedReturnPerHr, &st.StabilityScore, &st.Confidence, &st.TimeToFirstValue,
+			&st.Status, &st.CreatedAt, &st.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan strategy: %w", err)
+		}
+		result = append(result, st)
+	}
+	return result, rows.Err()
+}
+
+// Get retrieves a strategy by ID.
+func (s *StrategyStore) Get(ctx context.Context, id string) (Strategy, error) {
+	q := `SELECT ` + strategyCols + ` FROM agent_strategies WHERE id = $1`
+	st, err := scanStrategy(s.pool.QueryRow(ctx, q, id))
 	if err != nil {
 		return Strategy{}, fmt.Errorf("get strategy: %w", err)
 	}
@@ -67,8 +90,7 @@ func (s *StrategyStore) Get(ctx context.Context, id string) (Strategy, error) {
 
 // ListActive returns all active strategies, sorted by expected return DESC.
 func (s *StrategyStore) ListActive(ctx context.Context) ([]Strategy, error) {
-	const q = `
-		SELECT id, name, type, expected_return_per_hour, volatility, time_to_first_value, status, created_at, updated_at
+	q := `SELECT ` + strategyCols + `
 		FROM agent_strategies
 		WHERE status = 'active'
 		ORDER BY expected_return_per_hour DESC, name ASC`
@@ -78,26 +100,12 @@ func (s *StrategyStore) ListActive(ctx context.Context) ([]Strategy, error) {
 		return nil, fmt.Errorf("list active strategies: %w", err)
 	}
 	defer rows.Close()
-
-	var result []Strategy
-	for rows.Next() {
-		var st Strategy
-		if err := rows.Scan(
-			&st.ID, &st.Name, &st.Type,
-			&st.ExpectedReturnPerHr, &st.Volatility, &st.TimeToFirstValue,
-			&st.Status, &st.CreatedAt, &st.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan strategy: %w", err)
-		}
-		result = append(result, st)
-	}
-	return result, rows.Err()
+	return scanStrategyRows(rows)
 }
 
 // ListAll returns all strategies regardless of status.
 func (s *StrategyStore) ListAll(ctx context.Context) ([]Strategy, error) {
-	const q = `
-		SELECT id, name, type, expected_return_per_hour, volatility, time_to_first_value, status, created_at, updated_at
+	q := `SELECT ` + strategyCols + `
 		FROM agent_strategies
 		ORDER BY status ASC, expected_return_per_hour DESC, name ASC`
 
@@ -106,20 +114,7 @@ func (s *StrategyStore) ListAll(ctx context.Context) ([]Strategy, error) {
 		return nil, fmt.Errorf("list all strategies: %w", err)
 	}
 	defer rows.Close()
-
-	var result []Strategy
-	for rows.Next() {
-		var st Strategy
-		if err := rows.Scan(
-			&st.ID, &st.Name, &st.Type,
-			&st.ExpectedReturnPerHr, &st.Volatility, &st.TimeToFirstValue,
-			&st.Status, &st.CreatedAt, &st.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan strategy: %w", err)
-		}
-		result = append(result, st)
-	}
-	return result, rows.Err()
+	return scanStrategyRows(rows)
 }
 
 // UpdateStatus changes the status of a strategy.
@@ -137,19 +132,13 @@ func (s *StrategyStore) UpdateStatus(ctx context.Context, id, status string) err
 
 // FindByType returns the first active strategy matching the given type.
 func (s *StrategyStore) FindByType(ctx context.Context, strategyType string) (Strategy, error) {
-	const q = `
-		SELECT id, name, type, expected_return_per_hour, volatility, time_to_first_value, status, created_at, updated_at
+	q := `SELECT ` + strategyCols + `
 		FROM agent_strategies
 		WHERE type = $1 AND status = 'active'
 		ORDER BY expected_return_per_hour DESC
 		LIMIT 1`
 
-	var st Strategy
-	err := s.pool.QueryRow(ctx, q, strategyType).Scan(
-		&st.ID, &st.Name, &st.Type,
-		&st.ExpectedReturnPerHr, &st.Volatility, &st.TimeToFirstValue,
-		&st.Status, &st.CreatedAt, &st.UpdatedAt,
-	)
+	st, err := scanStrategy(s.pool.QueryRow(ctx, q, strategyType))
 	if err == pgx.ErrNoRows {
 		return Strategy{}, nil
 	}
@@ -179,15 +168,16 @@ func (s *AllocationStore) Upsert(ctx context.Context, alloc StrategyAllocation) 
 	}
 
 	const q = `
-		INSERT INTO agent_strategy_allocations (id, strategy_id, allocated_hours, actual_hours, created_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO agent_strategy_allocations (id, strategy_id, allocated_hours, actual_hours, allocation_weight, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (strategy_id) DO UPDATE
 			SET allocated_hours = EXCLUDED.allocated_hours,
 				actual_hours = EXCLUDED.actual_hours,
+				allocation_weight = EXCLUDED.allocation_weight,
 				created_at = EXCLUDED.created_at`
 
 	_, err := s.pool.Exec(ctx, q,
-		alloc.ID, alloc.StrategyID, alloc.AllocatedHours, alloc.ActualHours, alloc.CreatedAt,
+		alloc.ID, alloc.StrategyID, alloc.AllocatedHours, alloc.ActualHours, alloc.AllocationWeight, alloc.CreatedAt,
 	)
 	if err != nil {
 		return StrategyAllocation{}, fmt.Errorf("upsert allocation: %w", err)
@@ -198,13 +188,13 @@ func (s *AllocationStore) Upsert(ctx context.Context, alloc StrategyAllocation) 
 // GetByStrategy retrieves the current allocation for a strategy.
 func (s *AllocationStore) GetByStrategy(ctx context.Context, strategyID string) (StrategyAllocation, error) {
 	const q = `
-		SELECT id, strategy_id, allocated_hours, actual_hours, created_at
+		SELECT id, strategy_id, allocated_hours, actual_hours, allocation_weight, created_at
 		FROM agent_strategy_allocations
 		WHERE strategy_id = $1`
 
 	var alloc StrategyAllocation
 	err := s.pool.QueryRow(ctx, q, strategyID).Scan(
-		&alloc.ID, &alloc.StrategyID, &alloc.AllocatedHours, &alloc.ActualHours, &alloc.CreatedAt,
+		&alloc.ID, &alloc.StrategyID, &alloc.AllocatedHours, &alloc.ActualHours, &alloc.AllocationWeight, &alloc.CreatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return StrategyAllocation{}, nil
@@ -218,7 +208,7 @@ func (s *AllocationStore) GetByStrategy(ctx context.Context, strategyID string) 
 // ListAll returns all current allocations.
 func (s *AllocationStore) ListAll(ctx context.Context) ([]StrategyAllocation, error) {
 	const q = `
-		SELECT id, strategy_id, allocated_hours, actual_hours, created_at
+		SELECT id, strategy_id, allocated_hours, actual_hours, allocation_weight, created_at
 		FROM agent_strategy_allocations
 		ORDER BY allocated_hours DESC`
 
@@ -232,7 +222,7 @@ func (s *AllocationStore) ListAll(ctx context.Context) ([]StrategyAllocation, er
 	for rows.Next() {
 		var alloc StrategyAllocation
 		if err := rows.Scan(
-			&alloc.ID, &alloc.StrategyID, &alloc.AllocatedHours, &alloc.ActualHours, &alloc.CreatedAt,
+			&alloc.ID, &alloc.StrategyID, &alloc.AllocatedHours, &alloc.ActualHours, &alloc.AllocationWeight, &alloc.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan allocation: %w", err)
 		}
@@ -258,18 +248,24 @@ func (s *PerformanceStore) Upsert(ctx context.Context, perf StrategyPerformance)
 	}
 
 	const q = `
-		INSERT INTO agent_strategy_performance (strategy_id, total_revenue, total_time_spent, roi, conversion_rate, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO agent_strategy_performance (strategy_id, opportunity_count, qualified_count, won_count, lost_count, total_verified_revenue, total_estimated_hours, roi_per_hour, conversion_rate, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (strategy_id) DO UPDATE
-			SET total_revenue = EXCLUDED.total_revenue,
-				total_time_spent = EXCLUDED.total_time_spent,
-				roi = EXCLUDED.roi,
+			SET opportunity_count = EXCLUDED.opportunity_count,
+				qualified_count = EXCLUDED.qualified_count,
+				won_count = EXCLUDED.won_count,
+				lost_count = EXCLUDED.lost_count,
+				total_verified_revenue = EXCLUDED.total_verified_revenue,
+				total_estimated_hours = EXCLUDED.total_estimated_hours,
+				roi_per_hour = EXCLUDED.roi_per_hour,
 				conversion_rate = EXCLUDED.conversion_rate,
 				updated_at = EXCLUDED.updated_at`
 
 	_, err := s.pool.Exec(ctx, q,
-		perf.StrategyID, perf.TotalRevenue, perf.TotalTimeSpent,
-		perf.ROI, perf.ConversionRate, perf.UpdatedAt,
+		perf.StrategyID,
+		perf.OpportunityCount, perf.QualifiedCount, perf.WonCount, perf.LostCount,
+		perf.TotalVerifiedRevenue, perf.TotalEstimatedHours,
+		perf.ROIPerHour, perf.ConversionRate, perf.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert performance: %w", err)
@@ -280,14 +276,17 @@ func (s *PerformanceStore) Upsert(ctx context.Context, perf StrategyPerformance)
 // Get retrieves performance data for a strategy.
 func (s *PerformanceStore) Get(ctx context.Context, strategyID string) (StrategyPerformance, error) {
 	const q = `
-		SELECT strategy_id, total_revenue, total_time_spent, roi, conversion_rate, updated_at
+		SELECT strategy_id, opportunity_count, qualified_count, won_count, lost_count,
+			total_verified_revenue, total_estimated_hours, roi_per_hour, conversion_rate, updated_at
 		FROM agent_strategy_performance
 		WHERE strategy_id = $1`
 
 	var p StrategyPerformance
 	err := s.pool.QueryRow(ctx, q, strategyID).Scan(
-		&p.StrategyID, &p.TotalRevenue, &p.TotalTimeSpent,
-		&p.ROI, &p.ConversionRate, &p.UpdatedAt,
+		&p.StrategyID,
+		&p.OpportunityCount, &p.QualifiedCount, &p.WonCount, &p.LostCount,
+		&p.TotalVerifiedRevenue, &p.TotalEstimatedHours,
+		&p.ROIPerHour, &p.ConversionRate, &p.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return StrategyPerformance{}, nil
@@ -301,9 +300,10 @@ func (s *PerformanceStore) Get(ctx context.Context, strategyID string) (Strategy
 // ListAll returns all performance records.
 func (s *PerformanceStore) ListAll(ctx context.Context) ([]StrategyPerformance, error) {
 	const q = `
-		SELECT strategy_id, total_revenue, total_time_spent, roi, conversion_rate, updated_at
+		SELECT strategy_id, opportunity_count, qualified_count, won_count, lost_count,
+			total_verified_revenue, total_estimated_hours, roi_per_hour, conversion_rate, updated_at
 		FROM agent_strategy_performance
-		ORDER BY roi DESC`
+		ORDER BY roi_per_hour DESC`
 
 	rows, err := s.pool.Query(ctx, q)
 	if err != nil {
@@ -315,8 +315,10 @@ func (s *PerformanceStore) ListAll(ctx context.Context) ([]StrategyPerformance, 
 	for rows.Next() {
 		var p StrategyPerformance
 		if err := rows.Scan(
-			&p.StrategyID, &p.TotalRevenue, &p.TotalTimeSpent,
-			&p.ROI, &p.ConversionRate, &p.UpdatedAt,
+			&p.StrategyID,
+			&p.OpportunityCount, &p.QualifiedCount, &p.WonCount, &p.LostCount,
+			&p.TotalVerifiedRevenue, &p.TotalEstimatedHours,
+			&p.ROIPerHour, &p.ConversionRate, &p.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan performance: %w", err)
 		}

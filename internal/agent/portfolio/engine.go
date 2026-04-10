@@ -73,11 +73,14 @@ func (e *Engine) CreateStrategy(ctx context.Context, st Strategy) (Strategy, err
 	if !ValidStrategyTypes[st.Type] {
 		return Strategy{}, fmt.Errorf("invalid strategy type: %s", st.Type)
 	}
-	if st.Volatility < 0 || st.Volatility > 1 {
-		return Strategy{}, fmt.Errorf("volatility must be in [0, 1]")
+	if st.StabilityScore < 0 || st.StabilityScore > 1 {
+		return Strategy{}, fmt.Errorf("stability_score must be in [0, 1]")
 	}
 	if st.ExpectedReturnPerHr < 0 {
 		return Strategy{}, fmt.Errorf("expected_return_per_hour must be >= 0")
+	}
+	if st.Confidence < 0 || st.Confidence > 1 {
+		return Strategy{}, fmt.Errorf("confidence must be in [0, 1]")
 	}
 
 	saved, err := e.strategies.Create(ctx, st)
@@ -86,11 +89,13 @@ func (e *Engine) CreateStrategy(ctx context.Context, st Strategy) (Strategy, err
 	}
 
 	e.auditEvent(ctx, "strategy", saved.ID, "strategy.created", map[string]any{
-		"strategy_id":  saved.ID,
-		"name":         saved.Name,
-		"type":         saved.Type,
-		"expected_rph": saved.ExpectedReturnPerHr,
-		"volatility":   saved.Volatility,
+		"strategy_id":      saved.ID,
+		"name":             saved.Name,
+		"type":             saved.Type,
+		"expected_rph":     saved.ExpectedReturnPerHr,
+		"stability_score":  saved.StabilityScore,
+		"confidence":       saved.Confidence,
+		"time_to_first_value": saved.TimeToFirstValue,
 	})
 
 	return saved, nil
@@ -148,6 +153,9 @@ func (e *Engine) GetPortfolio(ctx context.Context) (Portfolio, error) {
 	totalActual := 0.0
 	totalRevenue := 0.0
 	allocHrsMap := make(map[string]float64)
+	dominantID := ""
+	dominantHrs := 0.0
+	var latestRebalance time.Time
 
 	for _, st := range strategies {
 		entry := PortfolioEntry{Strategy: st}
@@ -156,10 +164,17 @@ func (e *Engine) GetPortfolio(ctx context.Context) (Portfolio, error) {
 			totalAllocated += a.AllocatedHours
 			totalActual += a.ActualHours
 			allocHrsMap[st.ID] = a.AllocatedHours
+			if a.AllocatedHours > dominantHrs {
+				dominantHrs = a.AllocatedHours
+				dominantID = st.ID
+			}
+			if a.CreatedAt.After(latestRebalance) {
+				latestRebalance = a.CreatedAt
+			}
 		}
 		if p, ok := perfMap[st.ID]; ok {
 			entry.Performance = &p
-			totalRevenue += p.TotalRevenue
+			totalRevenue += p.TotalVerifiedRevenue
 		}
 		entries = append(entries, entry)
 	}
@@ -169,14 +184,28 @@ func (e *Engine) GetPortfolio(ctx context.Context) (Portfolio, error) {
 		portfolioROI = totalRevenue / totalActual
 	}
 
+	divIdx := ComputeDiversificationIndex(allocHrsMap)
+
 	return Portfolio{
 		Entries:            entries,
+		Summary: PortfolioSummary{
+			TotalActiveStrategies: len(strategies),
+			TotalAllocatedHours:   totalAllocated,
+			DominantStrategyID:    dominantID,
+			DiversificationScore:  divIdx,
+			RebalancedAt:          latestRebalance,
+		},
 		TotalAllocatedHrs:  totalAllocated,
 		TotalActualHrs:     totalActual,
 		TotalRevenue:       totalRevenue,
 		PortfolioROI:       portfolioROI,
-		DiversificationIdx: ComputeDiversificationIndex(allocHrsMap),
+		DiversificationIdx: divIdx,
 	}, nil
+}
+
+// GetAllocations returns all current allocations.
+func (e *Engine) GetAllocations(ctx context.Context) ([]StrategyAllocation, error) {
+	return e.allocations.ListAll(ctx)
 }
 
 // GetPerformance returns all performance records as a summary.
@@ -186,8 +215,11 @@ func (e *Engine) GetPerformance(ctx context.Context) ([]StrategyPerformance, err
 
 // RecordPerformance updates the performance data for a strategy.
 func (e *Engine) RecordPerformance(ctx context.Context, perf StrategyPerformance) error {
-	if perf.TotalTimeSpent > 0 {
-		perf.ROI = ComputeROI(perf.TotalRevenue, perf.TotalTimeSpent)
+	if perf.TotalEstimatedHours > 0 {
+		perf.ROIPerHour = ComputeROI(perf.TotalVerifiedRevenue, perf.TotalEstimatedHours)
+	}
+	if perf.OpportunityCount > 0 {
+		perf.ConversionRate = ComputeConversionRate(perf.WonCount, perf.OpportunityCount)
 	}
 
 	if err := e.performances.Upsert(ctx, perf); err != nil {
@@ -195,11 +227,14 @@ func (e *Engine) RecordPerformance(ctx context.Context, perf StrategyPerformance
 	}
 
 	e.auditEvent(ctx, "strategy_performance", perf.StrategyID, "strategy.performance_updated", map[string]any{
-		"strategy_id":      perf.StrategyID,
-		"total_revenue":    perf.TotalRevenue,
-		"total_time_spent": perf.TotalTimeSpent,
-		"roi":              perf.ROI,
-		"conversion_rate":  perf.ConversionRate,
+		"strategy_id":           perf.StrategyID,
+		"total_verified_revenue": perf.TotalVerifiedRevenue,
+		"total_estimated_hours": perf.TotalEstimatedHours,
+		"roi_per_hour":          perf.ROIPerHour,
+		"conversion_rate":       perf.ConversionRate,
+		"opportunity_count":     perf.OpportunityCount,
+		"won_count":             perf.WonCount,
+		"lost_count":            perf.LostCount,
 	})
 
 	return nil
@@ -249,19 +284,21 @@ func (e *Engine) Rebalance(ctx context.Context) (RebalanceResult, error) {
 
 	// Compute scores and allocations.
 	rawScores := ComputeAllocationScores(strategies, perfMap, pressure, familyPriorityHigh)
-	hourAllocs := NormaliseAllocations(rawScores, availableHours)
+	hourAllocs, weightAllocs := NormaliseAllocations(rawScores, availableHours)
 
 	// Persist new allocations.
 	var newAllocs []StrategyAllocation
 	now := time.Now().UTC()
 	for _, st := range strategies {
 		hrs := hourAllocs[st.ID]
+		wt := weightAllocs[st.ID]
 		alloc := StrategyAllocation{
-			ID:             uuid.New().String(),
-			StrategyID:     st.ID,
-			AllocatedHours: hrs,
-			ActualHours:    0,
-			CreatedAt:      now,
+			ID:               uuid.New().String(),
+			StrategyID:       st.ID,
+			AllocatedHours:   hrs,
+			ActualHours:      0,
+			AllocationWeight: wt,
+			CreatedAt:        now,
 		}
 
 		// Preserve actual_hours from previous allocation if exists.
@@ -277,6 +314,14 @@ func (e *Engine) Rebalance(ctx context.Context) (RebalanceResult, error) {
 			return RebalanceResult{}, fmt.Errorf("upsert allocation for %s: %w", st.ID, err)
 		}
 		newAllocs = append(newAllocs, saved)
+
+		e.auditEvent(ctx, "strategy_allocation", st.ID, "portfolio.allocation_updated", map[string]any{
+			"strategy_id":      st.ID,
+			"allocated_hours":  hrs,
+			"allocation_weight": wt,
+			"roi_per_hour":     rawScores[st.ID],
+			"reason":           "rebalance",
+		})
 	}
 
 	// Detect signals.
@@ -285,6 +330,17 @@ func (e *Engine) Rebalance(ctx context.Context) (RebalanceResult, error) {
 		allocMap[k] = v
 	}
 	signals := DetectSignals(strategies, perfMap, allocMap, availableHours)
+
+	// Emit audit events for each signal.
+	for _, sig := range signals {
+		e.auditEvent(ctx, "strategy", sig.StrategyID, "strategy.signal_applied", map[string]any{
+			"strategy_id":   sig.StrategyID,
+			"strategy_type": sig.StrategyType,
+			"signal_type":   sig.SignalType,
+			"score":         sig.Score,
+			"reason":        sig.Reason,
+		})
+	}
 
 	result := RebalanceResult{
 		PreviousAllocations: prevAllocs,

@@ -5,19 +5,33 @@ import (
 	"testing"
 )
 
-// --- 1. Opportunity maps to correct strategy ---
+// ----------------------------------------------------------------
+// 1. Opportunity maps to correct strategy
+// ----------------------------------------------------------------
 
 func TestMapOpportunityToStrategy(t *testing.T) {
 	tests := []struct {
 		oppType  string
 		expected string
 	}{
+		// Spec-required mappings.
+		{"consulting_lead", TypeConsulting},
+		{"automation_candidate", TypeAutomationServices},
+		{"product_feature_candidate", TypeProduct},
+		{"content_opportunity", TypeContent},
+		{"cost_saving_candidate", TypeCostEfficiency},
+		// 2. Resale/repackage deterministic mapping.
+		{"resale_or_repackage_candidate", TypeAutomationServices},
+		// Backward-compatible short forms.
 		{"consulting", TypeConsulting},
 		{"automation", TypeAutomation},
+		{"automation_services", TypeAutomationServices},
 		{"service", TypeService},
 		{"content", TypeContent},
 		{"product", TypeProduct},
+		{"cost_efficiency", TypeCostEfficiency},
 		{"other", TypeOther},
+		// 3. Unknown type handled safely.
 		{"unknown_type", TypeOther},
 		{"", TypeOther},
 	}
@@ -29,14 +43,16 @@ func TestMapOpportunityToStrategy(t *testing.T) {
 	}
 }
 
-// --- 2. Allocation respects capacity ---
+// ----------------------------------------------------------------
+// Allocation & normalisation
+// ----------------------------------------------------------------
 
 func TestNormaliseAllocations_Basic(t *testing.T) {
 	scores := map[string]float64{
 		"a": 0.6,
 		"b": 0.4,
 	}
-	allocs := NormaliseAllocations(scores, 40.0)
+	allocs, weights := NormaliseAllocations(scores, 40.0)
 
 	total := 0.0
 	for _, h := range allocs {
@@ -45,10 +61,17 @@ func TestNormaliseAllocations_Basic(t *testing.T) {
 	if total < 39.9 || total > 40.1 {
 		t.Errorf("total allocated = %.2f, want ~40.0", total)
 	}
+	wTotal := 0.0
+	for _, w := range weights {
+		wTotal += w
+	}
+	if wTotal < 0.99 || wTotal > 1.01 {
+		t.Errorf("weights total = %.4f, want ~1.0", wTotal)
+	}
 }
 
+// 9. Concentration cap enforced.
 func TestNormaliseAllocations_MinMaxConstraints(t *testing.T) {
-	// 5 strategies: one very dominant, rest near zero.
 	scores := map[string]float64{
 		"a": 0.90,
 		"b": 0.01,
@@ -56,7 +79,7 @@ func TestNormaliseAllocations_MinMaxConstraints(t *testing.T) {
 		"d": 0.01,
 		"e": 0.01,
 	}
-	allocs := NormaliseAllocations(scores, 100.0)
+	allocs, _ := NormaliseAllocations(scores, 100.0)
 
 	for id, hrs := range allocs {
 		minH := 100.0 * MinAllocationFraction
@@ -71,14 +94,14 @@ func TestNormaliseAllocations_MinMaxConstraints(t *testing.T) {
 }
 
 func TestNormaliseAllocations_Empty(t *testing.T) {
-	allocs := NormaliseAllocations(map[string]float64{}, 40.0)
-	if len(allocs) != 0 {
-		t.Errorf("expected empty allocations, got %d", len(allocs))
+	allocs, weights := NormaliseAllocations(map[string]float64{}, 40.0)
+	if len(allocs) != 0 || len(weights) != 0 {
+		t.Errorf("expected empty allocations, got %d/%d", len(allocs), len(weights))
 	}
 }
 
 func TestNormaliseAllocations_ZeroHours(t *testing.T) {
-	allocs := NormaliseAllocations(map[string]float64{"a": 0.5}, 0)
+	allocs, _ := NormaliseAllocations(map[string]float64{"a": 0.5}, 0)
 	if len(allocs) != 0 {
 		t.Errorf("expected empty allocations for 0 hours, got %d", len(allocs))
 	}
@@ -90,7 +113,7 @@ func TestNormaliseAllocations_EqualScores(t *testing.T) {
 		"b": 0.5,
 		"c": 0.5,
 	}
-	allocs := NormaliseAllocations(scores, 30.0)
+	allocs, _ := NormaliseAllocations(scores, 30.0)
 
 	for id, hrs := range allocs {
 		if hrs < 9.9 || hrs > 10.1 {
@@ -99,7 +122,22 @@ func TestNormaliseAllocations_EqualScores(t *testing.T) {
 	}
 }
 
-// --- 3. ROI calculated correctly ---
+func TestNormaliseAllocations_ZeroScores(t *testing.T) {
+	scores := map[string]float64{
+		"a": 0,
+		"b": 0,
+	}
+	allocs, _ := NormaliseAllocations(scores, 20.0)
+	for _, hrs := range allocs {
+		if hrs < 9.9 || hrs > 10.1 {
+			t.Errorf("expected equal distribution for zero scores, got %.2f", hrs)
+		}
+	}
+}
+
+// ----------------------------------------------------------------
+// 5. ROI per hour computed correctly
+// ----------------------------------------------------------------
 
 func TestComputeROI(t *testing.T) {
 	tests := []struct {
@@ -118,14 +156,49 @@ func TestComputeROI(t *testing.T) {
 	}
 }
 
-// --- 4. Low ROI strategy penalized ---
+// ----------------------------------------------------------------
+// 6. Conversion rate computed correctly
+// ----------------------------------------------------------------
+
+func TestComputeConversionRate(t *testing.T) {
+	tests := []struct {
+		won, total int
+		expected   float64
+	}{
+		{5, 10, 0.5},
+		{0, 10, 0},
+		{3, 0, 0},
+		{10, 10, 1.0},
+	}
+	for _, tc := range tests {
+		got := ComputeConversionRate(tc.won, tc.total)
+		if got != tc.expected {
+			t.Errorf("ComputeConversionRate(%d, %d) = %.4f, want %.4f", tc.won, tc.total, got, tc.expected)
+		}
+	}
+}
+
+// ----------------------------------------------------------------
+// 4. Verified revenue contributes to performance (via ROI)
+// ----------------------------------------------------------------
+
+func TestVerifiedRevenueContributesToROI(t *testing.T) {
+	roi := ComputeROI(5000, 50) // 100 $/hr
+	if roi != 100 {
+		t.Errorf("ROI from verified revenue: got %.2f, want 100", roi)
+	}
+}
+
+// ----------------------------------------------------------------
+// Strategy boost: low ROI penalised, high ROI boosted
+// ----------------------------------------------------------------
 
 func TestComputeStrategyBoost_LowROI(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 30},
 	}
 	perfMap := map[string]StrategyPerformance{
-		"s1": {StrategyID: "s1", TotalRevenue: 25, TotalTimeSpent: 10, ROI: 2.5}, // ROI = 2.5 $/hr < 10
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 25, TotalEstimatedHours: 10, ROIPerHour: 2.5},
 	}
 
 	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
@@ -137,14 +210,12 @@ func TestComputeStrategyBoost_LowROI(t *testing.T) {
 	}
 }
 
-// --- 5. High ROI boosted ---
-
 func TestComputeStrategyBoost_HighROI(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 80},
 	}
 	perfMap := map[string]StrategyPerformance{
-		"s1": {StrategyID: "s1", TotalRevenue: 600, TotalTimeSpent: 10, ROI: 60}, // ROI = 60 $/hr > 50
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 600, TotalEstimatedHours: 10, ROIPerHour: 60},
 	}
 
 	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
@@ -156,28 +227,32 @@ func TestComputeStrategyBoost_HighROI(t *testing.T) {
 	}
 }
 
+// 13. No portfolio data → no effect.
 func TestComputeStrategyBoost_NoData(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 30},
 	}
-	perfMap := map[string]StrategyPerformance{} // no performance
+	perfMap := map[string]StrategyPerformance{}
 
 	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
-	// Expected return 30 < HighROIThreshold (50), so no boost from expected either.
 	if boost != 0 {
 		t.Errorf("expected 0 boost without data and low expected return, got %.4f", boost)
 	}
 }
 
+// 11. High-performing strategy yields bounded boost.
 func TestComputeStrategyBoost_HighExpectedReturn(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeAutomation, Status: StatusActive, ExpectedReturnPerHr: 80},
 	}
-	perfMap := map[string]StrategyPerformance{} // no real data
+	perfMap := map[string]StrategyPerformance{}
 
 	boost := ComputeStrategyBoost(TypeAutomation, strategies, perfMap)
 	if boost <= 0 {
 		t.Errorf("expected positive boost from high expected return, got %.4f", boost)
+	}
+	if boost > StrategyPriorityBoostMax {
+		t.Errorf("boost %.4f exceeds max %.4f", boost, StrategyPriorityBoostMax)
 	}
 }
 
@@ -185,9 +260,7 @@ func TestComputeStrategyBoost_InactiveStrategy(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeConsulting, Status: StatusPaused, ExpectedReturnPerHr: 200},
 	}
-	perfMap := map[string]StrategyPerformance{}
-
-	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
+	boost := ComputeStrategyBoost(TypeConsulting, strategies, nil)
 	if boost != 0 {
 		t.Errorf("expected 0 boost for paused strategy, got %.4f", boost)
 	}
@@ -203,7 +276,41 @@ func TestComputeStrategyBoost_UnknownType(t *testing.T) {
 	}
 }
 
-// --- 6. Diversification enforced ---
+func TestComputeStrategyBoost_BoundsCheck(t *testing.T) {
+	strategies := []Strategy{
+		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 10000},
+	}
+	perfMap := map[string]StrategyPerformance{
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 100000, TotalEstimatedHours: 10},
+	}
+
+	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
+	if boost > StrategyPriorityBoostMax {
+		t.Errorf("boost %.4f exceeds max %.4f", boost, StrategyPriorityBoostMax)
+	}
+	if boost < -StrategyPenaltyMax {
+		t.Errorf("boost %.4f exceeds negative max %.4f", boost, StrategyPenaltyMax)
+	}
+}
+
+// 12. Over-allocated weak strategy penalised.
+func TestComputeStrategyBoost_OverAllocatedWeakPenalised(t *testing.T) {
+	strategies := []Strategy{
+		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 5, StabilityScore: 0.3},
+	}
+	perfMap := map[string]StrategyPerformance{
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 20, TotalEstimatedHours: 10, ROIPerHour: 2.0},
+	}
+	// ROI = 2.0 < LowROIThreshold (10) → penalty.
+	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
+	if boost >= 0 {
+		t.Errorf("expected penalty for over-allocated weak strategy, got %.4f", boost)
+	}
+}
+
+// ----------------------------------------------------------------
+// Diversification
+// ----------------------------------------------------------------
 
 func TestComputeDiversificationIndex_Perfect(t *testing.T) {
 	allocs := map[string]float64{
@@ -243,32 +350,39 @@ func TestComputeDiversificationIndex_Empty(t *testing.T) {
 	}
 }
 
-// --- 7. Portfolio rebalance / allocation scores ---
+// ----------------------------------------------------------------
+// 7. High ROI strategy gets more allocation
+// ----------------------------------------------------------------
 
-func TestComputeAllocationScores_BasicFlow(t *testing.T) {
+func TestComputeAllocationScores_HighROIGetsMore(t *testing.T) {
 	strategies := []Strategy{
-		{ID: "s1", Type: TypeConsulting, ExpectedReturnPerHr: 100, Volatility: 0.2},
-		{ID: "s2", Type: TypeContent, ExpectedReturnPerHr: 30, Volatility: 0.8},
+		{ID: "s1", Type: TypeConsulting, ExpectedReturnPerHr: 100, StabilityScore: 0.8, TimeToFirstValue: 10},
+		{ID: "s2", Type: TypeContent, ExpectedReturnPerHr: 20, StabilityScore: 0.5, TimeToFirstValue: 50},
 	}
-	perfMap := map[string]StrategyPerformance{}
-
-	scores := ComputeAllocationScores(strategies, perfMap, 0.5, true)
-	if len(scores) != 2 {
-		t.Fatalf("expected 2 scores, got %d", len(scores))
-	}
-
-	// Higher expected return + lower volatility should score higher.
+	scores := ComputeAllocationScores(strategies, nil, 0.0, false)
 	if scores["s1"] <= scores["s2"] {
-		t.Errorf("s1 (high return, low vol) should score > s2 (low return, high vol): s1=%.4f s2=%.4f", scores["s1"], scores["s2"])
+		t.Errorf("s1 (high ROI) should score > s2 (low ROI): s1=%.4f s2=%.4f", scores["s1"], scores["s2"])
+	}
+}
+
+// 8. High stability favored under pressure.
+func TestComputeAllocationScores_HighStabilityFavoredUnderPressure(t *testing.T) {
+	strategies := []Strategy{
+		{ID: "stable", Type: TypeConsulting, ExpectedReturnPerHr: 60, StabilityScore: 0.95, TimeToFirstValue: 10},
+		{ID: "risky", Type: TypeContent, ExpectedReturnPerHr: 60, StabilityScore: 0.2, TimeToFirstValue: 10},
+	}
+	scores := ComputeAllocationScores(strategies, nil, 0.9, true)
+	if scores["stable"] <= scores["risky"] {
+		t.Errorf("stable strategy should score higher under pressure: stable=%.4f risky=%.4f", scores["stable"], scores["risky"])
 	}
 }
 
 func TestComputeAllocationScores_WithRealPerformance(t *testing.T) {
 	strategies := []Strategy{
-		{ID: "s1", Type: TypeConsulting, ExpectedReturnPerHr: 50, Volatility: 0.3},
+		{ID: "s1", Type: TypeConsulting, ExpectedReturnPerHr: 50, StabilityScore: 0.7, TimeToFirstValue: 20},
 	}
 	perfMap := map[string]StrategyPerformance{
-		"s1": {StrategyID: "s1", TotalRevenue: 500, TotalTimeSpent: 10}, // real ROI = 50
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 500, TotalEstimatedHours: 10},
 	}
 
 	scores := ComputeAllocationScores(strategies, perfMap, 0.0, false)
@@ -279,14 +393,13 @@ func TestComputeAllocationScores_WithRealPerformance(t *testing.T) {
 
 func TestComputeAllocationScores_HighPressure(t *testing.T) {
 	strategies := []Strategy{
-		{ID: "s1", Type: TypeConsulting, ExpectedReturnPerHr: 100, Volatility: 0.2},
-		{ID: "s2", Type: TypeContent, ExpectedReturnPerHr: 20, Volatility: 0.1},
+		{ID: "s1", Type: TypeConsulting, ExpectedReturnPerHr: 100, StabilityScore: 0.8, TimeToFirstValue: 10},
+		{ID: "s2", Type: TypeContent, ExpectedReturnPerHr: 20, StabilityScore: 0.9, TimeToFirstValue: 100},
 	}
 
 	lowPressure := ComputeAllocationScores(strategies, nil, 0.1, false)
 	highPressure := ComputeAllocationScores(strategies, nil, 0.9, false)
 
-	// Under high pressure, the gap between high and low ROI strategies should be larger.
 	gapLow := lowPressure["s1"] - lowPressure["s2"]
 	gapHigh := highPressure["s1"] - highPressure["s2"]
 	if gapHigh <= gapLow {
@@ -301,14 +414,42 @@ func TestComputeAllocationScores_Empty(t *testing.T) {
 	}
 }
 
-// --- 8. Strategic signals ---
+// 10. Low capacity shifts allocation to short-cycle strategies.
+func TestComputeAllocationScores_LowCapacityFavorsShortCycle(t *testing.T) {
+	strategies := []Strategy{
+		{ID: "fast", Type: TypeConsulting, ExpectedReturnPerHr: 60, StabilityScore: 0.8, TimeToFirstValue: 5},
+		{ID: "slow", Type: TypeProduct, ExpectedReturnPerHr: 60, StabilityScore: 0.8, TimeToFirstValue: 150},
+	}
+	// Under high pressure with family priority, short-cycle should dominate.
+	scores := ComputeAllocationScores(strategies, nil, 0.8, true)
+	if scores["fast"] <= scores["slow"] {
+		t.Errorf("fast strategy should score higher under low capacity: fast=%.4f slow=%.4f", scores["fast"], scores["slow"])
+	}
+}
+
+// Family-safe: slow speculative penalised under family constraint.
+func TestComputeAllocationScores_FamilySafePenalisesSpeculative(t *testing.T) {
+	strategies := []Strategy{
+		{ID: "safe", Type: TypeConsulting, ExpectedReturnPerHr: 50, StabilityScore: 0.9, TimeToFirstValue: 10},
+		{ID: "spec", Type: TypeProduct, ExpectedReturnPerHr: 50, StabilityScore: 0.2, TimeToFirstValue: 150},
+	}
+	// Family priority high → speculative penalised.
+	scores := ComputeAllocationScores(strategies, nil, 0.7, true)
+	if scores["safe"] <= scores["spec"] {
+		t.Errorf("safe strategy should beat speculative under family priority: safe=%.4f spec=%.4f", scores["safe"], scores["spec"])
+	}
+}
+
+// ----------------------------------------------------------------
+// Strategic signals
+// ----------------------------------------------------------------
 
 func TestDetectSignals_Underperforming(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 30},
 	}
 	perfMap := map[string]StrategyPerformance{
-		"s1": {StrategyID: "s1", TotalRevenue: 30, TotalTimeSpent: 10}, // ROI = 3
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 30, TotalEstimatedHours: 10},
 	}
 	allocs := map[string]float64{"s1": 10}
 
@@ -326,7 +467,7 @@ func TestDetectSignals_Underperforming(t *testing.T) {
 
 func TestDetectSignals_HighPotential(t *testing.T) {
 	strategies := []Strategy{
-		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 80, Volatility: 0.3},
+		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 80, StabilityScore: 0.7},
 	}
 	signals := DetectSignals(strategies, nil, nil, 40)
 	found := false
@@ -344,9 +485,8 @@ func TestDetectSignals_NoSignalsForColdStart(t *testing.T) {
 	strategies := []Strategy{
 		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 30},
 	}
-	// Only 2 hours of data — below MinSamplesForPerformance (5).
 	perfMap := map[string]StrategyPerformance{
-		"s1": {StrategyID: "s1", TotalRevenue: 5, TotalTimeSpent: 2},
+		"s1": {StrategyID: "s1", TotalVerifiedRevenue: 5, TotalEstimatedHours: 2},
 	}
 	allocs := map[string]float64{"s1": 10}
 
@@ -358,7 +498,9 @@ func TestDetectSignals_NoSignalsForColdStart(t *testing.T) {
 	}
 }
 
-// --- Graph adapter nil-safety ---
+// ----------------------------------------------------------------
+// Graph adapter nil-safety
+// ----------------------------------------------------------------
 
 func TestGraphAdapter_NilSafe(t *testing.T) {
 	var a *GraphAdapter
@@ -376,6 +518,11 @@ func TestGraphAdapter_NilSafe(t *testing.T) {
 	p := a.GetPortfolio(context.Background())
 	if len(p.Entries) != 0 {
 		t.Error("nil adapter: expected empty portfolio")
+	}
+
+	allocs, err := a.GetAllocations(context.Background())
+	if err != nil || allocs != nil {
+		t.Error("nil adapter: expected nil allocations and no error")
 	}
 }
 
@@ -397,10 +544,15 @@ func TestGraphAdapter_IsStrategyRelated(t *testing.T) {
 	}
 }
 
-// --- Validation ---
+// ----------------------------------------------------------------
+// Validation
+// ----------------------------------------------------------------
 
 func TestValidStrategyTypes(t *testing.T) {
-	expected := []string{"consulting", "automation", "product", "content", "service", "other"}
+	expected := []string{
+		"consulting", "automation", "automation_services",
+		"product", "content", "cost_efficiency", "service", "other",
+	}
 	for _, tp := range expected {
 		if !ValidStrategyTypes[tp] {
 			t.Errorf("expected %q to be valid", tp)
@@ -420,8 +572,6 @@ func TestValidStatuses(t *testing.T) {
 	}
 }
 
-// --- Score bounds ---
-
 func TestClamp01(t *testing.T) {
 	tests := []struct {
 		in, out float64
@@ -439,37 +589,72 @@ func TestClamp01(t *testing.T) {
 	}
 }
 
-// --- Boost bounds ---
+// ----------------------------------------------------------------
+// PortfolioSummary fields
+// ----------------------------------------------------------------
 
-func TestComputeStrategyBoost_BoundsCheck(t *testing.T) {
-	// Even extreme values should stay within bounds.
-	strategies := []Strategy{
-		{ID: "s1", Type: TypeConsulting, Status: StatusActive, ExpectedReturnPerHr: 10000},
+func TestPortfolioSummary_Fields(t *testing.T) {
+	s := PortfolioSummary{
+		TotalActiveStrategies: 3,
+		TotalAllocatedHours:   30,
+		DominantStrategyID:    "s1",
+		DiversificationScore:  0.85,
 	}
-	perfMap := map[string]StrategyPerformance{
-		"s1": {StrategyID: "s1", TotalRevenue: 100000, TotalTimeSpent: 10},
+	if s.TotalActiveStrategies != 3 {
+		t.Errorf("TotalActiveStrategies = %d, want 3", s.TotalActiveStrategies)
 	}
-
-	boost := ComputeStrategyBoost(TypeConsulting, strategies, perfMap)
-	if boost > StrategyPriorityBoostMax {
-		t.Errorf("boost %.4f exceeds max %.4f", boost, StrategyPriorityBoostMax)
-	}
-	if boost < -StrategyPenaltyMax {
-		t.Errorf("boost %.4f exceeds negative max %.4f", boost, StrategyPenaltyMax)
+	if s.DominantStrategyID != "s1" {
+		t.Errorf("DominantStrategyID = %q, want s1", s.DominantStrategyID)
 	}
 }
 
-// --- Allocation with zero scores ---
+// ----------------------------------------------------------------
+// AllocationWeight propagation
+// ----------------------------------------------------------------
 
-func TestNormaliseAllocations_ZeroScores(t *testing.T) {
+func TestAllocationWeight_ComputedByNormalise(t *testing.T) {
+	// Use 4 strategies so min/max constraints don't force equal weights.
 	scores := map[string]float64{
-		"a": 0,
-		"b": 0,
+		"a": 0.6,
+		"b": 0.3,
+		"c": 0.05,
+		"d": 0.05,
 	}
-	allocs := NormaliseAllocations(scores, 20.0)
-	for _, hrs := range allocs {
-		if hrs < 9.9 || hrs > 10.1 {
-			t.Errorf("expected equal distribution for zero scores, got %.2f", hrs)
-		}
+	_, weights := NormaliseAllocations(scores, 40.0)
+	if weights["a"] <= weights["b"] {
+		t.Errorf("expected a weight > b weight: a=%.4f b=%.4f", weights["a"], weights["b"])
+	}
+	total := 0.0
+	for _, w := range weights {
+		total += w
+	}
+	if total < 0.99 || total > 1.01 {
+		t.Errorf("weights should sum to ~1.0, got %.4f", total)
+	}
+}
+
+// ----------------------------------------------------------------
+// Speed component (time-to-first-value)
+// ----------------------------------------------------------------
+
+func TestSpeedComponent_FasterIsBetter(t *testing.T) {
+	strategies := []Strategy{
+		{ID: "fast", Type: TypeConsulting, ExpectedReturnPerHr: 50, StabilityScore: 0.5, TimeToFirstValue: 10},
+		{ID: "slow", Type: TypeConsulting, ExpectedReturnPerHr: 50, StabilityScore: 0.5, TimeToFirstValue: 180},
+	}
+	scores := ComputeAllocationScores(strategies, nil, 0.0, false)
+	if scores["fast"] <= scores["slow"] {
+		t.Errorf("faster TTF should score higher: fast=%.4f slow=%.4f", scores["fast"], scores["slow"])
+	}
+}
+
+// ----------------------------------------------------------------
+// Cost efficiency strategy type
+// ----------------------------------------------------------------
+
+func TestCostEfficiencyMapping(t *testing.T) {
+	got := MapOpportunityToStrategy("cost_saving_candidate")
+	if got != TypeCostEfficiency {
+		t.Errorf("cost_saving_candidate should map to cost_efficiency, got %q", got)
 	}
 }

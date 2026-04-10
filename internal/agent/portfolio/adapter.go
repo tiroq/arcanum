@@ -102,6 +102,14 @@ func (a *GraphAdapter) Rebalance(ctx context.Context) (RebalanceResult, error) {
 	return a.engine.Rebalance(ctx)
 }
 
+// GetAllocations returns all current allocations (for API).
+func (a *GraphAdapter) GetAllocations(ctx context.Context) ([]StrategyAllocation, error) {
+	if a == nil || a.engine == nil {
+		return nil, nil
+	}
+	return a.engine.GetAllocations(ctx)
+}
+
 // GetCapacityAvailableHoursWeek exposes weekly capacity for use by other modules.
 // Fail-open: returns 0 when engine or capacity provider is nil.
 func (a *GraphAdapter) GetCapacityAvailableHoursWeek(ctx context.Context) float64 {
