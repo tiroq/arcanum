@@ -17,9 +17,11 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/arbitration"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
+	"github.com/tiroq/arcanum/internal/agent/capacity"
 	"github.com/tiroq/arcanum/internal/agent/causal"
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
+	"github.com/tiroq/arcanum/internal/agent/discovery"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	"github.com/tiroq/arcanum/internal/agent/goals"
@@ -91,6 +93,8 @@ type Handlers struct {
 	incomeEngine       *income.Engine
 	signalEngine       *signals.Engine
 	financialPressure  *financialpressure.GraphAdapter
+	discoveryEngine    *discovery.Engine
+	capacityAdapter    *capacity.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -282,6 +286,18 @@ func (h *Handlers) WithSignalEngine(se *signals.Engine) *Handlers {
 // WithFinancialPressure attaches the financial pressure adapter for pressure API (Iteration 38).
 func (h *Handlers) WithFinancialPressure(fp *financialpressure.GraphAdapter) *Handlers {
 	h.financialPressure = fp
+	return h
+}
+
+// WithDiscoveryEngine attaches the discovery engine for opportunity discovery API (Iteration 40).
+func (h *Handlers) WithDiscoveryEngine(de *discovery.Engine) *Handlers {
+	h.discoveryEngine = de
+	return h
+}
+
+// WithCapacity attaches the capacity adapter for time allocation API (Iteration 41).
+func (h *Handlers) WithCapacity(ca *capacity.GraphAdapter) *Handlers {
+	h.capacityAdapter = ca
 	return h
 }
 
@@ -3678,4 +3694,185 @@ func (h *Handlers) FinancialPressure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, pressure)
+}
+
+// --- Opportunity Discovery API (Iteration 40) ---
+
+// DiscoveryCandidates handles GET /api/v1/agent/income/discovery/candidates.
+func (h *Handlers) DiscoveryCandidates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.discoveryEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"candidates": []any{}})
+		return
+	}
+
+	pg := parsePagination(r)
+	candidates, err := h.discoveryEngine.ListCandidates(r.Context(), pg.PerPage, pg.Offset)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if candidates == nil {
+		candidates = []discovery.DiscoveryCandidate{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidates": candidates})
+}
+
+// DiscoveryRun handles POST /api/v1/agent/income/discovery/run.
+func (h *Handlers) DiscoveryRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.discoveryEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "discovery engine not available")
+		return
+	}
+
+	result := h.discoveryEngine.Run(r.Context())
+	writeJSON(w, http.StatusOK, result)
+}
+
+// DiscoveryStats handles GET /api/v1/agent/income/discovery/stats.
+func (h *Handlers) DiscoveryStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.discoveryEngine == nil {
+		writeJSON(w, http.StatusOK, discovery.DiscoveryStats{})
+		return
+	}
+
+	stats, err := h.discoveryEngine.Stats(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// DiscoveryPromote handles POST /api/v1/agent/income/discovery/promote/{id}.
+func (h *Handlers) DiscoveryPromote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.discoveryEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "discovery engine not available")
+		return
+	}
+
+	candidateID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/income/discovery/promote/")
+	if candidateID == "" {
+		writeError(w, r, http.StatusBadRequest, "candidate id required")
+		return
+	}
+
+	if err := h.discoveryEngine.Promote(r.Context(), candidateID); err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"promoted": true, "candidate_id": candidateID})
+}
+
+// --- Time Allocation / Owner Capacity API (Iteration 41) ---
+
+// CapacityState handles GET /api/v1/agent/capacity/state.
+func (h *Handlers) CapacityState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.capacityAdapter == nil {
+		writeJSON(w, http.StatusOK, capacity.CapacityState{})
+		return
+	}
+	state, err := h.capacityAdapter.GetCapacityState(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+// CapacityRecompute handles POST /api/v1/agent/capacity/recompute.
+func (h *Handlers) CapacityRecompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.capacityAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "capacity engine not available")
+		return
+	}
+	state, err := h.capacityAdapter.RecomputeState(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+// CapacityRecommendations handles GET /api/v1/agent/capacity/recommendations.
+func (h *Handlers) CapacityRecommendations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.capacityAdapter == nil {
+		writeJSON(w, http.StatusOK, []capacity.CapacityDecision{})
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	decisions, err := h.capacityAdapter.GetRecommendations(r.Context(), limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if decisions == nil {
+		decisions = []capacity.CapacityDecision{}
+	}
+	writeJSON(w, http.StatusOK, decisions)
+}
+
+// CapacitySummary handles GET /api/v1/agent/capacity/summary.
+func (h *Handlers) CapacitySummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.capacityAdapter == nil {
+		writeJSON(w, http.StatusOK, capacity.CapacitySummary{})
+		return
+	}
+	// Re-evaluate all recent items for a fresh summary.
+	decisions, err := h.capacityAdapter.GetRecommendations(r.Context(), 100)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	recommended := 0
+	deferred := 0
+	totalHours := 0.0
+	for _, d := range decisions {
+		if d.Recommended {
+			recommended++
+		} else {
+			deferred++
+		}
+		totalHours += d.EstimatedEffort
+	}
+	writeJSON(w, http.StatusOK, capacity.CapacitySummary{
+		TotalItemsEvaluated: len(decisions),
+		RecommendedCount:    recommended,
+		DeferredCount:       deferred,
+		TotalEstimatedHours: totalHours,
+	})
 }

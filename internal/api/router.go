@@ -198,5 +198,17 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/financial/state", chain(handlers.FinancialState))
 	mux.Handle("/api/v1/agent/financial/pressure", chain(handlers.FinancialPressure))
 
+	// Agent opportunity discovery (Iteration 40)
+	mux.Handle("/api/v1/agent/income/discovery/candidates", chain(handlers.DiscoveryCandidates))
+	mux.Handle("/api/v1/agent/income/discovery/run", chain(handlers.DiscoveryRun))
+	mux.Handle("/api/v1/agent/income/discovery/stats", chain(handlers.DiscoveryStats))
+	mux.Handle("/api/v1/agent/income/discovery/promote/", chain(handlers.DiscoveryPromote))
+
+	// Agent time allocation / owner capacity (Iteration 41)
+	mux.Handle("/api/v1/agent/capacity/state", chain(handlers.CapacityState))
+	mux.Handle("/api/v1/agent/capacity/recompute", chain(handlers.CapacityRecompute))
+	mux.Handle("/api/v1/agent/capacity/recommendations", chain(handlers.CapacityRecommendations))
+	mux.Handle("/api/v1/agent/capacity/summary", chain(handlers.CapacitySummary))
+
 	return requestIDMiddleware(mux)
 }

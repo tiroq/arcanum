@@ -14,9 +14,11 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
+	"github.com/tiroq/arcanum/internal/agent/capacity"
 	"github.com/tiroq/arcanum/internal/agent/causal"
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
+	"github.com/tiroq/arcanum/internal/agent/discovery"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	"github.com/tiroq/arcanum/internal/agent/goals"
@@ -479,6 +481,43 @@ func run() error {
 	graphAdapter.WithFinancialPressure(financialPressureAdapter)
 	logger.Info("financial pressure layer initialised")
 
+	// Opportunity discovery engine (Iteration 40).
+	// Creates the discovery pipeline: store + adapters + dedup + promoter + engine.
+	// Fail-open: if DB is unavailable, discovery engine starts but queries fail gracefully.
+	discoveryCandidateStore := discovery.NewCandidateStore(pool)
+	discoverySignalAdapter := discovery.NewSignalStoreAdapter(pool)
+	discoveryOutcomeAdapter := discovery.NewOutcomeStoreAdapter(pool)
+	discoveryProposalAdapter := discovery.NewProposalStoreAdapter(pool)
+	discoveryOppAdapter := discovery.NewOpportunityStoreAdapter(pool)
+	discoveryDeduplicator := discovery.NewDeduplicator(discoveryCandidateStore, discoveryOppAdapter, discovery.DedupeWindowHours)
+	discoveryPromoter := discovery.NewPromoter(incomeEngine)
+	discoveryEngine := discovery.NewEngine(discoveryCandidateStore, discoveryDeduplicator, discoveryPromoter, auditor, logger).
+		WithSignals(discoverySignalAdapter).
+		WithOutcomes(discoveryOutcomeAdapter).
+		WithProposals(discoveryProposalAdapter)
+	logger.Info("opportunity discovery engine initialised")
+
+	// Time allocation / owner capacity layer (Iteration 41).
+	// Loads family context, creates capacity engine + adapter.
+	// Integrates with signals for owner_load_score.
+	// Fail-open: if family_context.yaml is missing, defaults are used.
+	familyCfg := capacity.LoadFamilyConfig("configs/family_context.yaml")
+	capacityStore := capacity.NewStore(pool)
+	capacityEngine := capacity.NewEngine(capacityStore, familyCfg, auditor, logger)
+	// Wire signals-derived state (owner_load_score) into capacity engine.
+	signalDerivedAdapter := capacity.NewSignalDerivedAdapter(func(ctx context.Context) map[string]float64 {
+		active := signalEngine.GetActiveSignals(ctx)
+		return active.Derived
+	})
+	capacityEngine.WithDerivedState(signalDerivedAdapter)
+	capacityGraphAdapter := capacity.NewGraphAdapter(capacityEngine, logger)
+	graphAdapter.WithCapacity(capacityGraphAdapter)
+	logger.Info("time allocation layer initialised",
+		zap.Float64("max_daily_hours", familyCfg.MaxDailyWorkHours),
+		zap.Float64("min_family_hours", familyCfg.MinFamilyTimeHours),
+		zap.Int("blocked_ranges", len(familyCfg.BlockedRanges)),
+	)
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -515,7 +554,9 @@ func run() error {
 		WithProviderCatalog(catalogRegistry).
 		WithIncomeEngine(incomeEngine).
 		WithSignalEngine(signalEngine).
-		WithFinancialPressure(financialPressureAdapter)
+		WithFinancialPressure(financialPressureAdapter).
+		WithDiscoveryEngine(discoveryEngine).
+		WithCapacity(capacityGraphAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{

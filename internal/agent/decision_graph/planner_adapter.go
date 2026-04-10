@@ -163,6 +163,18 @@ type FinancialPressureProvider interface {
 	IsIncomeRelated(actionType string) bool
 }
 
+// CapacityProvider supplies owner capacity signals for time-aware scoring (Iteration 41).
+// Defined here to avoid import cycles — implemented in capacity package.
+// Fail-open: returns 0 when nil or unavailable.
+type CapacityProvider interface {
+	// GetCapacityPenalty returns a bounded penalty [0, 0.15] based on current
+	// capacity constraints. Applied to all scored paths.
+	GetCapacityPenalty(ctx context.Context) float64
+	// GetCapacityBoost returns a bounded boost [0, 0.10] for small high-value
+	// actions when capacity is constrained.
+	GetCapacityBoost(ctx context.Context, actionEffortHours, actionValuePerHour float64) float64
+}
+
 // ReplayPackRecorder records decision replay packs.
 // Defined here to avoid import cycles — implemented in governance package.
 // Uses primitive parameters to avoid type coupling.
@@ -261,6 +273,9 @@ type GraphPlannerAdapter struct {
 
 	// signalIngestion provides active signals from the perception layer (Iteration 37).
 	signalIngestion SignalIngestionProvider
+
+	// capacity provides owner capacity signals for time-aware scoring (Iteration 41).
+	capacity CapacityProvider
 
 	// lastGoalTrace stores the most recent goal alignment trace for API visibility (Iteration 35).
 	lastGoalTrace []map[string]any
@@ -396,6 +411,12 @@ func (a *GraphPlannerAdapter) WithFinancialPressure(fp FinancialPressureProvider
 // path scoring (Iteration 37).
 func (a *GraphPlannerAdapter) WithSignalIngestion(si SignalIngestionProvider) *GraphPlannerAdapter {
 	a.signalIngestion = si
+	return a
+}
+
+// WithCapacity sets the capacity provider for time-aware scoring (Iteration 41).
+func (a *GraphPlannerAdapter) WithCapacity(cp CapacityProvider) *GraphPlannerAdapter {
+	a.capacity = cp
 	return a
 }
 
@@ -853,6 +874,24 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 				"pressure_score": pressure,
 				"urgency_level":  urgency,
 				"path_boost":     boost,
+			})
+		}
+	}
+
+	// --- Capacity-aware penalty/boost (Iteration 41) ---
+	// Applies a bounded penalty to all paths when owner capacity is constrained,
+	// and a bounded boost to small high-value actions (quick wins).
+	// Pipeline position: AFTER financial pressure, BEFORE SelectBestPath.
+	// Fail-open: if provider is nil or no capacity data, paths unchanged.
+	if a.capacity != nil {
+		penalty := a.capacity.GetCapacityPenalty(ctx)
+		if penalty > 0 {
+			for i, p := range scored {
+				scored[i].FinalScore = clamp01(p.FinalScore - penalty)
+			}
+			a.auditEvent(ctx, "capacity.penalty_applied", map[string]any{
+				"goal_type": decision.GoalType,
+				"penalty":   penalty,
 			})
 		}
 	}
