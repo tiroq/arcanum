@@ -175,6 +175,18 @@ type CapacityProvider interface {
 	GetCapacityBoost(ctx context.Context, actionEffortHours, actionValuePerHour float64) float64
 }
 
+// PortfolioProvider supplies strategy-level boost/penalty for decision graph scoring (Iteration 46).
+// Defined here to avoid import cycles — implemented in portfolio package.
+// Fail-open: returns 0 when nil or unavailable.
+type PortfolioProvider interface {
+	// GetStrategyBoost returns a bounded score adjustment for the given opportunity type
+	// based on its strategy's portfolio performance.
+	// Range: [-0.10, +0.12].
+	GetStrategyBoost(ctx context.Context, opportunityType string) float64
+	// IsStrategyRelated reports whether the action type participates in strategy scoring.
+	IsStrategyRelated(actionType string) bool
+}
+
 // ReplayPackRecorder records decision replay packs.
 // Defined here to avoid import cycles — implemented in governance package.
 // Uses primitive parameters to avoid type coupling.
@@ -276,6 +288,9 @@ type GraphPlannerAdapter struct {
 
 	// capacity provides owner capacity signals for time-aware scoring (Iteration 41).
 	capacity CapacityProvider
+
+	// portfolio provides strategy-level boost/penalty for portfolio-aware scoring (Iteration 46).
+	portfolio PortfolioProvider
 
 	// lastGoalTrace stores the most recent goal alignment trace for API visibility (Iteration 35).
 	lastGoalTrace []map[string]any
@@ -417,6 +432,12 @@ func (a *GraphPlannerAdapter) WithSignalIngestion(si SignalIngestionProvider) *G
 // WithCapacity sets the capacity provider for time-aware scoring (Iteration 41).
 func (a *GraphPlannerAdapter) WithCapacity(cp CapacityProvider) *GraphPlannerAdapter {
 	a.capacity = cp
+	return a
+}
+
+// WithPortfolio sets the portfolio provider for strategy-aware scoring (Iteration 46).
+func (a *GraphPlannerAdapter) WithPortfolio(pp PortfolioProvider) *GraphPlannerAdapter {
+	a.portfolio = pp
 	return a
 }
 
@@ -894,6 +915,32 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 				"penalty":   penalty,
 			})
 		}
+	}
+
+	// --- Portfolio strategy boost/penalty (Iteration 46) ---
+	// Applies a bounded boost to paths belonging to high-ROI strategies,
+	// or a penalty to paths belonging to underperforming strategies.
+	// Only paths whose first action is strategy-related receive adjustment.
+	// Pipeline position: AFTER capacity, BEFORE SelectBestPath.
+	// Fail-open: if provider is nil or no data, paths unchanged.
+	if a.portfolio != nil {
+		for i, p := range scored {
+			if len(p.Nodes) == 0 {
+				continue
+			}
+			firstAction := p.Nodes[0].ActionType
+			if !a.portfolio.IsStrategyRelated(firstAction) {
+				continue
+			}
+			// Use the action type as the opportunity type hint for strategy lookup.
+			boost := a.portfolio.GetStrategyBoost(ctx, firstAction)
+			if boost != 0 {
+				scored[i].FinalScore = clamp01(p.FinalScore + boost)
+			}
+		}
+		a.auditEvent(ctx, "portfolio.strategy_scored", map[string]any{
+			"goal_type": decision.GoalType,
+		})
 	}
 
 	// Select best path.

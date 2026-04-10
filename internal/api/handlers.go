@@ -23,6 +23,7 @@ import (
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/discovery"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
+	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	financialtruth "github.com/tiroq/arcanum/internal/agent/financial_truth"
 	"github.com/tiroq/arcanum/internal/agent/goals"
@@ -34,13 +35,12 @@ import (
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
+	"github.com/tiroq/arcanum/internal/agent/portfolio"
 	providercatalog "github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
-	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
-	"github.com/tiroq/arcanum/internal/agent/portfolio"
 	selfextension "github.com/tiroq/arcanum/internal/agent/self_extension"
 	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
@@ -4371,103 +4371,317 @@ func (h *Handlers) ExternalActionApprove(w http.ResponseWriter, r *http.Request)
 
 // PortfolioStrategies handles GET/POST /api/v1/agent/strategies.
 func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
-switch r.Method {
-case http.MethodGet:
-if h.portfolioAdapter == nil {
-writeJSON(w, http.StatusOK, []portfolio.Strategy{})
-return
-}
-strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
-if err != nil {
-writeError(w, r, http.StatusInternalServerError, err.Error())
-return
-}
-if strategies == nil {
-strategies = []portfolio.Strategy{}
-}
-writeJSON(w, http.StatusOK, strategies)
-case http.MethodPost:
-if h.portfolioAdapter == nil {
-writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
-return
-}
-var st portfolio.Strategy
-if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
-writeError(w, r, http.StatusBadRequest, "invalid request body")
-return
-}
-saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
-if err != nil {
-writeError(w, r, http.StatusBadRequest, err.Error())
-return
-}
-writeJSON(w, http.StatusCreated, saved)
-default:
-writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-}
+	switch r.Method {
+	case http.MethodGet:
+		if h.portfolioAdapter == nil {
+			writeJSON(w, http.StatusOK, []portfolio.Strategy{})
+			return
+		}
+		strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if strategies == nil {
+			strategies = []portfolio.Strategy{}
+		}
+		writeJSON(w, http.StatusOK, strategies)
+	case http.MethodPost:
+		if h.portfolioAdapter == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+			return
+		}
+		var st portfolio.Strategy
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 // PortfolioView handles GET /api/v1/agent/portfolio.
 func (h *Handlers) PortfolioView(w http.ResponseWriter, r *http.Request) {
-if r.Method != http.MethodGet {
-writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-return
-}
-if h.portfolioAdapter == nil {
-writeJSON(w, http.StatusOK, portfolio.Portfolio{})
-return
-}
-p := h.portfolioAdapter.GetPortfolio(r.Context())
-if p.Entries == nil {
-p.Entries = []portfolio.PortfolioEntry{}
-}
-writeJSON(w, http.StatusOK, p)
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeJSON(w, http.StatusOK, portfolio.Portfolio{})
+		return
+	}
+	p := h.portfolioAdapter.GetPortfolio(r.Context())
+	if p.Entries == nil {
+		p.Entries = []portfolio.PortfolioEntry{}
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 // PortfolioPerformance handles GET /api/v1/agent/portfolio/performance.
 func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) {
-if r.Method != http.MethodGet {
-writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-return
-}
-if h.portfolioAdapter == nil {
-writeJSON(w, http.StatusOK, []portfolio.StrategyPerformance{})
-return
-}
-perfs, err := h.portfolioAdapter.GetPerformance(r.Context())
-if err != nil {
-writeError(w, r, http.StatusInternalServerError, err.Error())
-return
-}
-if perfs == nil {
-perfs = []portfolio.StrategyPerformance{}
-}
-writeJSON(w, http.StatusOK, perfs)
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeJSON(w, http.StatusOK, []portfolio.StrategyPerformance{})
+		return
+	}
+	perfs, err := h.portfolioAdapter.GetPerformance(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if perfs == nil {
+		perfs = []portfolio.StrategyPerformance{}
+	}
+	writeJSON(w, http.StatusOK, perfs)
 }
 
 // PortfolioRebalance handles POST /api/v1/agent/portfolio/rebalance.
 func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
-if r.Method != http.MethodPost {
-writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-return
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+		return
+	}
+	result, err := h.portfolioAdapter.Rebalance(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if result.NewAllocations == nil {
+		result.NewAllocations = []portfolio.StrategyAllocation{}
+	}
+	if result.PreviousAllocations == nil {
+		result.PreviousAllocations = []portfolio.StrategyAllocation{}
+	}
+	if result.Signals == nil {
+		result.Signals = []portfolio.StrategicSignal{}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
-if h.portfolioAdapter == nil {
-writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
-return
+
+// --- Portfolio (Iteration 46) ---
+
+// PortfolioStrategies handles GET /api/v1/agent/strategies (list) and POST (create).
+func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if h.portfolioAdapter == nil {
+			writeJSON(w, http.StatusOK, []portfolio.Strategy{})
+			return
+		}
+		strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if strategies == nil {
+			strategies = []portfolio.Strategy{}
+		}
+		writeJSON(w, http.StatusOK, strategies)
+
+	case http.MethodPost:
+		if h.portfolioAdapter == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+			return
+		}
+		var st portfolio.Strategy
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
-result, err := h.portfolioAdapter.Rebalance(r.Context())
-if err != nil {
-writeError(w, r, http.StatusInternalServerError, err.Error())
-return
+
+// PortfolioView handles GET /api/v1/agent/portfolio.
+func (h *Handlers) PortfolioView(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeJSON(w, http.StatusOK, portfolio.Portfolio{})
+		return
+	}
+	p := h.portfolioAdapter.GetPortfolio(r.Context())
+	if p.Entries == nil {
+		p.Entries = []portfolio.PortfolioEntry{}
+	}
+	writeJSON(w, http.StatusOK, p)
 }
-if result.NewAllocations == nil {
-result.NewAllocations = []portfolio.StrategyAllocation{}
+
+// PortfolioPerformance handles GET /api/v1/agent/portfolio/performance.
+func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeJSON(w, http.StatusOK, []portfolio.StrategyPerformance{})
+		return
+	}
+	perfs, err := h.portfolioAdapter.GetPerformance(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if perfs == nil {
+		perfs = []portfolio.StrategyPerformance{}
+	}
+	writeJSON(w, http.StatusOK, perfs)
 }
-if result.PreviousAllocations == nil {
-result.PreviousAllocations = []portfolio.StrategyAllocation{}
+
+// PortfolioRebalance handles POST /api/v1/agent/portfolio/rebalance.
+func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+		return
+	}
+	result, err := h.portfolioAdapter.Rebalance(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if result.NewAllocations == nil {
+		result.NewAllocations = []portfolio.StrategyAllocation{}
+	}
+	if result.PreviousAllocations == nil {
+		result.PreviousAllocations = []portfolio.StrategyAllocation{}
+	}
+	if result.Signals == nil {
+		result.Signals = []portfolio.StrategicSignal{}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
-if result.Signals == nil {
-result.Signals = []portfolio.StrategicSignal{}
+
+// --- Portfolio (Iteration 46) ---
+
+// PortfolioStrategies handles GET /api/v1/agent/strategies (list) and POST (create).
+func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if h.portfolioAdapter == nil {
+			writeJSON(w, http.StatusOK, []portfolio.Strategy{})
+			return
+		}
+		strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if strategies == nil {
+			strategies = []portfolio.Strategy{}
+		}
+		writeJSON(w, http.StatusOK, strategies)
+
+	case http.MethodPost:
+		if h.portfolioAdapter == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+			return
+		}
+		var st portfolio.Strategy
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
-writeJSON(w, http.StatusOK, result)
+
+// PortfolioView handles GET /api/v1/agent/portfolio.
+func (h *Handlers) PortfolioView(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeJSON(w, http.StatusOK, portfolio.Portfolio{})
+		return
+	}
+	p := h.portfolioAdapter.GetPortfolio(r.Context())
+	if p.Entries == nil {
+		p.Entries = []portfolio.PortfolioEntry{}
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+// PortfolioPerformance handles GET /api/v1/agent/portfolio/performance.
+func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeJSON(w, http.StatusOK, []portfolio.StrategyPerformance{})
+		return
+	}
+	perfs, err := h.portfolioAdapter.GetPerformance(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if perfs == nil {
+		perfs = []portfolio.StrategyPerformance{}
+	}
+	writeJSON(w, http.StatusOK, perfs)
+}
+
+// PortfolioRebalance handles POST /api/v1/agent/portfolio/rebalance.
+func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.portfolioAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+		return
+	}
+	result, err := h.portfolioAdapter.Rebalance(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if result.NewAllocations == nil {
+		result.NewAllocations = []portfolio.StrategyAllocation{}
+	}
+	if result.PreviousAllocations == nil {
+		result.PreviousAllocations = []portfolio.StrategyAllocation{}
+	}
+	if result.Signals == nil {
+		result.Signals = []portfolio.StrategicSignal{}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
