@@ -2,6 +2,7 @@ package autonomy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -569,7 +570,10 @@ func TestOrchestrator_HighFailureRateDowngrades(t *testing.T) {
 	cfg.Risk.DowngradeMode = "supervised_autonomy"
 
 	auditor := &mockAuditor{}
-	orch := NewOrchestrator(cfg, auditor, testLogger())
+	// Wire a provider that always fails so cycles will fail.
+	ref := &mockReflection{err: fmt.Errorf("simulated failure")}
+	orch := NewOrchestrator(cfg, auditor, testLogger()).
+		WithReflection(ref)
 	orch.state.Mode = ModeAutonomous
 	orch.state.OriginalMode = ModeAutonomous
 
@@ -577,12 +581,13 @@ func TestOrchestrator_HighFailureRateDowngrades(t *testing.T) {
 	err := orch.Start(ctx)
 	require.NoError(t, err)
 
-	// Simulate consecutive failures.
+	// Force cycles to be due by setting last run to distant past.
 	orch.state.mu.Lock()
-	orch.state.ConsecutiveFailures = 2
+	orch.state.LastCycleTimes["reflection"] = time.Now().Add(-48 * time.Hour)
 	orch.state.mu.Unlock()
 
-	// Next tick should trigger downgrade.
+	// Two ticks with failure → should trigger downgrade.
+	orch.tick()
 	orch.tick()
 
 	state := orch.GetState()
@@ -954,7 +959,8 @@ func TestOrchestrator_BootstrapRunsCycles(t *testing.T) {
 
 	// Bootstrap should have run cycles.
 	assert.Equal(t, 1, ref.getCalled())
-	assert.Equal(t, 1, obj.getCalled())
+	// obj called twice: once for bootstrap objective, once for reporting snapshot.
+	assert.Equal(t, 2, obj.getCalled())
 
 	state := orch.GetState()
 	assert.Equal(t, 1, state.CyclesRun["reflection"])
