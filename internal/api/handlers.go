@@ -23,6 +23,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/governance"
+	"github.com/tiroq/arcanum/internal/agent/income"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
@@ -85,6 +86,7 @@ type Handlers struct {
 	resourceAdapter    *resourceopt.GraphAdapter
 	providerRouter     *providerrouting.GraphAdapter
 	catalogRegistry    *providercatalog.CatalogRegistry
+	incomeEngine       *income.Engine
 	logger             *zap.Logger
 }
 
@@ -258,6 +260,12 @@ func (h *Handlers) WithProviderRouting(pr *providerrouting.GraphAdapter) *Handle
 // WithProviderCatalog attaches the provider catalog registry (Iteration 32).
 func (h *Handlers) WithProviderCatalog(cr *providercatalog.CatalogRegistry) *Handlers {
 	h.catalogRegistry = cr
+	return h
+}
+
+// WithIncomeEngine attaches the income engine for income pipeline API (Iteration 36).
+func (h *Handlers) WithIncomeEngine(ie *income.Engine) *Handlers {
+	h.incomeEngine = ie
 	return h
 }
 
@@ -3314,4 +3322,147 @@ func (h *Handlers) ProviderTargets(w http.ResponseWriter, r *http.Request) {
 		"targets": targets,
 		"count":   len(targets),
 	})
+}
+
+// --- Income Engine (Iteration 36) ---
+
+// IncomeOpportunities handles GET (list) and POST (create) for income opportunities.
+func (h *Handlers) IncomeOpportunities(w http.ResponseWriter, r *http.Request) {
+	if h.incomeEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "income engine not available")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		pg := parsePagination(r)
+		opps, err := h.incomeEngine.ListOpportunities(r.Context(), pg.PerPage, pg.Offset)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"opportunities": opps})
+
+	case http.MethodPost:
+		var opp income.IncomeOpportunity
+		if err := json.NewDecoder(r.Body).Decode(&opp); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		saved, err := h.incomeEngine.CreateOpportunity(r.Context(), opp)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// IncomeEvaluate evaluates an opportunity (POST with opportunity_id).
+func (h *Handlers) IncomeEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.incomeEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "income engine not available")
+		return
+	}
+
+	var req struct {
+		OpportunityID string `json:"opportunity_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.OpportunityID == "" {
+		writeError(w, r, http.StatusBadRequest, "opportunity_id is required")
+		return
+	}
+
+	proposals, err := h.incomeEngine.EvaluateOpportunity(r.Context(), req.OpportunityID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"opportunity_id": req.OpportunityID,
+		"proposals":      proposals,
+	})
+}
+
+// IncomeProposals lists income proposals (GET).
+func (h *Handlers) IncomeProposals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.incomeEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "income engine not available")
+		return
+	}
+
+	pg := parsePagination(r)
+	proposals, err := h.incomeEngine.ListProposals(r.Context(), pg.PerPage, pg.Offset)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"proposals": proposals})
+}
+
+// IncomeOutcomes handles GET (list) and POST (record) for income outcomes.
+func (h *Handlers) IncomeOutcomes(w http.ResponseWriter, r *http.Request) {
+	if h.incomeEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "income engine not available")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		pg := parsePagination(r)
+		outcomes, err := h.incomeEngine.ListOutcomes(r.Context(), pg.PerPage, pg.Offset)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"outcomes": outcomes})
+
+	case http.MethodPost:
+		var o income.IncomeOutcome
+		if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		saved, err := h.incomeEngine.RecordOutcome(r.Context(), o)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// IncomeSignal returns the current income signal snapshot.
+func (h *Handlers) IncomeSignal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.incomeEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"best_open_score":    0,
+			"open_opportunities": 0,
+		})
+		return
+	}
+	sig := h.incomeEngine.GetSignal(r.Context())
+	writeJSON(w, http.StatusOK, sig)
 }

@@ -180,5 +180,12 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/providers/catalog", chain(handlers.ProviderCatalog))
 	mux.Handle("/api/v1/agent/providers/targets", chain(handlers.ProviderTargets))
 
+	// Agent income engine (income pipeline, Iteration 36)
+	mux.Handle("/api/v1/agent/income/opportunities", chain(handlers.IncomeOpportunities))
+	mux.Handle("/api/v1/agent/income/evaluate", chain(handlers.IncomeEvaluate))
+	mux.Handle("/api/v1/agent/income/proposals", chain(handlers.IncomeProposals))
+	mux.Handle("/api/v1/agent/income/outcomes", chain(handlers.IncomeOutcomes))
+	mux.Handle("/api/v1/agent/income/signal", chain(handlers.IncomeSignal))
+
 	return requestIDMiddleware(mux)
 }

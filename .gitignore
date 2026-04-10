@@ -5,3 +5,4 @@ bin/
 logs/*.log
 docs/*.s*.md
 docs/*.p*.md
+configs/*.yaml

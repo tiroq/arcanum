@@ -20,6 +20,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/governance"
+	"github.com/tiroq/arcanum/internal/agent/income"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
@@ -440,6 +441,20 @@ func run() error {
 		)
 	}
 
+	// Income engine (Iteration 36).
+	// Creates the income pipeline: stores + engine + graph adapter.
+	// Fail-open: if DB is unavailable, income engine still starts but queries fail gracefully.
+	incomeOppStore := income.NewOpportunityStore(pool)
+	incomePropStore := income.NewProposalStore(pool)
+	incomeOutcomeStore := income.NewOutcomeStore(pool)
+	incomeEngine := income.NewEngine(incomeOppStore, incomePropStore, incomeOutcomeStore, auditor, logger)
+	if govAdapter != nil {
+		incomeEngine.WithGovernance(govAdapter)
+	}
+	incomeGraphAdapter := income.NewGraphAdapter(incomeEngine, logger)
+	graphAdapter.WithIncomeSignals(incomeGraphAdapter)
+	logger.Info("income engine initialised")
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -473,7 +488,8 @@ func run() error {
 		WithResourceOptimization(resourceAdapter).
 		WithGovernance(govController, govReplayBuilder).
 		WithProviderRouting(providerRoutingAdapter).
-		WithProviderCatalog(catalogRegistry)
+		WithProviderCatalog(catalogRegistry).
+		WithIncomeEngine(incomeEngine)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
