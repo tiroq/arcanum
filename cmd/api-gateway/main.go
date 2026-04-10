@@ -20,6 +20,7 @@ import (
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/discovery"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
+	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	financialtruth "github.com/tiroq/arcanum/internal/agent/financial_truth"
 	"github.com/tiroq/arcanum/internal/agent/goals"
@@ -31,6 +32,7 @@ import (
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
+	"github.com/tiroq/arcanum/internal/agent/portfolio"
 	providercatalog "github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
@@ -547,6 +549,38 @@ func run() error {
 	selfExtAdapter := selfextension.NewGraphAdapter(selfExtEngine, logger)
 	logger.Info("self-extension sandbox initialised")
 
+	// External action connectors (Iteration 45).
+	// Creates the external actions pipeline: store + connectors + router + policy + engine + adapter.
+	// Fail-open: connectors that are unavailable are skipped, never crash.
+	// Fail-safe: high-risk actions require human approval before execution.
+	extActStore := externalactions.NewStore(pool)
+	extActRouter := externalactions.NewConnectorRouter()
+	extActRouter.Register(externalactions.NewNoopConnector())
+	extActRouter.Register(externalactions.NewLogConnector())
+	extActRouter.Register(externalactions.NewHTTPConnector(nil)) // no transport by default; dry-run only
+	extActRouter.Register(externalactions.NewEmailDraftConnector())
+	extActPolicy := externalactions.NewPolicyEngine()
+	extActEngine := externalactions.NewEngine(extActStore, extActRouter, extActPolicy, auditor, logger)
+	extActAdapter := externalactions.NewGraphAdapter(extActEngine, logger)
+	logger.Info("external action connectors initialised",
+		zap.Int("connectors", len(extActRouter.List())),
+	)
+
+	// Strategic revenue portfolio (Iteration 46).
+	// Creates the portfolio pipeline: stores + engine + adapter.
+	// Integrates with financial pressure + capacity for informed allocation.
+	// Decision graph receives strategy-level boost/penalty.
+	// Fail-open: if DB is unavailable, portfolio engine starts but queries fail gracefully.
+	portfolioStrategyStore := portfolio.NewStrategyStore(pool)
+	portfolioAllocationStore := portfolio.NewAllocationStore(pool)
+	portfolioPerformanceStore := portfolio.NewPerformanceStore(pool)
+	portfolioEngine := portfolio.NewEngine(portfolioStrategyStore, portfolioAllocationStore, portfolioPerformanceStore, auditor, logger)
+	portfolioEngine.WithPressure(portfolioFinancialPressureAdapter{fp: financialPressureAdapter})
+	portfolioEngine.WithCapacity(portfolioCapacityAdapter{ca: capacityGraphAdapter})
+	portfolioGraphAdapter := portfolio.NewGraphAdapter(portfolioEngine, logger)
+	graphAdapter.WithPortfolio(portfolioGraphAdapter)
+	logger.Info("strategic revenue portfolio initialised")
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -587,7 +621,9 @@ func run() error {
 		WithDiscoveryEngine(discoveryEngine).
 		WithCapacity(capacityGraphAdapter).
 		WithFinancialTruth(financialTruthEngine).
-		WithSelfExtension(selfExtAdapter)
+		WithSelfExtension(selfExtAdapter).
+		WithExternalActions(extActAdapter).
+		WithPortfolio(portfolioGraphAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -632,4 +668,34 @@ func run() error {
 
 	logger.Info("api-gateway stopped")
 	return nil
+}
+
+// --- Portfolio bridge adapters (Iteration 46) ---
+// These thin adapters bridge existing adapters to the portfolio.FinancialPressureProvider
+// and portfolio.CapacityProvider interfaces without introducing import cycles.
+
+type portfolioFinancialPressureAdapter struct {
+	fp *financialpressure.GraphAdapter
+}
+
+func (a portfolioFinancialPressureAdapter) GetPressure(ctx context.Context) (float64, string) {
+	if a.fp == nil {
+		return 0, "low"
+	}
+	return a.fp.GetPressure(ctx)
+}
+
+type portfolioCapacityAdapter struct {
+	ca *capacity.GraphAdapter
+}
+
+func (a portfolioCapacityAdapter) GetAvailableHoursWeek(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.AvailableHoursWeek
 }

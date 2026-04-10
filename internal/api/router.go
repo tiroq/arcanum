@@ -226,5 +226,15 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/self/rollback/", chain(handlers.SelfRollback))
 	mux.Handle("/api/v1/agent/self/approve/", chain(handlers.SelfApprove))
 
+	// Agent external action connectors (Iteration 45)
+	mux.Handle("/api/v1/agent/external/actions", chain(handlers.ExternalActions))
+	mux.Handle("/api/v1/agent/external/actions/", chain(handlers.ExternalActionRouter))
+
+	// Agent strategic revenue portfolio (Iteration 46)
+	mux.Handle("/api/v1/agent/strategies", chain(handlers.PortfolioStrategies))
+	mux.Handle("/api/v1/agent/portfolio", chain(handlers.PortfolioView))
+	mux.Handle("/api/v1/agent/portfolio/performance", chain(handlers.PortfolioPerformance))
+	mux.Handle("/api/v1/agent/portfolio/rebalance", chain(handlers.PortfolioRebalance))
+
 	return requestIDMiddleware(mux)
 }

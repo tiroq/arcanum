@@ -39,6 +39,8 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
+	"github.com/tiroq/arcanum/internal/agent/portfolio"
 	selfextension "github.com/tiroq/arcanum/internal/agent/self_extension"
 	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
@@ -99,6 +101,8 @@ type Handlers struct {
 	capacityAdapter    *capacity.GraphAdapter
 	financialTruth     *financialtruth.Engine
 	selfExtension      *selfextension.GraphAdapter
+	externalActions    *externalactions.GraphAdapter
+	portfolioAdapter   *portfolio.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -314,6 +318,18 @@ func (h *Handlers) WithFinancialTruth(ft *financialtruth.Engine) *Handlers {
 // WithSelfExtension attaches the self-extension adapter for sandbox API (Iteration 43).
 func (h *Handlers) WithSelfExtension(se *selfextension.GraphAdapter) *Handlers {
 	h.selfExtension = se
+	return h
+}
+
+// WithExternalActions attaches the external actions adapter (Iteration 45).
+func (h *Handlers) WithExternalActions(ea *externalactions.GraphAdapter) *Handlers {
+	h.externalActions = ea
+	return h
+}
+
+// WithPortfolio attaches the portfolio adapter for strategy portfolio API (Iteration 46).
+func (h *Handlers) WithPortfolio(pa *portfolio.GraphAdapter) *Handlers {
+	h.portfolioAdapter = pa
 	return h
 }
 
@@ -4205,4 +4221,253 @@ func (h *Handlers) SelfApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, decision)
+}
+
+// --- External Actions (Iteration 45) ---
+
+// ExternalActions handles GET /api/v1/agent/external/actions and POST to create.
+func (h *Handlers) ExternalActions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if h.externalActions == nil {
+			writeJSON(w, http.StatusOK, []externalactions.ExternalAction{})
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 100 {
+			limit = 50
+		}
+		actions, err := h.externalActions.ListActions(r.Context(), limit)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if actions == nil {
+			actions = []externalactions.ExternalAction{}
+		}
+		writeJSON(w, http.StatusOK, actions)
+
+	case http.MethodPost:
+		if h.externalActions == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "external actions engine not available")
+			return
+		}
+		var a externalactions.ExternalAction
+		if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		saved, err := h.externalActions.CreateAction(r.Context(), a)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// ExternalActionRouter dispatches /api/v1/agent/external/actions/{id}/{sub} requests.
+func (h *Handlers) ExternalActionRouter(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/external/actions/")
+	switch {
+	case strings.HasSuffix(path, "/execute"):
+		h.ExternalActionExecute(w, r)
+	case strings.HasSuffix(path, "/dry-run"):
+		h.ExternalActionDryRun(w, r)
+	case strings.HasSuffix(path, "/approve"):
+		h.ExternalActionApprove(w, r)
+	default:
+		writeError(w, r, http.StatusNotFound, "unknown external action sub-route")
+	}
+}
+
+// ExternalActionExecute handles POST /api/v1/agent/external/actions/{id}/execute.
+func (h *Handlers) ExternalActionExecute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.externalActions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "external actions engine not available")
+		return
+	}
+	actionID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/external/actions/")
+	actionID = strings.TrimSuffix(actionID, "/execute")
+	if actionID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing action_id")
+		return
+	}
+	result, err := h.externalActions.Execute(r.Context(), actionID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ExternalActionDryRun handles POST /api/v1/agent/external/actions/{id}/dry-run.
+func (h *Handlers) ExternalActionDryRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.externalActions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "external actions engine not available")
+		return
+	}
+	actionID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/external/actions/")
+	actionID = strings.TrimSuffix(actionID, "/dry-run")
+	if actionID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing action_id")
+		return
+	}
+	result, err := h.externalActions.DryRun(r.Context(), actionID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ExternalActionApprove handles POST /api/v1/agent/external/actions/{id}/approve.
+func (h *Handlers) ExternalActionApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.externalActions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "external actions engine not available")
+		return
+	}
+	actionID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/external/actions/")
+	actionID = strings.TrimSuffix(actionID, "/approve")
+	if actionID == "" {
+		writeError(w, r, http.StatusBadRequest, "missing action_id")
+		return
+	}
+	var body struct {
+		ApprovedBy string `json:"approved_by"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if body.ApprovedBy == "" {
+		writeError(w, r, http.StatusBadRequest, "approved_by is required")
+		return
+	}
+	action, err := h.externalActions.ApproveAction(r.Context(), actionID, body.ApprovedBy)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, action)
+}
+
+// --- Portfolio (Iteration 46) ---
+
+// PortfolioStrategies handles GET/POST /api/v1/agent/strategies.
+func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
+switch r.Method {
+case http.MethodGet:
+if h.portfolioAdapter == nil {
+writeJSON(w, http.StatusOK, []portfolio.Strategy{})
+return
+}
+strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
+if err != nil {
+writeError(w, r, http.StatusInternalServerError, err.Error())
+return
+}
+if strategies == nil {
+strategies = []portfolio.Strategy{}
+}
+writeJSON(w, http.StatusOK, strategies)
+case http.MethodPost:
+if h.portfolioAdapter == nil {
+writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+return
+}
+var st portfolio.Strategy
+if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+writeError(w, r, http.StatusBadRequest, "invalid request body")
+return
+}
+saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
+if err != nil {
+writeError(w, r, http.StatusBadRequest, err.Error())
+return
+}
+writeJSON(w, http.StatusCreated, saved)
+default:
+writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+}
+}
+
+// PortfolioView handles GET /api/v1/agent/portfolio.
+func (h *Handlers) PortfolioView(w http.ResponseWriter, r *http.Request) {
+if r.Method != http.MethodGet {
+writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+if h.portfolioAdapter == nil {
+writeJSON(w, http.StatusOK, portfolio.Portfolio{})
+return
+}
+p := h.portfolioAdapter.GetPortfolio(r.Context())
+if p.Entries == nil {
+p.Entries = []portfolio.PortfolioEntry{}
+}
+writeJSON(w, http.StatusOK, p)
+}
+
+// PortfolioPerformance handles GET /api/v1/agent/portfolio/performance.
+func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) {
+if r.Method != http.MethodGet {
+writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+if h.portfolioAdapter == nil {
+writeJSON(w, http.StatusOK, []portfolio.StrategyPerformance{})
+return
+}
+perfs, err := h.portfolioAdapter.GetPerformance(r.Context())
+if err != nil {
+writeError(w, r, http.StatusInternalServerError, err.Error())
+return
+}
+if perfs == nil {
+perfs = []portfolio.StrategyPerformance{}
+}
+writeJSON(w, http.StatusOK, perfs)
+}
+
+// PortfolioRebalance handles POST /api/v1/agent/portfolio/rebalance.
+func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
+if r.Method != http.MethodPost {
+writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+if h.portfolioAdapter == nil {
+writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+return
+}
+result, err := h.portfolioAdapter.Rebalance(r.Context())
+if err != nil {
+writeError(w, r, http.StatusInternalServerError, err.Error())
+return
+}
+if result.NewAllocations == nil {
+result.NewAllocations = []portfolio.StrategyAllocation{}
+}
+if result.PreviousAllocations == nil {
+result.PreviousAllocations = []portfolio.StrategyAllocation{}
+}
+if result.Signals == nil {
+result.Signals = []portfolio.StrategicSignal{}
+}
+writeJSON(w, http.StatusOK, result)
 }
