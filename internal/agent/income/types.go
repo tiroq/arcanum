@@ -138,9 +138,9 @@ type LearningRecord struct {
 	OpportunityType      string    `json:"opportunity_type"`
 	TotalOutcomes        int       `json:"total_outcomes"`
 	SuccessCount         int       `json:"success_count"`
-	TotalAccuracy        float64   `json:"total_accuracy"`  // sum of per-outcome accuracy values
-	AvgAccuracy          float64   `json:"avg_accuracy"`    // total_accuracy / total_outcomes
-	SuccessRate          float64   `json:"success_rate"`    // success_count / total_outcomes
+	TotalAccuracy        float64   `json:"total_accuracy"`        // sum of per-outcome accuracy values
+	AvgAccuracy          float64   `json:"avg_accuracy"`          // total_accuracy / total_outcomes
+	SuccessRate          float64   `json:"success_rate"`          // success_count / total_outcomes
 	ConfidenceAdjustment float64   `json:"confidence_adjustment"` // bounded in [-LearningMaxConfAdj, +LearningMaxConfAdj]
 	UpdatedAt            time.Time `json:"updated_at"`
 }
