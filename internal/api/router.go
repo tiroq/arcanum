@@ -273,5 +273,13 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/actuation/reject/", chain(handlers.ActuationReject))
 	mux.Handle("/api/v1/agent/actuation/execute/", chain(handlers.ActuationExecute))
 
+	// Agent autonomy runtime (Iteration 52)
+	mux.Handle("/api/v1/agent/autonomy/state", chain(handlers.AutonomyState))
+	mux.Handle("/api/v1/agent/autonomy/start", chain(handlers.AutonomyStart))
+	mux.Handle("/api/v1/agent/autonomy/stop", chain(handlers.AutonomyStop))
+	mux.Handle("/api/v1/agent/autonomy/reload-config", chain(handlers.AutonomyReloadConfig))
+	mux.Handle("/api/v1/agent/autonomy/reports", chain(handlers.AutonomyReports))
+	mux.Handle("/api/v1/agent/autonomy/set-mode", chain(handlers.AutonomySetMode))
+
 	return requestIDMiddleware(mux)
 }

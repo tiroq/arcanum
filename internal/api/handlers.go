@@ -57,6 +57,52 @@ import (
 	"github.com/tiroq/arcanum/internal/metrics"
 )
 
+// AutonomyOrchestrator is the interface for the autonomy runtime exposed to API handlers.
+type AutonomyOrchestrator interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context)
+	GetState() AutonomyRuntimeState
+	GetReports(limit int) []AutonomyReportView
+	ReloadConfig(ctx context.Context, path string) error
+	SetMode(ctx context.Context, mode string) error
+}
+
+// AutonomyRuntimeState is the API-safe view of the orchestrator state.
+type AutonomyRuntimeState struct {
+	Mode                 string         `json:"mode"`
+	OriginalMode         string         `json:"original_mode"`
+	Running              bool           `json:"running"`
+	StartedAt            *time.Time     `json:"started_at,omitempty"`
+	CyclesRun            map[string]int `json:"cycles_run"`
+	ConsecutiveFailures  int            `json:"consecutive_failures"`
+	Downgraded           bool           `json:"downgraded"`
+	DowngradeReason      string         `json:"downgrade_reason,omitempty"`
+	HeavyActionsDisabled bool           `json:"heavy_actions_disabled"`
+	SelfExtDisabled      bool           `json:"self_ext_disabled"`
+	SafeActionsRouted    int            `json:"safe_actions_routed"`
+	ReviewActionsQueued  int            `json:"review_actions_queued"`
+	SuppressedDecisions  int            `json:"suppressed_decisions"`
+	ReportCount          int            `json:"report_count"`
+	LastError            string         `json:"last_error,omitempty"`
+}
+
+// AutonomyReportView is the API-safe view of an autonomy report.
+type AutonomyReportView struct {
+	ID                string         `json:"id"`
+	Type              string         `json:"type"`
+	CreatedAt         time.Time      `json:"created_at"`
+	Mode              string         `json:"mode"`
+	CyclesRun         map[string]int `json:"cycles_run"`
+	SafeActionsRouted int            `json:"safe_actions_routed"`
+	ReviewQueued      int            `json:"review_queued"`
+	SuppressedCount   int            `json:"suppressed_count"`
+	Downgraded        bool           `json:"downgraded"`
+	DowngradeReason   string         `json:"downgrade_reason,omitempty"`
+	FailureCount      int            `json:"failure_count"`
+	Warnings          []string       `json:"warnings,omitempty"`
+	ExceptionTrigger  string         `json:"exception_trigger,omitempty"`
+}
+
 // Handlers holds all HTTP handler dependencies.
 type Handlers struct {
 	db                    *pgxpool.Pool
@@ -113,6 +159,7 @@ type Handlers struct {
 	metaReportStore       *reflection.ReportStore
 	objectiveAdapter      *objective.GraphAdapter
 	actuationAdapter      *actuation.GraphAdapter
+	autonomyOrch          AutonomyOrchestrator
 	logger                *zap.Logger
 }
 
@@ -371,6 +418,12 @@ func (h *Handlers) WithObjective(oa *objective.GraphAdapter) *Handlers {
 // WithActuation attaches the closed feedback actuation adapter (Iteration 51).
 func (h *Handlers) WithActuation(aa *actuation.GraphAdapter) *Handlers {
 	h.actuationAdapter = aa
+	return h
+}
+
+// WithAutonomy attaches the autonomy orchestrator (Iteration 52).
+func (h *Handlers) WithAutonomy(ao AutonomyOrchestrator) *Handlers {
+	h.autonomyOrch = ao
 	return h
 }
 
@@ -5148,4 +5201,120 @@ func (h *Handlers) ActuationExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d)
+}
+
+// --- Autonomy runtime endpoints (Iteration 52) ---
+
+// AutonomyState handles GET /api/v1/agent/autonomy/state.
+func (h *Handlers) AutonomyState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.autonomyOrch == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not_configured"})
+		return
+	}
+	state := h.autonomyOrch.GetState()
+	writeJSON(w, http.StatusOK, state)
+}
+
+// AutonomyStart handles POST /api/v1/agent/autonomy/start.
+func (h *Handlers) AutonomyStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.autonomyOrch == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "autonomy orchestrator not configured")
+		return
+	}
+	if err := h.autonomyOrch.Start(r.Context()); err != nil {
+		writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+// AutonomyStop handles POST /api/v1/agent/autonomy/stop.
+func (h *Handlers) AutonomyStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.autonomyOrch == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "autonomy orchestrator not configured")
+		return
+	}
+	h.autonomyOrch.Stop(r.Context())
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+// AutonomyReloadConfig handles POST /api/v1/agent/autonomy/reload-config.
+func (h *Handlers) AutonomyReloadConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.autonomyOrch == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "autonomy orchestrator not configured")
+		return
+	}
+	// Reload from the default config path.
+	if err := h.autonomyOrch.ReloadConfig(r.Context(), "configs/autonomy.yaml"); err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+}
+
+// AutonomyReports handles GET /api/v1/agent/autonomy/reports.
+func (h *Handlers) AutonomyReports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.autonomyOrch == nil {
+		writeJSON(w, http.StatusOK, []AutonomyReportView{})
+		return
+	}
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	reports := h.autonomyOrch.GetReports(limit)
+	if reports == nil {
+		reports = []AutonomyReportView{}
+	}
+	writeJSON(w, http.StatusOK, reports)
+}
+
+// AutonomySetMode handles POST /api/v1/agent/autonomy/set-mode.
+func (h *Handlers) AutonomySetMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.autonomyOrch == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "autonomy orchestrator not configured")
+		return
+	}
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Mode == "" {
+		writeError(w, r, http.StatusBadRequest, "mode is required")
+		return
+	}
+	if err := h.autonomyOrch.SetMode(r.Context(), req.Mode); err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "mode_updated", "mode": req.Mode})
 }
