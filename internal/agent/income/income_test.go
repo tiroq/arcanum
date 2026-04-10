@@ -208,8 +208,8 @@ func TestGenerateProposals_HighRiskRequiresReview(t *testing.T) {
 		ID:              "opp-1",
 		Title:           "High risk",
 		OpportunityType: "content",
-		Confidence:      0.3,  // low confidence → high risk
-		EstimatedEffort: 0.8,  // high effort → high risk
+		Confidence:      0.3, // low confidence → high risk
+		EstimatedEffort: 0.8, // high effort → high risk
 	}
 	proposals := GenerateProposals(opp, 0.50, false)
 	for _, p := range proposals {

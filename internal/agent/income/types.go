@@ -64,7 +64,7 @@ const (
 // by the agent. Opportunities are the entry point into the income pipeline.
 type IncomeOpportunity struct {
 	ID              string    `json:"id"`
-	Source          string    `json:"source"`           // "user" | "system" | "scheduler"
+	Source          string    `json:"source"` // "user" | "system" | "scheduler"
 	Title           string    `json:"title"`
 	Description     string    `json:"description"`
 	OpportunityType string    `json:"opportunity_type"` // consulting|automation|service|content|other
@@ -81,11 +81,11 @@ type IncomeOpportunity struct {
 type IncomeActionProposal struct {
 	ID             string    `json:"id"`
 	OpportunityID  string    `json:"opportunity_id"`
-	ActionType     string    `json:"action_type"`     // maps to an agent action type string
+	ActionType     string    `json:"action_type"` // maps to an agent action type string
 	Title          string    `json:"title"`
 	Reason         string    `json:"reason"`
 	ExpectedValue  float64   `json:"expected_value"`
-	RiskLevel      string    `json:"risk_level"`      // low|medium|high
+	RiskLevel      string    `json:"risk_level"` // low|medium|high
 	RequiresReview bool      `json:"requires_review"`
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`

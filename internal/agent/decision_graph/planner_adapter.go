@@ -114,6 +114,16 @@ type SystemGoalAlignmentProvider interface {
 	ScoreAlignment(ctx context.Context, actionType string, pathRisk float64) (alignmentScore float64, matchedGoals []string, rejected bool, rejectReason string)
 }
 
+// IncomeSignalProvider supplies a live income signal from the income engine.
+// Defined here to avoid import cycles — implemented in income package.
+// Fail-open: returns (0, 0) when nil or unavailable.
+type IncomeSignalProvider interface {
+	// GetIncomeSignal returns bestOpenScore ∈ [0,1] and the count of open opportunities.
+	GetIncomeSignal(ctx context.Context) (bestOpenScore float64, openOpportunities int)
+	// IsIncomeRelated reports whether the action type is income-oriented.
+	IsIncomeRelated(actionType string) bool
+}
+
 // ReplayPackRecorder records decision replay packs.
 // Defined here to avoid import cycles — implemented in governance package.
 // Uses primitive parameters to avoid type coupling.
@@ -200,6 +210,9 @@ type GraphPlannerAdapter struct {
 
 	// goalAlignment scores actions against system goals (Iteration 35).
 	goalAlignment SystemGoalAlignmentProvider
+
+	// incomeSignals provides a live income signal for path scoring (Iteration 36).
+	incomeSignals IncomeSignalProvider
 
 	// lastGoalTrace stores the most recent goal alignment trace for API visibility (Iteration 35).
 	lastGoalTrace []map[string]any
@@ -309,6 +322,12 @@ func (a *GraphPlannerAdapter) WithProviderRouting(pr ProviderRoutingProvider) *G
 // WithGoalAlignment sets the system goal alignment provider for goal-driven scoring (Iteration 35).
 func (a *GraphPlannerAdapter) WithGoalAlignment(ga SystemGoalAlignmentProvider) *GraphPlannerAdapter {
 	a.goalAlignment = ga
+	return a
+}
+
+// WithIncomeSignals sets the income signal provider for income-aware path scoring (Iteration 36).
+func (a *GraphPlannerAdapter) WithIncomeSignals(is IncomeSignalProvider) *GraphPlannerAdapter {
+	a.incomeSignals = is
 	return a
 }
 
@@ -661,6 +680,34 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 				"goal_type": decision.GoalType,
 				"goal_id":   decision.GoalID,
 				"trace":     goalTrace,
+			})
+		}
+	}
+
+	// --- Income signal boost (Iteration 36) ---
+	// Applies a bounded additive boost to income-related paths based on the
+	// live income signal (best open opportunity score × IncomeSignalMaxBoost).
+	// Only paths whose first action is income-oriented receive the boost.
+	// Fail-open: if provider is nil or no open opportunities, paths unchanged.
+	if a.incomeSignals != nil {
+		bestScore, openCount := a.incomeSignals.GetIncomeSignal(ctx)
+		if openCount > 0 && bestScore > 0 {
+			// IncomeSignalMaxBoost = 0.15 (defined in income package).
+			const incomeMaxBoost = 0.15
+			boost := bestScore * incomeMaxBoost
+			for i, p := range scored {
+				if len(p.Nodes) == 0 {
+					continue
+				}
+				if a.incomeSignals.IsIncomeRelated(p.Nodes[0].ActionType) {
+					scored[i].FinalScore = clamp01(p.FinalScore + boost)
+				}
+			}
+			a.auditEvent(ctx, "income.signal_applied", map[string]any{
+				"goal_type":          decision.GoalType,
+				"best_open_score":    bestScore,
+				"open_opportunities": openCount,
+				"boost":              boost,
 			})
 		}
 	}
