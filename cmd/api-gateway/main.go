@@ -14,6 +14,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/actionmemory"
 	"github.com/tiroq/arcanum/internal/agent/actions"
 	"github.com/tiroq/arcanum/internal/agent/actuation"
+	"github.com/tiroq/arcanum/internal/agent/autonomy"
 	"github.com/tiroq/arcanum/internal/agent/calibration"
 	"github.com/tiroq/arcanum/internal/agent/capacity"
 	"github.com/tiroq/arcanum/internal/agent/causal"
@@ -675,6 +676,39 @@ func run() error {
 	actuationGraphAdapter := actuation.NewGraphAdapter(actuationEngine, logger)
 	logger.Info("closed feedback actuation initialised")
 
+	// Autonomy runtime orchestrator (Iteration 52).
+	// Loads autonomy config, creates orchestrator, wires all subsystem providers.
+	// Orchestrator runs recurring cycles: reflection, objective, actuation,
+	// scheduling, portfolio, discovery, self-extension, reporting.
+	// Safety kernel enforces downgrade on threshold breach.
+	// All providers are optional and fail-open.
+	autonomyConfigPath := "configs/autonomy.yaml"
+	autonomyCfg, autonomyCfgErr := autonomy.LoadAutonomyConfig(autonomyConfigPath)
+	var autonomyAdapter *autonomy.APIAdapter
+	if autonomyCfgErr != nil {
+		logger.Warn("autonomy config not loaded, orchestrator disabled",
+			zap.String("path", autonomyConfigPath),
+			zap.Error(autonomyCfgErr),
+		)
+	} else {
+		autonomyOrch := autonomy.NewOrchestrator(autonomyCfg, auditor, logger).
+			WithReflection(autonomyReflectionBridge{me: metaReflectionEngine}).
+			WithObjective(autonomyObjectiveBridge{oe: objectiveEngine}).
+			WithActuation(autonomyActuationBridge{ae: actuationEngine}).
+			WithScheduling(autonomySchedulingBridge{se: schedEngine}).
+			WithPortfolio(autonomyPortfolioBridge{pe: portfolioEngine}).
+			WithDiscovery(autonomyDiscoveryBridge{de: discoveryEngine}).
+			WithSelfExtension(autonomySelfExtBridge{se: selfExtEngine}).
+			WithPressure(autonomyPressureBridge{fp: financialPressureAdapter}).
+			WithCapacity(autonomyCapacityBridge{ca: capacityGraphAdapter}).
+			WithGovernance(autonomyGovernanceBridge{gc: govController})
+		autonomyAdapter = autonomy.NewAPIAdapter(autonomyOrch, autonomyConfigPath)
+		logger.Info("autonomy orchestrator initialised",
+			zap.String("mode", string(autonomyCfg.Mode)),
+			zap.Bool("scheduler_enabled", autonomyCfg.Scheduler.Enabled),
+		)
+	}
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -722,7 +756,8 @@ func run() error {
 		WithScheduling(schedAdapter).
 		WithMetaReflection(metaAdapter, metaReportStore).
 		WithObjective(objectiveGraphAdapter).
-		WithActuation(actuationGraphAdapter)
+		WithActuation(actuationGraphAdapter).
+		WithAutonomy(autonomyAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -743,6 +778,18 @@ func run() error {
 		)
 	}
 
+	// Start autonomy orchestrator if configured.
+	if autonomyAdapter != nil && autonomyCfg != nil && autonomyCfg.Scheduler.Enabled {
+		startCtx := context.Background()
+		if err := autonomyAdapter.Start(startCtx); err != nil {
+			logger.Error("failed to start autonomy orchestrator", zap.Error(err))
+		} else {
+			logger.Info("autonomy orchestrator started",
+				zap.String("mode", string(autonomyCfg.Mode)),
+			)
+		}
+	}
+
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("http server error", zap.Error(err))
@@ -754,6 +801,11 @@ func run() error {
 	<-quit
 
 	logger.Info("shutting down api-gateway")
+
+	// Stop autonomy orchestrator before scheduler.
+	if autonomyAdapter != nil {
+		autonomyAdapter.Stop(context.Background())
+	}
 
 	// Stop scheduler before HTTP server shutdown.
 	agentScheduler.Stop()
