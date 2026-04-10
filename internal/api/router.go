@@ -260,5 +260,11 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/reflection/run", chain(handlers.MetaReflectionRun))
 	mux.Handle("/api/v1/agent/reflection/latest", chain(handlers.MetaReflectionLatest))
 
+	// Agent global objective function + risk model (Iteration 50)
+	mux.Handle("/api/v1/agent/objective/state", chain(handlers.ObjectiveState))
+	mux.Handle("/api/v1/agent/objective/risk", chain(handlers.ObjectiveRisk))
+	mux.Handle("/api/v1/agent/objective/summary", chain(handlers.ObjectiveSummary))
+	mux.Handle("/api/v1/agent/objective/recompute", chain(handlers.ObjectiveRecompute))
+
 	return requestIDMiddleware(mux)
 }

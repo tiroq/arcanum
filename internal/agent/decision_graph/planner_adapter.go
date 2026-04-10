@@ -187,6 +187,23 @@ type PortfolioProvider interface {
 	IsStrategyRelated(actionType string) bool
 }
 
+// ObjectiveFunctionProvider supplies the global net utility signal for decision graph scoring (Iteration 50).
+// Defined here to avoid import cycles — implemented in objective package.
+// Fail-open: returns zero signal when nil or unavailable.
+type ObjectiveFunctionProvider interface {
+	// GetObjectiveSignal returns the current planner-facing objective signal.
+	// Strength is bounded: positive = boost [0, +0.08], negative = penalty [0, -0.06].
+	GetObjectiveSignal(ctx context.Context) ObjectiveSignalExport
+}
+
+// ObjectiveSignalExport carries objective signal data across the provider boundary.
+type ObjectiveSignalExport struct {
+	SignalType  string
+	Strength    float64
+	Explanation string
+	ContextTags []string
+}
+
 // ReplayPackRecorder records decision replay packs.
 // Defined here to avoid import cycles — implemented in governance package.
 // Uses primitive parameters to avoid type coupling.
@@ -291,6 +308,9 @@ type GraphPlannerAdapter struct {
 
 	// portfolio provides strategy-level boost/penalty for portfolio-aware scoring (Iteration 46).
 	portfolio PortfolioProvider
+
+	// objectiveFunction provides global net utility signal for holistic scoring (Iteration 50).
+	objectiveFunction ObjectiveFunctionProvider
 
 	// lastGoalTrace stores the most recent goal alignment trace for API visibility (Iteration 35).
 	lastGoalTrace []map[string]any
@@ -438,6 +458,12 @@ func (a *GraphPlannerAdapter) WithCapacity(cp CapacityProvider) *GraphPlannerAda
 // WithPortfolio sets the portfolio provider for strategy-aware scoring (Iteration 46).
 func (a *GraphPlannerAdapter) WithPortfolio(pp PortfolioProvider) *GraphPlannerAdapter {
 	a.portfolio = pp
+	return a
+}
+
+// WithObjectiveFunction sets the global objective function provider (Iteration 50).
+func (a *GraphPlannerAdapter) WithObjectiveFunction(of ObjectiveFunctionProvider) *GraphPlannerAdapter {
+	a.objectiveFunction = of
 	return a
 }
 
@@ -941,6 +967,26 @@ func (a *GraphPlannerAdapter) EvaluateForPlanner(
 		a.auditEvent(ctx, "portfolio.strategy_scored", map[string]any{
 			"goal_type": decision.GoalType,
 		})
+	}
+
+	// --- Global objective function signal (Iteration 50) ---
+	// Applies a bounded boost or penalty to ALL paths based on the system's
+	// global net utility (value minus risk). Pipeline position: AFTER portfolio,
+	// BEFORE SelectBestPath. This is the final scoring layer.
+	// Fail-open: if provider is nil or signal is zero, paths unchanged.
+	if a.objectiveFunction != nil {
+		sig := a.objectiveFunction.GetObjectiveSignal(ctx)
+		if sig.Strength != 0 {
+			for i, p := range scored {
+				scored[i].FinalScore = clamp01(p.FinalScore + sig.Strength)
+			}
+			a.auditEvent(ctx, "objective.signal_applied", map[string]any{
+				"goal_type":   decision.GoalType,
+				"signal_type": sig.SignalType,
+				"strength":    sig.Strength,
+				"explanation": sig.Explanation,
+			})
+		}
 	}
 
 	// Select best path.

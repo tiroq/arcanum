@@ -30,6 +30,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
+	"github.com/tiroq/arcanum/internal/agent/objective"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
@@ -109,6 +110,7 @@ type Handlers struct {
 	schedulingAdapter     *scheduling.GraphAdapter
 	metaReflectionAdapter *reflection.MetaGraphAdapter
 	metaReportStore       *reflection.ReportStore
+	objectiveAdapter      *objective.GraphAdapter
 	logger                *zap.Logger
 }
 
@@ -355,6 +357,12 @@ func (h *Handlers) WithScheduling(sa *scheduling.GraphAdapter) *Handlers {
 func (h *Handlers) WithMetaReflection(adapter *reflection.MetaGraphAdapter, store *reflection.ReportStore) *Handlers {
 	h.metaReflectionAdapter = adapter
 	h.metaReportStore = store
+	return h
+}
+
+// WithObjective attaches the global objective function adapter (Iteration 50).
+func (h *Handlers) WithObjective(oa *objective.GraphAdapter) *Handlers {
+	h.objectiveAdapter = oa
 	return h
 }
 
@@ -4942,4 +4950,78 @@ func (h *Handlers) PricingPerformance(w http.ResponseWriter, r *http.Request) {
 		perfs = []pricing.PricingPerformance{}
 	}
 	writeJSON(w, http.StatusOK, perfs)
+}
+
+// --- Global Objective Function handlers (Iteration 50) ---
+
+// ObjectiveState handles GET /api/v1/agent/objective/state.
+func (h *Handlers) ObjectiveState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.objectiveAdapter == nil {
+		writeJSON(w, http.StatusOK, objective.ObjectiveState{})
+		return
+	}
+	state, err := h.objectiveAdapter.GetObjectiveState(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+// ObjectiveRisk handles GET /api/v1/agent/objective/risk.
+func (h *Handlers) ObjectiveRisk(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.objectiveAdapter == nil {
+		writeJSON(w, http.StatusOK, objective.RiskState{})
+		return
+	}
+	risk, err := h.objectiveAdapter.GetRiskState(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, risk)
+}
+
+// ObjectiveSummary handles GET /api/v1/agent/objective/summary.
+func (h *Handlers) ObjectiveSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.objectiveAdapter == nil {
+		writeJSON(w, http.StatusOK, objective.ObjectiveSummary{})
+		return
+	}
+	summary, err := h.objectiveAdapter.GetSummary(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// ObjectiveRecompute handles POST /api/v1/agent/objective/recompute.
+func (h *Handlers) ObjectiveRecompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.objectiveAdapter == nil {
+		writeJSON(w, http.StatusOK, objective.ObjectiveSummary{})
+		return
+	}
+	summary, err := h.objectiveAdapter.Recompute(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }

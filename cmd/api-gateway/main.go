@@ -27,6 +27,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
 	meta_reasoning "github.com/tiroq/arcanum/internal/agent/meta_reasoning"
+	"github.com/tiroq/arcanum/internal/agent/objective"
 	"github.com/tiroq/arcanum/internal/agent/outcome"
 	pathcomparison "github.com/tiroq/arcanum/internal/agent/path_comparison"
 	pathlearning "github.com/tiroq/arcanum/internal/agent/path_learning"
@@ -642,6 +643,25 @@ func run() error {
 	metaAdapter := reflection.NewMetaGraphAdapter(metaReflectionEngine, logger)
 	logger.Info("meta-reflection layer initialised")
 
+	// Global objective function + risk model (Iteration 50).
+	// Creates the objective pipeline: stores + engine + adapter.
+	// Integrates with truth, pressure, capacity, portfolio, income, pricing, external actions.
+	// Fail-open: if any provider is unavailable, its inputs default to zero.
+	objStateStore := objective.NewObjectiveStateStore(pool)
+	objRiskStore := objective.NewRiskStateStore(pool)
+	objSummaryStore := objective.NewSummaryStore(pool)
+	objectiveEngine := objective.NewEngine(objStateStore, objRiskStore, objSummaryStore, auditor, logger)
+	objectiveEngine.WithTruth(objectiveTruthAdapter{ft: financialTruthEngine})
+	objectiveEngine.WithPressure(objectivePressureAdapter{fp: financialPressureAdapter})
+	objectiveEngine.WithCapacity(objectiveCapacityAdapter{ca: capacityGraphAdapter})
+	objectiveEngine.WithPortfolio(objectivePortfolioAdapter{pa: portfolioGraphAdapter})
+	objectiveEngine.WithIncome(objectiveIncomeAdapter{ie: incomeEngine})
+	objectiveEngine.WithPricing(objectivePricingAdapter{pa: pricingGraphAdapter})
+	objectiveEngine.WithExternalActions(objectiveExtActAdapter{ea: extActAdapter})
+	objectiveGraphAdapter := objective.NewGraphAdapter(objectiveEngine, logger)
+	graphAdapter.WithObjectiveFunction(objectiveFunctionBridge{oa: objectiveGraphAdapter})
+	logger.Info("global objective function initialised")
+
 	adaptivePlanner.WithStrategy(graphAdapter)
 
 	// Strategy learning layer (Iteration 18).
@@ -687,7 +707,8 @@ func run() error {
 		WithPortfolio(portfolioGraphAdapter).
 		WithPricing(pricingGraphAdapter).
 		WithScheduling(schedAdapter).
-		WithMetaReflection(metaAdapter, metaReportStore)
+		WithMetaReflection(metaAdapter, metaReportStore).
+		WithObjective(objectiveGraphAdapter)
 	router := api.NewRouter(handlers, registry, readiness, cfg.Auth.AdminToken, logger)
 
 	srv := &http.Server{
@@ -925,4 +946,256 @@ func (a reflectionExtActAdapter) GetRecentActionCounts(ctx context.Context, sinc
 		}
 	}
 	return counts
+}
+
+// --- Objective function bridge adapters (Iteration 50) ---
+// These thin adapters bridge existing adapters to the objective.* interfaces
+// to avoid import cycles.
+
+type objectiveTruthAdapter struct {
+	ft *financialtruth.Engine
+}
+
+func (a objectiveTruthAdapter) GetVerifiedIncome(ctx context.Context) float64 {
+	if a.ft == nil {
+		return 0
+	}
+	sig := a.ft.GetTruthSignal(ctx)
+	return sig.VerifiedMonthlyIncome
+}
+
+func (a objectiveTruthAdapter) GetTargetIncome(ctx context.Context) float64 {
+	if a.ft == nil {
+		return 0
+	}
+	// Target income comes from financial pressure state.
+	return 0 // will be supplemented by pressure adapter below
+}
+
+type objectivePressureAdapter struct {
+	fp *financialpressure.GraphAdapter
+}
+
+func (a objectivePressureAdapter) GetPressure(ctx context.Context) (float64, string) {
+	if a.fp == nil {
+		return 0, "low"
+	}
+	return a.fp.GetPressure(ctx)
+}
+
+type objectiveCapacityAdapter struct {
+	ca *capacity.GraphAdapter
+}
+
+func (a objectiveCapacityAdapter) GetOwnerLoadScore(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.OwnerLoadScore
+}
+
+func (a objectiveCapacityAdapter) GetAvailableHoursToday(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.AvailableHoursToday
+}
+
+func (a objectiveCapacityAdapter) GetAvailableHoursWeek(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.AvailableHoursWeek
+}
+
+func (a objectiveCapacityAdapter) GetMaxDailyWorkHours(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.MaxDailyWorkHours
+}
+
+func (a objectiveCapacityAdapter) GetBlockedHoursToday(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.BlockedHoursToday
+}
+
+func (a objectiveCapacityAdapter) GetMinFamilyTimeHours(ctx context.Context) float64 {
+	if a.ca == nil {
+		return 0
+	}
+	state, err := a.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.MinFamilyTimeHours
+}
+
+type objectivePortfolioAdapter struct {
+	pa *portfolio.GraphAdapter
+}
+
+func (a objectivePortfolioAdapter) GetDiversificationIndex(ctx context.Context) float64 {
+	if a.pa == nil {
+		return 0
+	}
+	p := a.pa.GetPortfolio(ctx)
+	return p.DiversificationIdx
+}
+
+func (a objectivePortfolioAdapter) GetDominantAllocation(ctx context.Context) float64 {
+	if a.pa == nil {
+		return 0
+	}
+	p := a.pa.GetPortfolio(ctx)
+	if p.TotalAllocatedHrs <= 0 {
+		return 0
+	}
+	// Find the largest allocation fraction.
+	maxFrac := 0.0
+	for _, e := range p.Entries {
+		if e.Allocation != nil && p.TotalAllocatedHrs > 0 {
+			frac := e.Allocation.AllocatedHours / p.TotalAllocatedHrs
+			if frac > maxFrac {
+				maxFrac = frac
+			}
+		}
+	}
+	return maxFrac
+}
+
+func (a objectivePortfolioAdapter) GetActiveStrategyCount(ctx context.Context) int {
+	if a.pa == nil {
+		return 0
+	}
+	p := a.pa.GetPortfolio(ctx)
+	return p.Summary.TotalActiveStrategies
+}
+
+func (a objectivePortfolioAdapter) GetPortfolioROI(ctx context.Context) float64 {
+	if a.pa == nil {
+		return 0
+	}
+	p := a.pa.GetPortfolio(ctx)
+	return p.PortfolioROI
+}
+
+type objectiveIncomeAdapter struct {
+	ie *income.Engine
+}
+
+func (a objectiveIncomeAdapter) GetBestOpenScore(ctx context.Context) float64 {
+	if a.ie == nil {
+		return 0
+	}
+	sig := a.ie.GetSignal(ctx)
+	return sig.BestOpenScore
+}
+
+func (a objectiveIncomeAdapter) GetOpenOpportunityCount(ctx context.Context) int {
+	if a.ie == nil {
+		return 0
+	}
+	sig := a.ie.GetSignal(ctx)
+	return sig.OpenOpportunities
+}
+
+type objectivePricingAdapter struct {
+	pa *pricing.GraphAdapter
+}
+
+func (a objectivePricingAdapter) GetPricingConfidence(ctx context.Context) float64 {
+	if a.pa == nil {
+		return 0
+	}
+	perfs, err := a.pa.ListPerformance(ctx)
+	if err != nil || len(perfs) == 0 {
+		return 0
+	}
+	// Average win rate as proxy for confidence.
+	total := 0.0
+	for _, p := range perfs {
+		total += p.WinRate
+	}
+	return total / float64(len(perfs))
+}
+
+func (a objectivePricingAdapter) GetWinRate(ctx context.Context) float64 {
+	if a.pa == nil {
+		return 0
+	}
+	perfs, err := a.pa.ListPerformance(ctx)
+	if err != nil || len(perfs) == 0 {
+		return 0
+	}
+	total := 0.0
+	for _, p := range perfs {
+		total += p.WinRate
+	}
+	return total / float64(len(perfs))
+}
+
+type objectiveExtActAdapter struct {
+	ea *externalactions.GraphAdapter
+}
+
+func (a objectiveExtActAdapter) GetActionCounts(ctx context.Context) (failed, pending, total int) {
+	if a.ea == nil {
+		return 0, 0, 0
+	}
+	actions, err := a.ea.ListActions(ctx, 500)
+	if err != nil {
+		return 0, 0, 0
+	}
+	for _, act := range actions {
+		total++
+		switch act.Status {
+		case "failed":
+			failed++
+		case "created", "review_required", "ready":
+			pending++
+		}
+	}
+	return failed, pending, total
+}
+
+// objectiveFunctionBridge bridges the objective.GraphAdapter to the
+// decision_graph.ObjectiveFunctionProvider interface.
+type objectiveFunctionBridge struct {
+	oa *objective.GraphAdapter
+}
+
+func (b objectiveFunctionBridge) GetObjectiveSignal(ctx context.Context) decision_graph.ObjectiveSignalExport {
+	if b.oa == nil {
+		return decision_graph.ObjectiveSignalExport{}
+	}
+	sig := b.oa.GetObjectiveSignal(ctx)
+	return decision_graph.ObjectiveSignalExport{
+		SignalType:  sig.SignalType,
+		Strength:    sig.Strength,
+		Explanation: sig.Explanation,
+		ContextTags: sig.ContextTags,
+	}
 }
