@@ -232,9 +232,28 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 
 	// Agent strategic revenue portfolio (Iteration 46)
 	mux.Handle("/api/v1/agent/strategies", chain(handlers.PortfolioStrategies))
+	mux.Handle("/api/v1/agent/strategies/performance", chain(handlers.PortfolioStrategyPerformance))
 	mux.Handle("/api/v1/agent/portfolio", chain(handlers.PortfolioView))
 	mux.Handle("/api/v1/agent/portfolio/performance", chain(handlers.PortfolioPerformance))
 	mux.Handle("/api/v1/agent/portfolio/rebalance", chain(handlers.PortfolioRebalance))
+	mux.Handle("/api/v1/agent/portfolio/allocations", chain(handlers.PortfolioAllocations))
+
+	// Agent autonomous scheduling & calendar control (Iteration 48)
+	mux.Handle("/api/v1/agent/schedule/slots", chain(handlers.ScheduleSlots))
+	mux.Handle("/api/v1/agent/schedule/recompute", chain(handlers.ScheduleRecompute))
+	mux.Handle("/api/v1/agent/schedule/candidates", chain(handlers.ScheduleCandidates))
+	mux.Handle("/api/v1/agent/schedule/recommend", chain(handlers.ScheduleRecommend))
+	mux.Handle("/api/v1/agent/schedule/approve/", chain(handlers.ScheduleApprove))
+	mux.Handle("/api/v1/agent/schedule/decisions", chain(handlers.ScheduleDecisions))
+	mux.Handle("/api/v1/agent/schedule/calendar/", chain(handlers.ScheduleCalendar))
+
+	// Agent negotiation / pricing intelligence (Iteration 47)
+	mux.Handle("/api/v1/agent/pricing/profiles", chain(handlers.PricingProfiles))
+	mux.Handle("/api/v1/agent/pricing/compute/", chain(handlers.PricingCompute))
+	mux.Handle("/api/v1/agent/pricing/negotiations", chain(handlers.PricingNegotiations))
+	mux.Handle("/api/v1/agent/pricing/recommend/", chain(handlers.PricingRecommend))
+	mux.Handle("/api/v1/agent/pricing/outcomes", chain(handlers.PricingOutcomes))
+	mux.Handle("/api/v1/agent/pricing/performance", chain(handlers.PricingPerformance))
 
 	return requestIDMiddleware(mux)
 }

@@ -36,11 +36,13 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/planning"
 	"github.com/tiroq/arcanum/internal/agent/policy"
 	"github.com/tiroq/arcanum/internal/agent/portfolio"
+	"github.com/tiroq/arcanum/internal/agent/pricing"
 	providercatalog "github.com/tiroq/arcanum/internal/agent/provider_catalog"
 	providerrouting "github.com/tiroq/arcanum/internal/agent/provider_routing"
 	"github.com/tiroq/arcanum/internal/agent/reflection"
 	resourceopt "github.com/tiroq/arcanum/internal/agent/resource_optimization"
 	"github.com/tiroq/arcanum/internal/agent/scheduler"
+	"github.com/tiroq/arcanum/internal/agent/scheduling"
 	selfextension "github.com/tiroq/arcanum/internal/agent/self_extension"
 	"github.com/tiroq/arcanum/internal/agent/signals"
 	"github.com/tiroq/arcanum/internal/agent/stability"
@@ -103,6 +105,8 @@ type Handlers struct {
 	selfExtension      *selfextension.GraphAdapter
 	externalActions    *externalactions.GraphAdapter
 	portfolioAdapter   *portfolio.GraphAdapter
+	pricingAdapter     *pricing.GraphAdapter
+	schedulingAdapter  *scheduling.GraphAdapter
 	logger             *zap.Logger
 }
 
@@ -330,6 +334,18 @@ func (h *Handlers) WithExternalActions(ea *externalactions.GraphAdapter) *Handle
 // WithPortfolio attaches the portfolio adapter for strategy portfolio API (Iteration 46).
 func (h *Handlers) WithPortfolio(pa *portfolio.GraphAdapter) *Handlers {
 	h.portfolioAdapter = pa
+	return h
+}
+
+// WithPricing attaches the pricing adapter for negotiation/pricing intelligence API (Iteration 47).
+func (h *Handlers) WithPricing(pa *pricing.GraphAdapter) *Handlers {
+	h.pricingAdapter = pa
+	return h
+}
+
+// WithScheduling attaches the scheduling adapter for calendar-aware scheduling (Iteration 48).
+func (h *Handlers) WithScheduling(sa *scheduling.GraphAdapter) *Handlers {
+	h.schedulingAdapter = sa
 	return h
 }
 
@@ -4472,67 +4488,8 @@ func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// --- Portfolio (Iteration 46) ---
-
-// PortfolioStrategies handles GET /api/v1/agent/strategies (list) and POST (create).
-func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		if h.portfolioAdapter == nil {
-			writeJSON(w, http.StatusOK, []portfolio.Strategy{})
-			return
-		}
-		strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if strategies == nil {
-			strategies = []portfolio.Strategy{}
-		}
-		writeJSON(w, http.StatusOK, strategies)
-
-	case http.MethodPost:
-		if h.portfolioAdapter == nil {
-			writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
-			return
-		}
-		var st portfolio.Strategy
-		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
-			writeError(w, r, http.StatusBadRequest, "invalid request body")
-			return
-		}
-		saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusCreated, saved)
-
-	default:
-		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-// PortfolioView handles GET /api/v1/agent/portfolio.
-func (h *Handlers) PortfolioView(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if h.portfolioAdapter == nil {
-		writeJSON(w, http.StatusOK, portfolio.Portfolio{})
-		return
-	}
-	p := h.portfolioAdapter.GetPortfolio(r.Context())
-	if p.Entries == nil {
-		p.Entries = []portfolio.PortfolioEntry{}
-	}
-	writeJSON(w, http.StatusOK, p)
-}
-
-// PortfolioPerformance handles GET /api/v1/agent/portfolio/performance.
-func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) {
+// PortfolioStrategyPerformance handles GET /api/v1/agent/strategies/performance.
+func (h *Handlers) PortfolioStrategyPerformance(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -4552,64 +4509,104 @@ func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, perfs)
 }
 
-// PortfolioRebalance handles POST /api/v1/agent/portfolio/rebalance.
-func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+// PortfolioAllocations handles GET /api/v1/agent/portfolio/allocations.
+func (h *Handlers) PortfolioAllocations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if h.portfolioAdapter == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+		writeJSON(w, http.StatusOK, []portfolio.StrategyAllocation{})
 		return
 	}
-	result, err := h.portfolioAdapter.Rebalance(r.Context())
+	allocs, err := h.portfolioAdapter.GetAllocations(r.Context())
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if result.NewAllocations == nil {
-		result.NewAllocations = []portfolio.StrategyAllocation{}
+	if allocs == nil {
+		allocs = []portfolio.StrategyAllocation{}
 	}
-	if result.PreviousAllocations == nil {
-		result.PreviousAllocations = []portfolio.StrategyAllocation{}
-	}
-	if result.Signals == nil {
-		result.Signals = []portfolio.StrategicSignal{}
-	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, allocs)
 }
 
-// --- Portfolio (Iteration 46) ---
+// --- Autonomous Scheduling & Calendar Control API (Iteration 48) ---
 
-// PortfolioStrategies handles GET /api/v1/agent/strategies (list) and POST (create).
-func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
+// ScheduleSlots handles GET /api/v1/agent/schedule/slots.
+func (h *Handlers) ScheduleSlots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.schedulingAdapter == nil {
+		writeJSON(w, http.StatusOK, []scheduling.ScheduleSlot{})
+		return
+	}
+	slots, err := h.schedulingAdapter.ListSlots(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if slots == nil {
+		slots = []scheduling.ScheduleSlot{}
+	}
+	writeJSON(w, http.StatusOK, slots)
+}
+
+// ScheduleRecompute handles POST /api/v1/agent/schedule/recompute.
+func (h *Handlers) ScheduleRecompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.schedulingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduling engine not available")
+		return
+	}
+	slots, err := h.schedulingAdapter.RecomputeSlots(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if slots == nil {
+		slots = []scheduling.ScheduleSlot{}
+	}
+	writeJSON(w, http.StatusOK, slots)
+}
+
+// ScheduleCandidates handles GET /api/v1/agent/schedule/candidates (list) and POST (create).
+func (h *Handlers) ScheduleCandidates(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if h.portfolioAdapter == nil {
-			writeJSON(w, http.StatusOK, []portfolio.Strategy{})
+		if h.schedulingAdapter == nil {
+			writeJSON(w, http.StatusOK, []scheduling.SchedulingCandidate{})
 			return
 		}
-		strategies, err := h.portfolioAdapter.GetStrategies(r.Context())
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 100 {
+			limit = 50
+		}
+		candidates, err := h.schedulingAdapter.ListCandidates(r.Context(), limit)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if strategies == nil {
-			strategies = []portfolio.Strategy{}
+		if candidates == nil {
+			candidates = []scheduling.SchedulingCandidate{}
 		}
-		writeJSON(w, http.StatusOK, strategies)
+		writeJSON(w, http.StatusOK, candidates)
 
 	case http.MethodPost:
-		if h.portfolioAdapter == nil {
-			writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
+		if h.schedulingAdapter == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "scheduling engine not available")
 			return
 		}
-		var st portfolio.Strategy
-		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+		var c scheduling.SchedulingCandidate
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
 			writeError(w, r, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		saved, err := h.portfolioAdapter.CreateStrategy(r.Context(), st)
+		saved, err := h.schedulingAdapter.AddCandidate(r.Context(), c)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, err.Error())
 			return
@@ -4621,67 +4618,257 @@ func (h *Handlers) PortfolioStrategies(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PortfolioView handles GET /api/v1/agent/portfolio.
-func (h *Handlers) PortfolioView(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+// ScheduleRecommend handles POST /api/v1/agent/schedule/recommend.
+func (h *Handlers) ScheduleRecommend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if h.portfolioAdapter == nil {
-		writeJSON(w, http.StatusOK, portfolio.Portfolio{})
+	if h.schedulingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduling engine not available")
 		return
 	}
-	p := h.portfolioAdapter.GetPortfolio(r.Context())
-	if p.Entries == nil {
-		p.Entries = []portfolio.PortfolioEntry{}
+	var req struct {
+		CandidateID string `json:"candidate_id"`
 	}
-	writeJSON(w, http.StatusOK, p)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.CandidateID == "" {
+		writeError(w, r, http.StatusBadRequest, "candidate_id is required")
+		return
+	}
+	rec, err := h.schedulingAdapter.Recommend(r.Context(), req.CandidateID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }
 
-// PortfolioPerformance handles GET /api/v1/agent/portfolio/performance.
-func (h *Handlers) PortfolioPerformance(w http.ResponseWriter, r *http.Request) {
+// ScheduleApprove handles POST /api/v1/agent/schedule/approve/{decision_id}.
+func (h *Handlers) ScheduleApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.schedulingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduling engine not available")
+		return
+	}
+	decisionID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/schedule/approve/")
+	if decisionID == "" {
+		writeError(w, r, http.StatusBadRequest, "decision_id is required")
+		return
+	}
+	decision, err := h.schedulingAdapter.ApproveDecision(r.Context(), decisionID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, decision)
+}
+
+// ScheduleDecisions handles GET /api/v1/agent/schedule/decisions.
+func (h *Handlers) ScheduleDecisions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if h.portfolioAdapter == nil {
-		writeJSON(w, http.StatusOK, []portfolio.StrategyPerformance{})
+	if h.schedulingAdapter == nil {
+		writeJSON(w, http.StatusOK, []scheduling.ScheduleDecision{})
 		return
 	}
-	perfs, err := h.portfolioAdapter.GetPerformance(r.Context())
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	decisions, err := h.schedulingAdapter.ListDecisions(r.Context(), limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if decisions == nil {
+		decisions = []scheduling.ScheduleDecision{}
+	}
+	writeJSON(w, http.StatusOK, decisions)
+}
+
+// ScheduleCalendar handles POST /api/v1/agent/schedule/calendar/{decision_id}.
+func (h *Handlers) ScheduleCalendar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.schedulingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "scheduling engine not available")
+		return
+	}
+	decisionID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/schedule/calendar/")
+	if decisionID == "" {
+		writeError(w, r, http.StatusBadRequest, "decision_id is required")
+		return
+	}
+	var req struct {
+		DryRun bool `json:"dry_run"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	record, err := h.schedulingAdapter.WriteCalendar(r.Context(), decisionID, req.DryRun)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
+}
+
+// --- Pricing Intelligence (Iteration 47) ---
+
+// PricingProfiles handles GET /api/v1/agent/pricing/profiles.
+func (h *Handlers) PricingProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pricingAdapter == nil {
+		writeJSON(w, http.StatusOK, []pricing.PricingProfile{})
+		return
+	}
+	profiles, err := h.pricingAdapter.ListProfiles(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if profiles == nil {
+		profiles = []pricing.PricingProfile{}
+	}
+	writeJSON(w, http.StatusOK, profiles)
+}
+
+// PricingCompute handles POST /api/v1/agent/pricing/compute/{opportunity_id}.
+func (h *Handlers) PricingCompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pricingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "pricing engine not available")
+		return
+	}
+	// Extract opportunity_id from path.
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/pricing/compute/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "opportunity_id is required")
+		return
+	}
+	opportunityID := parts[0]
+
+	var input pricing.PricingInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		// Allow empty body — use defaults.
+		input = pricing.PricingInput{}
+	}
+	input.OpportunityID = opportunityID
+
+	if input.EstimatedEffortHours <= 0 {
+		input.EstimatedEffortHours = 1 // default 1 hour
+	}
+
+	profile, err := h.pricingAdapter.ComputeProfile(r.Context(), input)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
+}
+
+// PricingNegotiations handles GET /api/v1/agent/pricing/negotiations.
+func (h *Handlers) PricingNegotiations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pricingAdapter == nil {
+		writeJSON(w, http.StatusOK, []pricing.NegotiationRecord{})
+		return
+	}
+	negotiations, err := h.pricingAdapter.ListNegotiations(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if negotiations == nil {
+		negotiations = []pricing.NegotiationRecord{}
+	}
+	writeJSON(w, http.StatusOK, negotiations)
+}
+
+// PricingRecommend handles POST /api/v1/agent/pricing/recommend/{opportunity_id}.
+func (h *Handlers) PricingRecommend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pricingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "pricing engine not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/pricing/recommend/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "opportunity_id is required")
+		return
+	}
+	opportunityID := parts[0]
+
+	rec, err := h.pricingAdapter.Recommend(r.Context(), opportunityID)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+// PricingOutcomes handles POST /api/v1/agent/pricing/outcomes.
+func (h *Handlers) PricingOutcomes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pricingAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "pricing engine not available")
+		return
+	}
+	var outcome pricing.PricingOutcome
+	if err := json.NewDecoder(r.Body).Decode(&outcome); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	saved, err := h.pricingAdapter.RecordOutcome(r.Context(), outcome)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, saved)
+}
+
+// PricingPerformance handles GET /api/v1/agent/pricing/performance.
+func (h *Handlers) PricingPerformance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.pricingAdapter == nil {
+		writeJSON(w, http.StatusOK, []pricing.PricingPerformance{})
+		return
+	}
+	perfs, err := h.pricingAdapter.ListPerformance(r.Context())
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if perfs == nil {
-		perfs = []portfolio.StrategyPerformance{}
+		perfs = []pricing.PricingPerformance{}
 	}
 	writeJSON(w, http.StatusOK, perfs)
-}
-
-// PortfolioRebalance handles POST /api/v1/agent/portfolio/rebalance.
-func (h *Handlers) PortfolioRebalance(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if h.portfolioAdapter == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "portfolio engine not available")
-		return
-	}
-	result, err := h.portfolioAdapter.Rebalance(r.Context())
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if result.NewAllocations == nil {
-		result.NewAllocations = []portfolio.StrategyAllocation{}
-	}
-	if result.PreviousAllocations == nil {
-		result.PreviousAllocations = []portfolio.StrategyAllocation{}
-	}
-	if result.Signals == nil {
-		result.Signals = []portfolio.StrategicSignal{}
-	}
-	writeJSON(w, http.StatusOK, result)
 }
