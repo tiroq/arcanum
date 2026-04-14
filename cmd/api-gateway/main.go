@@ -731,7 +731,10 @@ func run() error {
 			WithSelfExtension(autonomySelfExtBridge{se: selfExtEngine}).
 			WithPressure(autonomyPressureBridge{fp: financialPressureAdapter}).
 			WithCapacity(autonomyCapacityBridge{ca: capacityGraphAdapter}).
-			WithGovernance(autonomyGovernanceBridge{gc: govController})
+			WithGovernance(autonomyGovernanceBridge{gc: govController}).
+			WithTaskOrchestrator(autonomyTaskOrchBridge{ta: taskOrchAdapter}).
+			WithExecutionLoop(autonomyExecLoopBridge{el: execLoopAdapter}).
+			WithFeedbackStore(autonomy.NewPgExecutionFeedbackStore(pool))
 		autonomyAdapter = autonomy.NewAPIAdapter(autonomyOrch, autonomyConfigPath)
 		logger.Info("autonomy orchestrator initialised",
 			zap.String("mode", string(autonomyCfg.Mode)),
@@ -1773,4 +1776,153 @@ func (b taskOrchExecLoopBridge) CreateAndRun(ctx context.Context, goal string) (
 		return task.ID, err
 	}
 	return task.ID, nil
+}
+
+// --- Autonomy chain closure bridge adapters (Iteration 54.5/55A) ---
+
+type autonomyTaskOrchBridge struct {
+	ta *taskorchestrator.GraphAdapter
+}
+
+func (b autonomyTaskOrchBridge) CreateTask(ctx context.Context, source, goal string, urgency, expectedValue, riskLevel float64, strategyType string) (autonomy.CreatedTaskInfo, error) {
+	if b.ta == nil {
+		return autonomy.CreatedTaskInfo{}, nil
+	}
+	task, err := b.ta.CreateTask(ctx, source, goal, urgency, expectedValue, riskLevel, strategyType)
+	if err != nil {
+		return autonomy.CreatedTaskInfo{}, err
+	}
+	return autonomy.CreatedTaskInfo{ID: task.ID}, nil
+}
+
+func (b autonomyTaskOrchBridge) RecomputePriorities(ctx context.Context) error {
+	if b.ta == nil {
+		return nil
+	}
+	return b.ta.RecomputePriorities(ctx)
+}
+
+func (b autonomyTaskOrchBridge) Dispatch(ctx context.Context) (autonomy.DispatchResultInfo, error) {
+	if b.ta == nil {
+		return autonomy.DispatchResultInfo{}, nil
+	}
+	result, err := b.ta.Dispatch(ctx)
+	if err != nil {
+		return autonomy.DispatchResultInfo{}, err
+	}
+	return autonomy.DispatchResultInfo{
+		DispatchedCount: len(result.Dispatched),
+		SkippedCount:    len(result.Skipped),
+		BlockedCount:    len(result.Blocked),
+	}, nil
+}
+
+func (b autonomyTaskOrchBridge) FindByActuationDecision(ctx context.Context, decisionID string) (string, error) {
+	if b.ta == nil {
+		return "", nil
+	}
+	return b.ta.FindByActuationDecision(ctx, decisionID)
+}
+
+func (b autonomyTaskOrchBridge) CompleteTask(ctx context.Context, id string) error {
+	if b.ta == nil {
+		return nil
+	}
+	_, err := b.ta.CompleteTask(ctx, id)
+	return err
+}
+
+func (b autonomyTaskOrchBridge) FailTask(ctx context.Context, id, reason string) error {
+	if b.ta == nil {
+		return nil
+	}
+	_, err := b.ta.FailTaskWithReason(ctx, id, reason)
+	return err
+}
+
+func (b autonomyTaskOrchBridge) PauseTask(ctx context.Context, id string) error {
+	if b.ta == nil {
+		return nil
+	}
+	_, err := b.ta.PauseTask(ctx, id)
+	return err
+}
+
+func (b autonomyTaskOrchBridge) SetActuationDecisionID(ctx context.Context, taskID, decisionID string) error {
+	if b.ta == nil {
+		return nil
+	}
+	return b.ta.SetActuationDecisionID(ctx, taskID, decisionID)
+}
+
+func (b autonomyTaskOrchBridge) SetExecutionTaskID(ctx context.Context, taskID, execTaskID string) error {
+	if b.ta == nil {
+		return nil
+	}
+	return b.ta.SetExecutionTaskID(ctx, taskID, execTaskID)
+}
+
+func (b autonomyTaskOrchBridge) SetOutcome(ctx context.Context, taskID, outcomeType, lastError string, attemptCount int) error {
+	if b.ta == nil {
+		return nil
+	}
+	return b.ta.SetOutcome(ctx, taskID, outcomeType, lastError, attemptCount)
+}
+
+func (b autonomyTaskOrchBridge) ListRunningTasks(ctx context.Context, limit int) ([]autonomy.RunningTaskInfo, error) {
+	if b.ta == nil {
+		return nil, nil
+	}
+	tasks, err := b.ta.ListRunningTasks(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]autonomy.RunningTaskInfo, len(tasks))
+	for i, t := range tasks {
+		result[i] = autonomy.RunningTaskInfo{
+			ID:              t.ID,
+			ExecutionTaskID: t.ExecutionTaskID,
+			Goal:            t.Goal,
+			AttemptCount:    t.AttemptCount,
+		}
+	}
+	return result, nil
+}
+
+type autonomyExecLoopBridge struct {
+	el *executionloop.GraphAdapter
+}
+
+func (b autonomyExecLoopBridge) GetTask(ctx context.Context, id string) (autonomy.ExecTaskInfo, error) {
+	if b.el == nil {
+		return autonomy.ExecTaskInfo{}, fmt.Errorf("execution loop not available")
+	}
+	task, err := b.el.GetTask(ctx, id)
+	if err != nil {
+		return autonomy.ExecTaskInfo{}, err
+	}
+
+	stepsExecuted := 0
+	stepsFailed := 0
+	hasReviewBlock := false
+	for _, step := range task.Plan {
+		switch string(step.Status) {
+		case "executed":
+			stepsExecuted++
+		case "failed":
+			stepsFailed++
+		case "pending_review":
+			hasReviewBlock = true
+		}
+	}
+
+	return autonomy.ExecTaskInfo{
+		ID:             task.ID,
+		Status:         string(task.Status),
+		AbortReason:    task.AbortReason,
+		IterationCount: task.IterationCount,
+		StepsExecuted:  stepsExecuted,
+		StepsFailed:    stepsFailed,
+		HasReviewBlock: hasReviewBlock,
+	}, nil
 }
