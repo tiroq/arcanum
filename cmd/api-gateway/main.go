@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/discovery"
+	executionloop "github.com/tiroq/arcanum/internal/agent/execution_loop"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
@@ -676,6 +678,19 @@ func run() error {
 	actuationGraphAdapter := actuation.NewGraphAdapter(actuationEngine, logger)
 	logger.Info("closed feedback actuation initialised")
 
+	// Execution loop engine (Iteration 53).
+	// Bounded autonomous execution: GOAL → PLAN → EXECUTE → OBSERVE → REFLECT → UPDATE.
+	// Integrates with external_actions for step execution, governance for gating,
+	// and objective for penalty-based abort.
+	execTaskStore := executionloop.NewTaskStore(pool)
+	execObsStore := executionloop.NewObservationStore(pool)
+	execEngine := executionloop.NewEngine(execTaskStore, execObsStore, auditor, logger)
+	execEngine.WithGovernance(execLoopGovernanceBridge{ga: govAdapter})
+	execEngine.WithObjective(execLoopObjectiveBridge{oa: objectiveGraphAdapter})
+	execEngine.WithExternalActions(execLoopExtActBridge{ea: extActAdapter})
+	execLoopAdapter := executionloop.NewGraphAdapter(execEngine, logger)
+	logger.Info("execution loop engine initialised")
+
 	// Autonomy runtime orchestrator (Iteration 52).
 	// Loads autonomy config, creates orchestrator, wires all subsystem providers.
 	// Orchestrator runs recurring cycles: reflection, objective, actuation,
@@ -756,7 +771,8 @@ func run() error {
 		WithScheduling(schedAdapter).
 		WithMetaReflection(metaAdapter, metaReportStore).
 		WithObjective(objectiveGraphAdapter).
-		WithActuation(actuationGraphAdapter)
+		WithActuation(actuationGraphAdapter).
+		WithExecutionLoop(execLoopAdapter)
 
 	// Conditionally wire autonomy (avoids nil interface gotcha).
 	if autonomyAdapter != nil {
@@ -1571,4 +1587,96 @@ func (a autonomyGovernanceBridge) SetMode(ctx context.Context, mode, reason stri
 		})
 		return err
 	}
+}
+
+// --- Execution loop bridge adapters (Iteration 53) ---
+
+type execLoopGovernanceBridge struct {
+	ga *governance.ControllerAdapter
+}
+
+func (b execLoopGovernanceBridge) GetMode(ctx interface{}) string {
+	if b.ga == nil {
+		return "normal"
+	}
+	c, ok := ctx.(context.Context)
+	if !ok {
+		return "normal"
+	}
+	return b.ga.GetMode(c)
+}
+
+type execLoopObjectiveBridge struct {
+	oa *objective.GraphAdapter
+}
+
+func (b execLoopObjectiveBridge) GetSignalType(ctx interface{}) string {
+	if b.oa == nil {
+		return ""
+	}
+	c, ok := ctx.(context.Context)
+	if !ok {
+		return ""
+	}
+	sig := b.oa.GetObjectiveSignal(c)
+	return sig.SignalType
+}
+
+func (b execLoopObjectiveBridge) GetSignalStrength(ctx interface{}) float64 {
+	if b.oa == nil {
+		return 0
+	}
+	c, ok := ctx.(context.Context)
+	if !ok {
+		return 0
+	}
+	sig := b.oa.GetObjectiveSignal(c)
+	return sig.Strength
+}
+
+type execLoopExtActBridge struct {
+	ea *externalactions.GraphAdapter
+}
+
+func (b execLoopExtActBridge) CreateAndExecute(ctx interface{}, actionType string, payload json.RawMessage, opportunityID string) (executionloop.ExecutorResult, error) {
+	if b.ea == nil {
+		return executionloop.ExecutorResult{Success: false, Error: "external actions not available"}, nil
+	}
+	c, ok := ctx.(context.Context)
+	if !ok {
+		return executionloop.ExecutorResult{Success: false, Error: "invalid context"}, nil
+	}
+
+	// Create the external action.
+	action, err := b.ea.CreateAction(c, externalactions.ExternalAction{
+		OpportunityID: opportunityID,
+		ActionType:    actionType,
+		Payload:       payload,
+	})
+	if err != nil {
+		return executionloop.ExecutorResult{Success: false, Error: err.Error()}, nil
+	}
+
+	// Check if review is required.
+	if action.Status == externalactions.StatusReviewRequired {
+		return executionloop.ExecutorResult{
+			Success:        false,
+			RequiresReview: true,
+			ActionID:       action.ID,
+			Error:          "action requires review: " + action.ReviewReason,
+		}, nil
+	}
+
+	// Execute the action.
+	result, err := b.ea.Execute(c, action.ID)
+	if err != nil {
+		return executionloop.ExecutorResult{Success: false, Error: err.Error(), ActionID: action.ID}, nil
+	}
+
+	return executionloop.ExecutorResult{
+		Success:  result.Success,
+		Output:   result.ResponsePayload,
+		Error:    result.ErrorMessage,
+		ActionID: action.ID,
+	}, nil
 }
