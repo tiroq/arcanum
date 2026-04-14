@@ -86,17 +86,23 @@ const (
 
 // OrchestratedTask represents a task managed by the multi-task orchestrator.
 type OrchestratedTask struct {
-	ID            string     `json:"id"`
-	Source        string     `json:"source"`
-	Goal          string     `json:"goal"`
-	PriorityScore float64    `json:"priority_score"`
-	Status        TaskStatus `json:"status"`
-	Urgency       float64    `json:"urgency"`
-	ExpectedValue float64    `json:"expected_value"`
-	RiskLevel     float64    `json:"risk_level"`
-	StrategyType  string     `json:"strategy_type"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID                  string     `json:"id"`
+	Source              string     `json:"source"`
+	Goal                string     `json:"goal"`
+	PriorityScore       float64    `json:"priority_score"`
+	Status              TaskStatus `json:"status"`
+	Urgency             float64    `json:"urgency"`
+	ExpectedValue       float64    `json:"expected_value"`
+	RiskLevel           float64    `json:"risk_level"`
+	StrategyType        string     `json:"strategy_type"`
+	ActuationDecisionID string     `json:"actuation_decision_id,omitempty"`
+	ExecutionTaskID     string     `json:"execution_task_id,omitempty"`
+	OutcomeType         string     `json:"outcome_type,omitempty"`
+	LastError           string     `json:"last_error,omitempty"`
+	AttemptCount        int        `json:"attempt_count"`
+	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // TaskQueueEntry represents a scored entry in the priority queue.

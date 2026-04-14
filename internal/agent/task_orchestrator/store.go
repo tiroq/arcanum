@@ -19,6 +19,10 @@ type TaskStoreInterface interface {
 	List(ctx context.Context, limit int) ([]OrchestratedTask, error)
 	ListByStatus(ctx context.Context, status TaskStatus, limit int) ([]OrchestratedTask, error)
 	CountByStatus(ctx context.Context, status TaskStatus) (int, error)
+	FindByActuationDecision(ctx context.Context, decisionID string) (string, error)
+	SetActuationDecisionID(ctx context.Context, taskID, decisionID string) error
+	SetExecutionTaskID(ctx context.Context, taskID, execTaskID string) error
+	SetOutcome(ctx context.Context, taskID, outcomeType, lastError string, attemptCount int) error
 }
 
 // QueueStoreInterface abstracts queue persistence.
@@ -45,11 +49,15 @@ func NewTaskStore(pool *pgxpool.Pool) *TaskStore {
 func (s *TaskStore) Insert(ctx context.Context, t OrchestratedTask) error {
 	const q = `
 		INSERT INTO agent_orchestrated_tasks
-			(id, source, goal, priority_score, status, urgency, expected_value, risk_level, strategy_type, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+			(id, source, goal, priority_score, status, urgency, expected_value, risk_level, strategy_type,
+			 actuation_decision_id, execution_task_id, outcome_type, last_error, attempt_count, completed_at,
+			 created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`
 	_, err := s.pool.Exec(ctx, q,
 		t.ID, t.Source, t.Goal, t.PriorityScore, string(t.Status),
 		t.Urgency, t.ExpectedValue, t.RiskLevel, t.StrategyType,
+		nilIfEmpty(t.ActuationDecisionID), nilIfEmpty(t.ExecutionTaskID),
+		t.OutcomeType, t.LastError, t.AttemptCount, t.CompletedAt,
 		t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
@@ -62,14 +70,19 @@ func (s *TaskStore) Insert(ctx context.Context, t OrchestratedTask) error {
 func (s *TaskStore) Get(ctx context.Context, id string) (OrchestratedTask, error) {
 	const q = `
 		SELECT id, source, goal, priority_score, status, urgency, expected_value,
-		       risk_level, strategy_type, created_at, updated_at
+		       risk_level, strategy_type,
+		       COALESCE(actuation_decision_id, ''), COALESCE(execution_task_id, ''),
+		       COALESCE(outcome_type, ''), COALESCE(last_error, ''), COALESCE(attempt_count, 0),
+		       completed_at, created_at, updated_at
 		FROM agent_orchestrated_tasks WHERE id = $1`
 	var t OrchestratedTask
 	var statusStr string
 	err := s.pool.QueryRow(ctx, q, id).Scan(
 		&t.ID, &t.Source, &t.Goal, &t.PriorityScore, &statusStr,
 		&t.Urgency, &t.ExpectedValue, &t.RiskLevel, &t.StrategyType,
-		&t.CreatedAt, &t.UpdatedAt,
+		&t.ActuationDecisionID, &t.ExecutionTaskID,
+		&t.OutcomeType, &t.LastError, &t.AttemptCount,
+		&t.CompletedAt, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		return OrchestratedTask{}, ErrTaskNotFound
@@ -86,11 +99,17 @@ func (s *TaskStore) Update(ctx context.Context, t OrchestratedTask) error {
 	const q = `
 		UPDATE agent_orchestrated_tasks
 		SET priority_score = $1, status = $2, urgency = $3,
-		    expected_value = $4, risk_level = $5, strategy_type = $6, updated_at = $7
-		WHERE id = $8`
+		    expected_value = $4, risk_level = $5, strategy_type = $6,
+		    actuation_decision_id = $7, execution_task_id = $8,
+		    outcome_type = $9, last_error = $10, attempt_count = $11,
+		    completed_at = $12, updated_at = $13
+		WHERE id = $14`
 	_, err := s.pool.Exec(ctx, q,
 		t.PriorityScore, string(t.Status), t.Urgency,
-		t.ExpectedValue, t.RiskLevel, t.StrategyType, t.UpdatedAt,
+		t.ExpectedValue, t.RiskLevel, t.StrategyType,
+		nilIfEmpty(t.ActuationDecisionID), nilIfEmpty(t.ExecutionTaskID),
+		t.OutcomeType, t.LastError, t.AttemptCount,
+		t.CompletedAt, t.UpdatedAt,
 		t.ID,
 	)
 	if err != nil {
@@ -106,7 +125,10 @@ func (s *TaskStore) List(ctx context.Context, limit int) ([]OrchestratedTask, er
 	}
 	const q = `
 		SELECT id, source, goal, priority_score, status, urgency, expected_value,
-		       risk_level, strategy_type, created_at, updated_at
+		       risk_level, strategy_type,
+		       COALESCE(actuation_decision_id, ''), COALESCE(execution_task_id, ''),
+		       COALESCE(outcome_type, ''), COALESCE(last_error, ''), COALESCE(attempt_count, 0),
+		       completed_at, created_at, updated_at
 		FROM agent_orchestrated_tasks ORDER BY created_at DESC LIMIT $1`
 	return s.scanTasks(ctx, q, limit)
 }
@@ -118,7 +140,10 @@ func (s *TaskStore) ListByStatus(ctx context.Context, status TaskStatus, limit i
 	}
 	const q = `
 		SELECT id, source, goal, priority_score, status, urgency, expected_value,
-		       risk_level, strategy_type, created_at, updated_at
+		       risk_level, strategy_type,
+		       COALESCE(actuation_decision_id, ''), COALESCE(execution_task_id, ''),
+		       COALESCE(outcome_type, ''), COALESCE(last_error, ''), COALESCE(attempt_count, 0),
+		       completed_at, created_at, updated_at
 		FROM agent_orchestrated_tasks WHERE status = $1 ORDER BY created_at DESC LIMIT $2`
 	return s.scanTasksWithStatus(ctx, q, string(status), limit)
 }
@@ -132,6 +157,59 @@ func (s *TaskStore) CountByStatus(ctx context.Context, status TaskStatus) (int, 
 		return 0, fmt.Errorf("count orchestrated tasks: %w", err)
 	}
 	return count, nil
+}
+
+// FindByActuationDecision returns the task ID linked to the given actuation decision.
+// Returns "" if no task is linked.
+func (s *TaskStore) FindByActuationDecision(ctx context.Context, decisionID string) (string, error) {
+	const q = `SELECT id FROM agent_orchestrated_tasks WHERE actuation_decision_id = $1 LIMIT 1`
+	var id string
+	err := s.pool.QueryRow(ctx, q, decisionID).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find by actuation decision: %w", err)
+	}
+	return id, nil
+}
+
+// SetActuationDecisionID links an actuation decision to a task.
+func (s *TaskStore) SetActuationDecisionID(ctx context.Context, taskID, decisionID string) error {
+	const q = `UPDATE agent_orchestrated_tasks SET actuation_decision_id = $1, updated_at = NOW() WHERE id = $2`
+	_, err := s.pool.Exec(ctx, q, decisionID, taskID)
+	if err != nil {
+		return fmt.Errorf("set actuation decision id: %w", err)
+	}
+	return nil
+}
+
+// SetExecutionTaskID links an execution task to an orchestrated task.
+func (s *TaskStore) SetExecutionTaskID(ctx context.Context, taskID, execTaskID string) error {
+	const q = `UPDATE agent_orchestrated_tasks SET execution_task_id = $1, updated_at = NOW() WHERE id = $2`
+	_, err := s.pool.Exec(ctx, q, execTaskID, taskID)
+	if err != nil {
+		return fmt.Errorf("set execution task id: %w", err)
+	}
+	return nil
+}
+
+// SetOutcome records the execution outcome on a task.
+func (s *TaskStore) SetOutcome(ctx context.Context, taskID, outcomeType, lastError string, attemptCount int) error {
+	const q = `UPDATE agent_orchestrated_tasks SET outcome_type = $1, last_error = $2, attempt_count = $3, completed_at = NOW(), updated_at = NOW() WHERE id = $4`
+	_, err := s.pool.Exec(ctx, q, outcomeType, lastError, attemptCount, taskID)
+	if err != nil {
+		return fmt.Errorf("set outcome: %w", err)
+	}
+	return nil
+}
+
+// nilIfEmpty returns nil if the string is empty, otherwise returns the string pointer.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func (s *TaskStore) scanTasks(ctx context.Context, q string, limit int) ([]OrchestratedTask, error) {
@@ -160,7 +238,9 @@ func (s *TaskStore) collectRows(rows pgx.Rows) ([]OrchestratedTask, error) {
 		if err := rows.Scan(
 			&t.ID, &t.Source, &t.Goal, &t.PriorityScore, &statusStr,
 			&t.Urgency, &t.ExpectedValue, &t.RiskLevel, &t.StrategyType,
-			&t.CreatedAt, &t.UpdatedAt,
+			&t.ActuationDecisionID, &t.ExecutionTaskID,
+			&t.OutcomeType, &t.LastError, &t.AttemptCount,
+			&t.CompletedAt, &t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan orchestrated task: %w", err)
 		}
@@ -313,6 +393,46 @@ func (s *InMemoryTaskStore) CountByStatus(_ context.Context, status TaskStatus) 
 		}
 	}
 	return count, nil
+}
+
+func (s *InMemoryTaskStore) FindByActuationDecision(_ context.Context, decisionID string) (string, error) {
+	for _, t := range s.tasks {
+		if t.ActuationDecisionID == decisionID {
+			return t.ID, nil
+		}
+	}
+	return "", nil
+}
+
+func (s *InMemoryTaskStore) SetActuationDecisionID(_ context.Context, taskID, decisionID string) error {
+	if t, ok := s.tasks[taskID]; ok {
+		t.ActuationDecisionID = decisionID
+		s.tasks[taskID] = t
+		return nil
+	}
+	return ErrTaskNotFound
+}
+
+func (s *InMemoryTaskStore) SetExecutionTaskID(_ context.Context, taskID, execTaskID string) error {
+	if t, ok := s.tasks[taskID]; ok {
+		t.ExecutionTaskID = execTaskID
+		s.tasks[taskID] = t
+		return nil
+	}
+	return ErrTaskNotFound
+}
+
+func (s *InMemoryTaskStore) SetOutcome(_ context.Context, taskID, outcomeType, lastError string, attemptCount int) error {
+	if t, ok := s.tasks[taskID]; ok {
+		t.OutcomeType = outcomeType
+		t.LastError = lastError
+		t.AttemptCount = attemptCount
+		now := nowUTC()
+		t.CompletedAt = &now
+		s.tasks[taskID] = t
+		return nil
+	}
+	return ErrTaskNotFound
 }
 
 // InMemoryQueueStore is an in-memory implementation of QueueStoreInterface.

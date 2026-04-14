@@ -347,6 +347,60 @@ func (e *Engine) FailTask(ctx context.Context, id string) (OrchestratedTask, err
 	return e.transitionTask(ctx, id, TaskStatusFailed, "task.failed")
 }
 
+// FailTaskWithReason marks a task as failed with a reason.
+func (e *Engine) FailTaskWithReason(ctx context.Context, id, reason string) (OrchestratedTask, error) {
+	task, err := e.tasks.Get(ctx, id)
+	if err != nil {
+		return OrchestratedTask{}, err
+	}
+
+	if !ValidateTransition(task.Status, TaskStatusFailed) {
+		return OrchestratedTask{}, ErrInvalidTransition
+	}
+
+	task.Status = TaskStatusFailed
+	task.LastError = reason
+	task.UpdatedAt = nowUTC()
+	if err := e.tasks.Update(ctx, task); err != nil {
+		return OrchestratedTask{}, fmt.Errorf("update task: %w", err)
+	}
+
+	_ = e.queue.Remove(ctx, id)
+
+	e.auditEvent(ctx, "task.failed", map[string]any{
+		"task_id": id,
+		"status":  string(TaskStatusFailed),
+		"reason":  reason,
+	})
+
+	return task, nil
+}
+
+// ListRunningTasks returns running tasks with their execution linkage.
+func (e *Engine) ListRunningTasks(ctx context.Context, limit int) ([]OrchestratedTask, error) {
+	return e.tasks.ListByStatus(ctx, TaskStatusRunning, limit)
+}
+
+// SetActuationDecisionID links an actuation decision to a task.
+func (e *Engine) SetActuationDecisionID(ctx context.Context, taskID, decisionID string) error {
+	return e.tasks.SetActuationDecisionID(ctx, taskID, decisionID)
+}
+
+// SetExecutionTaskID links an execution task to an orchestrated task.
+func (e *Engine) SetExecutionTaskID(ctx context.Context, taskID, execTaskID string) error {
+	return e.tasks.SetExecutionTaskID(ctx, taskID, execTaskID)
+}
+
+// SetOutcome records the execution outcome on a task.
+func (e *Engine) SetOutcome(ctx context.Context, taskID, outcomeType, lastError string, attemptCount int) error {
+	return e.tasks.SetOutcome(ctx, taskID, outcomeType, lastError, attemptCount)
+}
+
+// FindByActuationDecision returns the task ID linked to the given actuation decision.
+func (e *Engine) FindByActuationDecision(ctx context.Context, decisionID string) (string, error) {
+	return e.tasks.FindByActuationDecision(ctx, decisionID)
+}
+
 // PauseTask marks a task as paused.
 func (e *Engine) PauseTask(ctx context.Context, id string) (OrchestratedTask, error) {
 	return e.transitionTask(ctx, id, TaskStatusPaused, "task.paused")
