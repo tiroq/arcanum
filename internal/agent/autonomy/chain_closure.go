@@ -78,7 +78,7 @@ type ExecutionFeedback struct {
 	ID                 string    `json:"id"`
 	TaskID             string    `json:"task_id"`
 	ExecutionTaskID    string    `json:"execution_task_id"`
-	OutcomeType        string    `json:"outcome_type"`    // completed, failed, aborted, blocked
+	OutcomeType        string    `json:"outcome_type"` // completed, failed, aborted, blocked
 	Success            bool      `json:"success"`
 	StepsExecuted      int       `json:"steps_executed"`
 	StepsFailed        int       `json:"steps_failed"`
@@ -408,14 +408,14 @@ func (o *Orchestrator) GetObjectiveFeedback(ctx context.Context) (ObjectiveFeedb
 	}
 
 	metrics := ObjectiveFeedbackMetrics{
-		SuccessRate:       successRate,
-		CompletedCount:    totalCompleted,
-		FailedCount:       totalFailed,
-		AbortedCount:      totalAborted,
-		BlockedCount:      totalBlocked,
-		RepeatedFailures:  repeatedFails,
-		TotalExecutions:   total,
-		MeasuredSince:     since,
+		SuccessRate:      successRate,
+		CompletedCount:   totalCompleted,
+		FailedCount:      totalFailed,
+		AbortedCount:     totalAborted,
+		BlockedCount:     totalBlocked,
+		RepeatedFailures: repeatedFails,
+		TotalExecutions:  total,
+		MeasuredSince:    since,
 	}
 
 	o.auditEvent(ctx, "execution.feedback_exposed_to_objective", map[string]any{
