@@ -338,6 +338,10 @@ func (o *Orchestrator) recordFeedback(ctx context.Context, task RunningTaskInfo,
 		return
 	}
 
+	o.state.mu.Lock()
+	o.state.FeedbackRecorded++
+	o.state.mu.Unlock()
+
 	o.auditEvent(ctx, "execution.feedback_recorded", map[string]any{
 		"task_id":         task.ID,
 		"exec_task_id":    exec.ID,
