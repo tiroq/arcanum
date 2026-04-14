@@ -23,6 +23,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/counterfactual"
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/discovery"
+	executionloop "github.com/tiroq/arcanum/internal/agent/execution_loop"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
@@ -159,6 +160,7 @@ type Handlers struct {
 	metaReportStore       *reflection.ReportStore
 	objectiveAdapter      *objective.GraphAdapter
 	actuationAdapter      *actuation.GraphAdapter
+	executionLoopAdapter  *executionloop.GraphAdapter
 	autonomyOrch          AutonomyOrchestrator
 	logger                *zap.Logger
 }
@@ -418,6 +420,12 @@ func (h *Handlers) WithObjective(oa *objective.GraphAdapter) *Handlers {
 // WithActuation attaches the closed feedback actuation adapter (Iteration 51).
 func (h *Handlers) WithActuation(aa *actuation.GraphAdapter) *Handlers {
 	h.actuationAdapter = aa
+	return h
+}
+
+// WithExecutionLoop attaches the execution loop adapter (Iteration 53).
+func (h *Handlers) WithExecutionLoop(el *executionloop.GraphAdapter) *Handlers {
+	h.executionLoopAdapter = el
 	return h
 }
 
@@ -5317,4 +5325,126 @@ func (h *Handlers) AutonomySetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "mode_updated", "mode": req.Mode})
+}
+
+// --- Execution Loop handlers (Iteration 53) ---
+
+// ExecutionTasks handles GET /api/v1/agent/execution/tasks and POST /api/v1/agent/execution/tasks.
+func (h *Handlers) ExecutionTasks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if h.executionLoopAdapter == nil {
+			writeJSON(w, http.StatusOK, []executionloop.ExecutionTask{})
+			return
+		}
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		tasks, err := h.executionLoopAdapter.ListTasks(r.Context(), limit)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if tasks == nil {
+			tasks = []executionloop.ExecutionTask{}
+		}
+		writeJSON(w, http.StatusOK, tasks)
+	case http.MethodPost:
+		if h.executionLoopAdapter == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "execution loop not available")
+			return
+		}
+		var req struct {
+			OpportunityID string `json:"opportunity_id"`
+			Goal          string `json:"goal"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if req.Goal == "" {
+			writeError(w, r, http.StatusBadRequest, "goal is required")
+			return
+		}
+		task, err := h.executionLoopAdapter.CreateTask(r.Context(), req.OpportunityID, req.Goal)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, task)
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// ExecutionTaskDetail handles GET /api/v1/agent/execution/tasks/{id}.
+func (h *Handlers) ExecutionTaskDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.executionLoopAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "execution loop not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/execution/tasks/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "task id is required")
+		return
+	}
+	task, err := h.executionLoopAdapter.GetTask(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// ExecutionRun handles POST /api/v1/agent/execution/run/{id}.
+func (h *Handlers) ExecutionRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.executionLoopAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "execution loop not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/execution/run/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "task id is required")
+		return
+	}
+	task, err := h.executionLoopAdapter.RunLoop(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// ExecutionAbort handles POST /api/v1/agent/execution/abort/{id}.
+func (h *Handlers) ExecutionAbort(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.executionLoopAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "execution loop not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/execution/abort/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "task id is required")
+		return
+	}
+	task, err := h.executionLoopAdapter.AbortTask(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
