@@ -68,6 +68,9 @@ type GovernanceSetter interface {
 	SetMode(ctx context.Context, mode, reason string) error
 }
 
+// NOTE: TaskOrchestratorRunner, ExecutionLoopRunner, and ExecutionFeedbackStore
+// are defined in chain_closure.go to avoid circular dependencies.
+
 // --- Result types (lightweight, no import cycles) ---
 
 type ReflectionResult struct {
@@ -130,6 +133,15 @@ type RuntimeState struct {
 	SelfExtBlocked        int                  `json:"self_ext_blocked"`
 	SelfExtDeployed       int                  `json:"self_ext_deployed"`
 	SuppressedDecisions   int                  `json:"suppressed_decisions"`
+
+	// Chain closure state (Iteration 54.5/55A)
+	TasksCreatedFromActuation int `json:"tasks_created_from_actuation"`
+	TaskRecomputeCount        int `json:"task_recompute_count"`
+	TaskDispatchCount         int `json:"task_dispatch_count"`
+	ExecutionCompleted        int `json:"execution_completed"`
+	ExecutionFailed           int `json:"execution_failed"`
+	ExecutionPaused           int `json:"execution_paused"`
+	FeedbackRecorded          int `json:"feedback_recorded"`
 }
 
 func newRuntimeState(mode AutonomyMode) *RuntimeState {
@@ -218,6 +230,11 @@ type Orchestrator struct {
 	capacity   CapacityReader
 	governance GovernanceSetter
 
+	// Chain closure providers (Iteration 54.5/55A)
+	taskOrchestrator TaskOrchestratorRunner
+	executionLoop    ExecutionLoopRunner
+	feedbackStore    ExecutionFeedbackStore
+
 	// Control
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -254,6 +271,20 @@ func (o *Orchestrator) WithSelfExtension(r SelfExtensionRunner) *Orchestrator {
 func (o *Orchestrator) WithPressure(r PressureReader) *Orchestrator     { o.pressure = r; return o }
 func (o *Orchestrator) WithCapacity(r CapacityReader) *Orchestrator     { o.capacity = r; return o }
 func (o *Orchestrator) WithGovernance(r GovernanceSetter) *Orchestrator { o.governance = r; return o }
+
+// Chain closure builder methods (Iteration 54.5/55A).
+func (o *Orchestrator) WithTaskOrchestrator(r TaskOrchestratorRunner) *Orchestrator {
+	o.taskOrchestrator = r
+	return o
+}
+func (o *Orchestrator) WithExecutionLoop(r ExecutionLoopRunner) *Orchestrator {
+	o.executionLoop = r
+	return o
+}
+func (o *Orchestrator) WithFeedbackStore(s ExecutionFeedbackStore) *Orchestrator {
+	o.feedbackStore = s
+	return o
+}
 
 // GetState returns a snapshot of the current runtime state.
 func (o *Orchestrator) GetState() RuntimeState {
@@ -494,6 +525,8 @@ func (o *Orchestrator) dueCycles(now time.Time, inWindow bool) []string {
 		{"portfolio", o.cfg.Governance.AllowPortfolioRebalance, true},
 		{"discovery", o.cfg.Governance.AllowDiscovery, true},
 		{"self_extension", o.cfg.SelfExt.Enabled, true},
+		{"task_recompute", o.taskOrchestrator != nil, true},
+		{"task_dispatch", o.taskOrchestrator != nil, true},
 		{"reporting", o.cfg.Reporting.Enabled, false},
 	}
 
@@ -555,6 +588,10 @@ func (o *Orchestrator) runCycle(ctx context.Context, cycle string, now time.Time
 		err = o.cycleDiscovery(ctx)
 	case "self_extension":
 		err = o.cycleSelfExtension(ctx)
+	case "task_recompute":
+		err = o.cycleTaskRecompute(ctx)
+	case "task_dispatch":
+		err = o.cycleTaskDispatch(ctx)
 	case "reporting":
 		err = o.cycleReporting(ctx)
 	default:
@@ -708,6 +745,39 @@ func (o *Orchestrator) cycleActuation(ctx context.Context) error {
 		zap.Int("review_queued", reviewQueued),
 		zap.Int("suppressed", suppressed),
 	)
+
+	// Chain closure: materialize safe decisions as orchestrated tasks (Iteration 54.5/55A).
+	tasksCreated := 0
+	for _, d := range decisions {
+		if d.Status != "proposed" {
+			continue
+		}
+		// Only materialize non-review, non-suppressed decisions.
+		if d.RequiresReview {
+			continue
+		}
+		_, created, err := o.MaterializeDecisionAsTask(ctx, d)
+		if err != nil {
+			o.logger.Warn("chain_closure: failed to materialize decision as task",
+				zap.String("decision_id", d.ID),
+				zap.Error(err),
+			)
+			continue
+		}
+		if created {
+			tasksCreated++
+		}
+	}
+
+	if tasksCreated > 0 {
+		o.state.mu.Lock()
+		o.state.TasksCreatedFromActuation += tasksCreated
+		o.state.mu.Unlock()
+		o.logger.Info("chain_closure: materialized actuation decisions as tasks",
+			zap.Int("tasks_created", tasksCreated),
+		)
+	}
+
 	return nil
 }
 
@@ -824,6 +894,125 @@ func (o *Orchestrator) isHeavyAction(actionType string) bool {
 		"rebalance_portfolio": true,
 	}
 	return heavy[actionType]
+}
+
+// getEffectiveMode returns the current autonomy mode.
+func (o *Orchestrator) getEffectiveMode() AutonomyMode {
+	o.state.mu.RLock()
+	defer o.state.mu.RUnlock()
+	return o.state.Mode
+}
+
+// --- Chain closure cycles (Iteration 54.5/55A) ---
+
+func (o *Orchestrator) cycleTaskRecompute(ctx context.Context) error {
+	if o.taskOrchestrator == nil {
+		return nil
+	}
+
+	mode := o.getEffectiveMode()
+	if mode == ModeFrozen {
+		o.auditEvent(ctx, "autonomy.task_recompute_skipped", map[string]any{
+			"reason": "frozen_mode",
+		})
+		return nil
+	}
+
+	o.auditEvent(ctx, "autonomy.task_recompute_started", map[string]any{
+		"mode": string(mode),
+	})
+
+	// Also propagate any completed executions first.
+	completed, failed, paused, propErr := o.PropagateExecutionResults(ctx)
+	if propErr != nil {
+		o.logger.Warn("chain_closure: execution propagation error during recompute", zap.Error(propErr))
+	}
+	if completed > 0 || failed > 0 || paused > 0 {
+		o.state.mu.Lock()
+		o.state.ExecutionCompleted += completed
+		o.state.ExecutionFailed += failed
+		o.state.ExecutionPaused += paused
+		o.state.mu.Unlock()
+	}
+
+	if err := o.taskOrchestrator.RecomputePriorities(ctx); err != nil {
+		return fmt.Errorf("task recompute: %w", err)
+	}
+
+	o.state.mu.Lock()
+	o.state.TaskRecomputeCount++
+	o.state.mu.Unlock()
+
+	o.auditEvent(ctx, "autonomy.task_recompute_completed", map[string]any{
+		"completed_propagated": completed,
+		"failed_propagated":    failed,
+		"paused_propagated":    paused,
+	})
+
+	o.logger.Info("task recompute cycle completed",
+		zap.Int("completed", completed),
+		zap.Int("failed", failed),
+		zap.Int("paused", paused),
+	)
+	return nil
+}
+
+func (o *Orchestrator) cycleTaskDispatch(ctx context.Context) error {
+	if o.taskOrchestrator == nil {
+		return nil
+	}
+
+	mode := o.getEffectiveMode()
+	if mode == ModeFrozen {
+		o.auditEvent(ctx, "autonomy.task_dispatch_skipped", map[string]any{
+			"reason": "frozen_mode",
+		})
+		return nil
+	}
+
+	o.auditEvent(ctx, "autonomy.task_dispatch_started", map[string]any{
+		"mode": string(mode),
+	})
+
+	result, err := o.taskOrchestrator.Dispatch(ctx)
+	if err != nil {
+		// ErrGovernanceFrozen and ErrMaxRunning are expected — not true errors.
+		o.auditEvent(ctx, "autonomy.task_dispatch_completed", map[string]any{
+			"dispatched": 0,
+			"reason":     err.Error(),
+		})
+		return nil // fail-open for expected constraint violations
+	}
+
+	// Link dispatched tasks to their execution task IDs.
+	for taskID, execTaskID := range result.DispatchedTaskIDs {
+		if execTaskID != "" {
+			if linkErr := o.taskOrchestrator.SetExecutionTaskID(ctx, taskID, execTaskID); linkErr != nil {
+				o.logger.Warn("chain_closure: failed to link execution task",
+					zap.String("task_id", taskID),
+					zap.String("exec_task_id", execTaskID),
+					zap.Error(linkErr),
+				)
+			}
+		}
+	}
+
+	o.state.mu.Lock()
+	o.state.TaskDispatchCount += result.DispatchedCount
+	o.state.mu.Unlock()
+
+	o.auditEvent(ctx, "autonomy.task_dispatch_completed", map[string]any{
+		"dispatched": result.DispatchedCount,
+		"skipped":    result.SkippedCount,
+		"blocked":    result.BlockedCount,
+	})
+
+	o.logger.Info("task dispatch cycle completed",
+		zap.Int("dispatched", result.DispatchedCount),
+		zap.Int("skipped", result.SkippedCount),
+		zap.Int("blocked", result.BlockedCount),
+	)
+	return nil
 }
 
 // --- Safety kernel ---

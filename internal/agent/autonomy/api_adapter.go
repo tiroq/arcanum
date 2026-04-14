@@ -43,6 +43,14 @@ func (a *APIAdapter) GetState() api.AutonomyRuntimeState {
 		SuppressedDecisions:  s.SuppressedDecisions,
 		ReportCount:          s.ReportCount,
 		LastError:            s.LastError,
+		// Chain closure state (Iteration 54.5/55A)
+		TasksCreatedFromActuation: s.TasksCreatedFromActuation,
+		TaskRecomputeCount:        s.TaskRecomputeCount,
+		TaskDispatchCount:         s.TaskDispatchCount,
+		ExecutionCompleted:        s.ExecutionCompleted,
+		ExecutionFailed:           s.ExecutionFailed,
+		ExecutionPaused:           s.ExecutionPaused,
+		FeedbackRecorded:          s.FeedbackRecorded,
 	}
 }
 

@@ -79,8 +79,10 @@ type CyclesCfg struct {
 	PortfolioHours     int `yaml:"portfolio_hours"`
 	DiscoveryHours     int `yaml:"discovery_hours"`
 	PricingPerfHours   int `yaml:"pricing_performance_hours"`
-	SelfExtHours       int `yaml:"self_extension_hours"`
-	ReportingHours     int `yaml:"reporting_hours"`
+	SelfExtHours          int `yaml:"self_extension_hours"`
+	TaskRecomputeHours    int `yaml:"task_recompute_hours"`
+	TaskDispatchHours     int `yaml:"task_dispatch_hours"`
+	ReportingHours        int `yaml:"reporting_hours"`
 }
 
 type BootstrapCfg struct {
@@ -411,6 +413,10 @@ func (c *AutonomyConfig) CycleDuration(cycle string) time.Duration {
 		hours = c.Scheduler.Cycles.PricingPerfHours
 	case "self_extension":
 		hours = c.Scheduler.Cycles.SelfExtHours
+	case "task_recompute":
+		hours = c.Scheduler.Cycles.TaskRecomputeHours
+	case "task_dispatch":
+		hours = c.Scheduler.Cycles.TaskDispatchHours
 	case "reporting":
 		hours = c.Scheduler.Cycles.ReportingHours
 	}
