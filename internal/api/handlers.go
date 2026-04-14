@@ -86,6 +86,15 @@ type AutonomyRuntimeState struct {
 	SuppressedDecisions  int            `json:"suppressed_decisions"`
 	ReportCount          int            `json:"report_count"`
 	LastError            string         `json:"last_error,omitempty"`
+
+	// Chain closure state (Iteration 54.5/55A)
+	TasksCreatedFromActuation int `json:"tasks_created_from_actuation"`
+	TaskRecomputeCount        int `json:"task_recompute_count"`
+	TaskDispatchCount         int `json:"task_dispatch_count"`
+	ExecutionCompleted        int `json:"execution_completed"`
+	ExecutionFailed           int `json:"execution_failed"`
+	ExecutionPaused           int `json:"execution_paused"`
+	FeedbackRecorded          int `json:"feedback_recorded"`
 }
 
 // AutonomyReportView is the API-safe view of an autonomy report.
