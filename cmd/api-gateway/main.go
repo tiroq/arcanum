@@ -23,6 +23,7 @@ import (
 	decision_graph "github.com/tiroq/arcanum/internal/agent/decision_graph"
 	"github.com/tiroq/arcanum/internal/agent/discovery"
 	executionloop "github.com/tiroq/arcanum/internal/agent/execution_loop"
+	taskorchestrator "github.com/tiroq/arcanum/internal/agent/task_orchestrator"
 	"github.com/tiroq/arcanum/internal/agent/exploration"
 	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
@@ -691,6 +692,20 @@ func run() error {
 	execLoopAdapter := executionloop.NewGraphAdapter(execEngine, logger)
 	logger.Info("execution loop engine initialised")
 
+	// Multi-task orchestration + priority queue (Iteration 54).
+	// Manages multiple execution tasks simultaneously with priority scoring.
+	// Integrates with objective, governance, capacity, portfolio, and execution_loop.
+	taskOrchTaskStore := taskorchestrator.NewTaskStore(pool)
+	taskOrchQueueStore := taskorchestrator.NewQueueStore(pool)
+	taskOrchEngine := taskorchestrator.NewEngine(taskOrchTaskStore, taskOrchQueueStore, auditor, logger)
+	taskOrchEngine.WithGovernance(taskOrchGovernanceBridge{ga: govAdapter})
+	taskOrchEngine.WithObjective(taskOrchObjectiveBridge{oa: objectiveGraphAdapter})
+	taskOrchEngine.WithCapacity(taskOrchCapacityBridge{ca: capacityGraphAdapter})
+	taskOrchEngine.WithPortfolio(taskOrchPortfolioBridge{pa: portfolioGraphAdapter})
+	taskOrchEngine.WithExecutionLoop(taskOrchExecLoopBridge{el: execLoopAdapter})
+	taskOrchAdapter := taskorchestrator.NewGraphAdapter(taskOrchEngine, logger)
+	logger.Info("task orchestrator initialised")
+
 	// Autonomy runtime orchestrator (Iteration 52).
 	// Loads autonomy config, creates orchestrator, wires all subsystem providers.
 	// Orchestrator runs recurring cycles: reflection, objective, actuation,
@@ -772,7 +787,8 @@ func run() error {
 		WithMetaReflection(metaAdapter, metaReportStore).
 		WithObjective(objectiveGraphAdapter).
 		WithActuation(actuationGraphAdapter).
-		WithExecutionLoop(execLoopAdapter)
+		WithExecutionLoop(execLoopAdapter).
+		WithTaskOrchestrator(taskOrchAdapter)
 
 	// Conditionally wire autonomy (avoids nil interface gotcha).
 	if autonomyAdapter != nil {
@@ -1679,4 +1695,82 @@ func (b execLoopExtActBridge) CreateAndExecute(ctx interface{}, actionType strin
 		Error:    result.ErrorMessage,
 		ActionID: action.ID,
 	}, nil
+}
+
+// --- Task orchestrator bridge adapters (Iteration 54) ---
+
+type taskOrchGovernanceBridge struct {
+	ga *governance.ControllerAdapter
+}
+
+func (b taskOrchGovernanceBridge) GetMode(ctx context.Context) string {
+	if b.ga == nil {
+		return "autonomous"
+	}
+	return b.ga.GetMode(ctx)
+}
+
+type taskOrchObjectiveBridge struct {
+	oa *objective.GraphAdapter
+}
+
+func (b taskOrchObjectiveBridge) GetSignalType(ctx context.Context) string {
+	if b.oa == nil {
+		return ""
+	}
+	sig := b.oa.GetObjectiveSignal(ctx)
+	return sig.SignalType
+}
+
+func (b taskOrchObjectiveBridge) GetSignalStrength(ctx context.Context) float64 {
+	if b.oa == nil {
+		return 0
+	}
+	sig := b.oa.GetObjectiveSignal(ctx)
+	return sig.Strength
+}
+
+type taskOrchCapacityBridge struct {
+	ca *capacity.GraphAdapter
+}
+
+func (b taskOrchCapacityBridge) GetLoad(ctx context.Context) float64 {
+	if b.ca == nil {
+		return 0
+	}
+	state, err := b.ca.GetCapacityState(ctx)
+	if err != nil {
+		return 0
+	}
+	return state.OwnerLoadScore
+}
+
+type taskOrchPortfolioBridge struct {
+	pa *portfolio.GraphAdapter
+}
+
+func (b taskOrchPortfolioBridge) GetStrategyBoost(ctx context.Context, strategyType string) float64 {
+	if b.pa == nil {
+		return 0
+	}
+	return b.pa.GetStrategyBoost(ctx, strategyType)
+}
+
+type taskOrchExecLoopBridge struct {
+	el *executionloop.GraphAdapter
+}
+
+func (b taskOrchExecLoopBridge) CreateAndRun(ctx context.Context, goal string) (string, error) {
+	if b.el == nil {
+		return "", fmt.Errorf("execution loop not available")
+	}
+	task, err := b.el.CreateTask(ctx, "", goal)
+	if err != nil {
+		return "", err
+	}
+	_, err = b.el.RunLoop(ctx, task.ID)
+	if err != nil {
+		return task.ID, err
+	}
+	return task.ID, nil
 }
