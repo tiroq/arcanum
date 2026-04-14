@@ -279,6 +279,13 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/execution/run/", chain(handlers.ExecutionRun))
 	mux.Handle("/api/v1/agent/execution/abort/", chain(handlers.ExecutionAbort))
 
+	// Agent multi-task orchestration + priority queue (Iteration 54)
+	mux.Handle("/api/v1/agent/tasks", chain(handlers.OrchestratedTasks))
+	mux.Handle("/api/v1/agent/tasks/recompute", chain(handlers.OrchestratedTasksRecompute))
+	mux.Handle("/api/v1/agent/tasks/dispatch", chain(handlers.OrchestratedTasksDispatch))
+	mux.Handle("/api/v1/agent/tasks/queue", chain(handlers.OrchestratedTasksQueue))
+	mux.Handle("/api/v1/agent/tasks/", chain(handlers.OrchestratedTaskDetail))
+
 	// Agent autonomy runtime (Iteration 52)
 	mux.Handle("/api/v1/agent/autonomy/state", chain(handlers.AutonomyState))
 	mux.Handle("/api/v1/agent/autonomy/start", chain(handlers.AutonomyStart))

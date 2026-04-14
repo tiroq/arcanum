@@ -51,6 +51,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/stability"
 	"github.com/tiroq/arcanum/internal/agent/strategy"
 	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
+	taskorchestrator "github.com/tiroq/arcanum/internal/agent/task_orchestrator"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -161,6 +162,7 @@ type Handlers struct {
 	objectiveAdapter      *objective.GraphAdapter
 	actuationAdapter      *actuation.GraphAdapter
 	executionLoopAdapter  *executionloop.GraphAdapter
+	taskOrchAdapter       *taskorchestrator.GraphAdapter
 	autonomyOrch          AutonomyOrchestrator
 	logger                *zap.Logger
 }
@@ -426,6 +428,12 @@ func (h *Handlers) WithActuation(aa *actuation.GraphAdapter) *Handlers {
 // WithExecutionLoop attaches the execution loop adapter (Iteration 53).
 func (h *Handlers) WithExecutionLoop(el *executionloop.GraphAdapter) *Handlers {
 	h.executionLoopAdapter = el
+	return h
+}
+
+// WithTaskOrchestrator attaches the task orchestrator adapter (Iteration 54).
+func (h *Handlers) WithTaskOrchestrator(ta *taskorchestrator.GraphAdapter) *Handlers {
+	h.taskOrchAdapter = ta
 	return h
 }
 
@@ -5447,4 +5455,149 @@ func (h *Handlers) ExecutionAbort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// --- Multi-Task Orchestrator handlers (Iteration 54) ---
+
+// OrchestratedTasks handles GET /api/v1/agent/tasks and POST /api/v1/agent/tasks.
+func (h *Handlers) OrchestratedTasks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if h.taskOrchAdapter == nil {
+			writeJSON(w, http.StatusOK, []taskorchestrator.OrchestratedTask{})
+			return
+		}
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		tasks, err := h.taskOrchAdapter.ListTasks(r.Context(), limit)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if tasks == nil {
+			tasks = []taskorchestrator.OrchestratedTask{}
+		}
+		writeJSON(w, http.StatusOK, tasks)
+	case http.MethodPost:
+		if h.taskOrchAdapter == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "task orchestrator not available")
+			return
+		}
+		var req struct {
+			Source        string  `json:"source"`
+			Goal          string  `json:"goal"`
+			Urgency       float64 `json:"urgency"`
+			ExpectedValue float64 `json:"expected_value"`
+			RiskLevel     float64 `json:"risk_level"`
+			StrategyType  string  `json:"strategy_type"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if req.Goal == "" {
+			writeError(w, r, http.StatusBadRequest, "goal is required")
+			return
+		}
+		if req.Source == "" {
+			req.Source = "manual"
+		}
+		task, err := h.taskOrchAdapter.CreateTask(r.Context(), req.Source, req.Goal, req.Urgency, req.ExpectedValue, req.RiskLevel, req.StrategyType)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, task)
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// OrchestratedTaskDetail handles GET /api/v1/agent/tasks/{id}.
+func (h *Handlers) OrchestratedTaskDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.taskOrchAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "task orchestrator not available")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/agent/tasks/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, r, http.StatusBadRequest, "task id is required")
+		return
+	}
+	task, err := h.taskOrchAdapter.GetTask(r.Context(), parts[0])
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// OrchestratedTasksRecompute handles POST /api/v1/agent/tasks/recompute.
+func (h *Handlers) OrchestratedTasksRecompute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.taskOrchAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "task orchestrator not available")
+		return
+	}
+	if err := h.taskOrchAdapter.RecomputePriorities(r.Context()); err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "recomputed"})
+}
+
+// OrchestratedTasksDispatch handles POST /api/v1/agent/tasks/dispatch.
+func (h *Handlers) OrchestratedTasksDispatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.taskOrchAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "task orchestrator not available")
+		return
+	}
+	result, err := h.taskOrchAdapter.Dispatch(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// OrchestratedTasksQueue handles GET /api/v1/agent/tasks/queue.
+func (h *Handlers) OrchestratedTasksQueue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.taskOrchAdapter == nil {
+		writeJSON(w, http.StatusOK, []taskorchestrator.TaskQueueEntry{})
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	queue, err := h.taskOrchAdapter.GetQueue(r.Context(), limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if queue == nil {
+		queue = []taskorchestrator.TaskQueueEntry{}
+	}
+	writeJSON(w, http.StatusOK, queue)
 }
