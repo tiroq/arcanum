@@ -6,3 +6,4 @@ logs/*.log
 docs/*.s*.md
 docs/*.p*.md
 configs/*.yaml
+__pycache__
