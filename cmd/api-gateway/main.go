@@ -731,8 +731,16 @@ func run() error {
 	vectorStore := vector.NewStore(pool)
 	vectorEngine := vector.NewEngine(vectorStore, auditor, logger)
 	vectorAdapter := vector.NewGraphAdapter(vectorEngine)
-	_ = vectorAdapter // wired into objective/actuation/goal_planning below
 	logger.Info("system vector engine initialised")
+
+	// Wire vector into subsystem engines. Each subsystem defines its own
+	// VectorProvider interface (local, avoids import cycles). vector.GraphAdapter
+	// satisfies all of them via Go structural typing.
+	objectiveEngine.WithVector(vectorAdapter)
+	actuationEngine.WithVector(vectorAdapter)
+	taskOrchEngine.WithVector(vectorAdapter)
+	goalPlanEngine.WithVector(vectorAdapter)
+	logger.Info("system vector wired into objective, actuation, task_orchestrator, goal_planning")
 
 	// Autonomy runtime orchestrator (Iteration 52).
 	// Loads autonomy config, creates orchestrator, wires all subsystem providers.
@@ -1800,19 +1808,26 @@ type taskOrchExecLoopBridge struct {
 	el *executionloop.GraphAdapter
 }
 
-func (b taskOrchExecLoopBridge) CreateAndRun(ctx context.Context, goal string) (string, error) {
+func (b taskOrchExecLoopBridge) CreateAndRun(ctx context.Context, goal string) (taskorchestrator.DispatchOutcome, error) {
 	if b.el == nil {
-		return "", fmt.Errorf("execution loop not available")
+		return taskorchestrator.DispatchOutcome{}, fmt.Errorf("execution loop not available")
 	}
 	task, err := b.el.CreateTask(ctx, "", goal)
 	if err != nil {
-		return "", err
+		return taskorchestrator.DispatchOutcome{}, err
 	}
-	_, err = b.el.RunLoop(ctx, task.ID)
-	if err != nil {
-		return task.ID, err
+	final, runErr := b.el.RunLoop(ctx, task.ID)
+	outcome := taskorchestrator.DispatchOutcome{
+		ExecutionID:    task.ID,
+		TerminalStatus: string(final.Status),
 	}
-	return task.ID, nil
+	if runErr != nil {
+		outcome.Error = runErr.Error()
+		if outcome.TerminalStatus == "" {
+			outcome.TerminalStatus = "failed"
+		}
+	}
+	return outcome, nil
 }
 
 // --- Autonomy chain closure bridge adapters (Iteration 54.5/55A) ---
