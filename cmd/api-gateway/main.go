@@ -51,6 +51,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/strategy"
 	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
 	taskorchestrator "github.com/tiroq/arcanum/internal/agent/task_orchestrator"
+	goalplanning "github.com/tiroq/arcanum/internal/agent/goal_planning"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -706,6 +707,16 @@ func run() error {
 	taskOrchAdapter := taskorchestrator.NewGraphAdapter(taskOrchEngine, logger)
 	logger.Info("task orchestrator initialised")
 
+	// Goal decomposition + long-horizon planning (Iteration 55).
+	// Decomposes strategic goals into measurable subgoals, tracks progress,
+	// and emits tasks to the task orchestrator.
+	goalPlanSubgoalStore := goalplanning.NewSubgoalStore(pool)
+	goalPlanProgressStore := goalplanning.NewProgressStore(pool)
+	goalPlanEngine := goalplanning.NewEngine(goalPlanSubgoalStore, goalPlanProgressStore, auditor, logger).
+		WithEmitter(goalPlanEmitterBridge{ta: taskOrchAdapter})
+	goalPlanAdapter := goalplanning.NewGraphAdapter(goalPlanEngine, logger)
+	logger.Info("goal planning engine initialised")
+
 	// Autonomy runtime orchestrator (Iteration 52).
 	// Loads autonomy config, creates orchestrator, wires all subsystem providers.
 	// Orchestrator runs recurring cycles: reflection, objective, actuation,
@@ -734,7 +745,8 @@ func run() error {
 			WithGovernance(autonomyGovernanceBridge{gc: govController}).
 			WithTaskOrchestrator(autonomyTaskOrchBridge{ta: taskOrchAdapter}).
 			WithExecutionLoop(autonomyExecLoopBridge{el: execLoopAdapter}).
-			WithFeedbackStore(autonomy.NewPgExecutionFeedbackStore(pool))
+			WithFeedbackStore(autonomy.NewPgExecutionFeedbackStore(pool)).
+			WithGoalPlanning(autonomyGoalPlanBridge{engine: goalPlanEngine, goals: systemGoals})
 		autonomyAdapter = autonomy.NewAPIAdapter(autonomyOrch, autonomyConfigPath)
 
 		// Iteration 55A: Wire execution feedback into reflection and objective.
@@ -796,7 +808,8 @@ func run() error {
 		WithObjective(objectiveGraphAdapter).
 		WithActuation(actuationGraphAdapter).
 		WithExecutionLoop(execLoopAdapter).
-		WithTaskOrchestrator(taskOrchAdapter)
+		WithTaskOrchestrator(taskOrchAdapter).
+		WithGoalPlanning(goalPlanAdapter)
 
 	// Conditionally wire autonomy (avoids nil interface gotcha).
 	if autonomyAdapter != nil {
@@ -1974,4 +1987,32 @@ func (b objectiveExecMetricsBridge) GetExecMetrics(ctx context.Context) (success
 		return 0, 0, 0, 0, 0
 	}
 	return metrics.SuccessRate, metrics.RepeatedFailures, metrics.AbortedCount, metrics.BlockedCount, metrics.TotalExecutions
+}
+
+// goalPlanEmitterBridge bridges goal_planning.TaskEmitter → task_orchestrator.GraphAdapter.
+type goalPlanEmitterBridge struct {
+	ta *taskorchestrator.GraphAdapter
+}
+
+func (b goalPlanEmitterBridge) EmitTask(subgoalID, goalID, actionType string, urgency, expectedValue, riskLevel float64, strategyType string) error {
+	if b.ta == nil {
+		return nil
+	}
+	source := "goal_planning:" + subgoalID
+	goal := actionType + " (goal:" + goalID + ")"
+	_, err := b.ta.CreateTask(context.Background(), source, goal, urgency, expectedValue, riskLevel, strategyType)
+	return err
+}
+
+// autonomyGoalPlanBridge bridges autonomy.GoalPlanningRunner → goal_planning.Engine.
+type autonomyGoalPlanBridge struct {
+	engine *goalplanning.Engine
+	goals  *goals.SystemGoals
+}
+
+func (b autonomyGoalPlanBridge) RunCycle(ctx context.Context) error {
+	if b.engine == nil || b.goals == nil {
+		return nil
+	}
+	return b.engine.RunCycle(ctx, b.goals.Goals)
 }

@@ -79,11 +79,11 @@ type CyclesCfg struct {
 	PortfolioHours     int `yaml:"portfolio_hours"`
 	DiscoveryHours     int `yaml:"discovery_hours"`
 	PricingPerfHours   int `yaml:"pricing_performance_hours"`
-	SelfExtHours          int `yaml:"self_extension_hours"`
-	TaskRecomputeHours    int `yaml:"task_recompute_hours"`
-	TaskDispatchHours     int `yaml:"task_dispatch_hours"`
-	GoalPlanningHours     int `yaml:"goal_planning_hours"`
-	ReportingHours        int `yaml:"reporting_hours"`
+	SelfExtHours       int `yaml:"self_extension_hours"`
+	TaskRecomputeHours int `yaml:"task_recompute_hours"`
+	TaskDispatchHours  int `yaml:"task_dispatch_hours"`
+	GoalPlanningHours  int `yaml:"goal_planning_hours"`
+	ReportingHours     int `yaml:"reporting_hours"`
 }
 
 type BootstrapCfg struct {

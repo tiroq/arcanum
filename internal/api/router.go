@@ -286,6 +286,11 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/tasks/queue", chain(handlers.OrchestratedTasksQueue))
 	mux.Handle("/api/v1/agent/tasks/", chain(handlers.OrchestratedTaskDetail))
 
+	// Agent goal planning (Iteration 55)
+	mux.Handle("/api/v1/agent/goals/subgoals", chain(handlers.GoalPlanningSubgoals))
+	mux.Handle("/api/v1/agent/goals/subgoals/", chain(handlers.GoalPlanningSubgoalsByGoal))
+	mux.Handle("/api/v1/agent/goals/progress/", chain(handlers.GoalPlanningProgress))
+
 	// Agent autonomy runtime (Iteration 52)
 	mux.Handle("/api/v1/agent/autonomy/state", chain(handlers.AutonomyState))
 	mux.Handle("/api/v1/agent/autonomy/start", chain(handlers.AutonomyStart))

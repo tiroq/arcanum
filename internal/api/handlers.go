@@ -28,6 +28,7 @@ import (
 	externalactions "github.com/tiroq/arcanum/internal/agent/external_actions"
 	financialpressure "github.com/tiroq/arcanum/internal/agent/financial_pressure"
 	financialtruth "github.com/tiroq/arcanum/internal/agent/financial_truth"
+	goalplanning "github.com/tiroq/arcanum/internal/agent/goal_planning"
 	"github.com/tiroq/arcanum/internal/agent/goals"
 	"github.com/tiroq/arcanum/internal/agent/governance"
 	"github.com/tiroq/arcanum/internal/agent/income"
@@ -172,6 +173,7 @@ type Handlers struct {
 	actuationAdapter      *actuation.GraphAdapter
 	executionLoopAdapter  *executionloop.GraphAdapter
 	taskOrchAdapter       *taskorchestrator.GraphAdapter
+	goalPlanningAdapter   *goalplanning.GraphAdapter
 	autonomyOrch          AutonomyOrchestrator
 	logger                *zap.Logger
 }
@@ -443,6 +445,12 @@ func (h *Handlers) WithExecutionLoop(el *executionloop.GraphAdapter) *Handlers {
 // WithTaskOrchestrator attaches the task orchestrator adapter (Iteration 54).
 func (h *Handlers) WithTaskOrchestrator(ta *taskorchestrator.GraphAdapter) *Handlers {
 	h.taskOrchAdapter = ta
+	return h
+}
+
+// WithGoalPlanning attaches the goal planning adapter (Iteration 55).
+func (h *Handlers) WithGoalPlanning(gp *goalplanning.GraphAdapter) *Handlers {
+	h.goalPlanningAdapter = gp
 	return h
 }
 
@@ -5609,4 +5617,62 @@ func (h *Handlers) OrchestratedTasksQueue(w http.ResponseWriter, r *http.Request
 		queue = []taskorchestrator.TaskQueueEntry{}
 	}
 	writeJSON(w, http.StatusOK, queue)
+}
+
+// GoalPlanningSubgoals handles GET /api/v1/agent/goals/subgoals.
+func (h *Handlers) GoalPlanningSubgoals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalPlanningAdapter == nil {
+		writeJSON(w, http.StatusOK, []goalplanning.Subgoal{})
+		return
+	}
+	sgs := h.goalPlanningAdapter.ListAllSubgoals(r.Context())
+	if sgs == nil {
+		sgs = []goalplanning.Subgoal{}
+	}
+	writeJSON(w, http.StatusOK, sgs)
+}
+
+// GoalPlanningSubgoalsByGoal handles GET /api/v1/agent/goals/subgoals/{goalID}.
+func (h *Handlers) GoalPlanningSubgoalsByGoal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalPlanningAdapter == nil {
+		writeJSON(w, http.StatusOK, []goalplanning.Subgoal{})
+		return
+	}
+	goalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/goals/subgoals/")
+	if goalID == "" {
+		writeError(w, r, http.StatusBadRequest, "goal_id required")
+		return
+	}
+	sgs := h.goalPlanningAdapter.ListSubgoals(r.Context(), goalID)
+	if sgs == nil {
+		sgs = []goalplanning.Subgoal{}
+	}
+	writeJSON(w, http.StatusOK, sgs)
+}
+
+// GoalPlanningProgress handles GET /api/v1/agent/goals/progress/{goalID}.
+func (h *Handlers) GoalPlanningProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalPlanningAdapter == nil {
+		writeJSON(w, http.StatusOK, map[string]float64{"progress": 0})
+		return
+	}
+	goalID := strings.TrimPrefix(r.URL.Path, "/api/v1/agent/goals/progress/")
+	if goalID == "" {
+		writeError(w, r, http.StatusBadRequest, "goal_id required")
+		return
+	}
+	progress := h.goalPlanningAdapter.GetOverallProgress(r.Context(), goalID)
+	writeJSON(w, http.StatusOK, map[string]float64{"progress": progress})
 }
