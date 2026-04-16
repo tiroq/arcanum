@@ -16,13 +16,18 @@ import (
 type Engine struct {
 	subgoalStore  SubgoalStoreInterface
 	progressStore ProgressStoreInterface
+	planStore     PlanStoreInterface
+	depStore      DependencyStoreInterface
 	auditor       audit.AuditRecorder
 	logger        *zap.Logger
 
-	rules     map[string][]SubgoalTemplate
-	objective ObjectiveProvider
-	capacity  CapacityProvider
-	emitter   TaskEmitter
+	rules        map[string][]SubgoalTemplate
+	objective    ObjectiveProvider
+	capacity     CapacityProvider
+	emitter      TaskEmitter
+	reflection   ReflectionProvider
+	execFeedback ExecutionFeedbackProvider
+	replanner    *Replanner
 }
 
 // NewEngine creates a new goal planning engine.
@@ -65,6 +70,36 @@ func (e *Engine) WithRules(rules map[string][]SubgoalTemplate) *Engine {
 	return e
 }
 
+// WithPlanStore sets the plan store.
+func (e *Engine) WithPlanStore(ps PlanStoreInterface) *Engine {
+	e.planStore = ps
+	return e
+}
+
+// WithDependencyStore sets the dependency store.
+func (e *Engine) WithDependencyStore(ds DependencyStoreInterface) *Engine {
+	e.depStore = ds
+	return e
+}
+
+// WithReflection sets the reflection provider for replanning.
+func (e *Engine) WithReflection(p ReflectionProvider) *Engine {
+	e.reflection = p
+	return e
+}
+
+// WithExecutionFeedback sets the execution feedback provider for replanning.
+func (e *Engine) WithExecutionFeedback(p ExecutionFeedbackProvider) *Engine {
+	e.execFeedback = p
+	return e
+}
+
+// WithReplanner sets the replanner for adaptive replanning.
+func (e *Engine) WithReplanner(r *Replanner) *Engine {
+	e.replanner = r
+	return e
+}
+
 // DecomposeGoals takes strategic goals and creates subgoals for any goal
 // that doesn't already have subgoals. Returns the count of newly created subgoals.
 func (e *Engine) DecomposeGoals(ctx context.Context, sysGoals []goals.SystemGoal) (int, error) {
@@ -78,18 +113,61 @@ func (e *Engine) DecomposeGoals(ctx context.Context, sysGoals []goals.SystemGoal
 			continue // already decomposed
 		}
 
+		// Create a plan for this goal.
+		var planID string
+		if e.planStore != nil {
+			planID = uuid.New().String()
+			horizon := Horizon(goal.Horizon)
+			if _, valid := HorizonDays[horizon]; !valid {
+				horizon = HorizonContinuous
+			}
+			now := time.Now().UTC()
+			plan := GoalPlan{
+				ID:              planID,
+				GoalID:          goal.ID,
+				Version:         1,
+				Horizon:         horizon,
+				Strategy:        StrategyExploitSuccess,
+				Status:          PlanActive,
+				ExpectedUtility: clamp01(goal.Priority * 0.80),
+				RiskEstimate:    clamp01((1.0 - goal.Priority) * 0.30),
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			}
+			if err := e.planStore.Insert(ctx, plan); err != nil {
+				return created, fmt.Errorf("create plan for %s: %w", goal.ID, err)
+			}
+		}
+
 		subgoals := DecomposeGoal(goal, e.rules)
-		for _, sg := range subgoals {
+		for i, sg := range subgoals {
+			sg.PlanID = planID
+			sg.Strategy = StrategyExploitSuccess
 			if err := e.subgoalStore.Insert(ctx, sg); err != nil {
 				return created, fmt.Errorf("insert subgoal %s: %w", sg.ID, err)
 			}
 			created++
+
+			// Create dependency if template has ordering (i > 0 depends on i-1).
+			if i > 0 && e.depStore != nil && planID != "" {
+				dep := GoalDependency{
+					ID:            uuid.New().String(),
+					PlanID:        planID,
+					FromSubgoalID: subgoals[i-1].ID,
+					ToSubgoalID:   sg.ID,
+					CreatedAt:     time.Now().UTC(),
+				}
+				_ = e.depStore.Insert(ctx, dep)
+			}
+
 			e.auditEvent(ctx, "goal_planning.subgoal_created", map[string]any{
 				"subgoal_id": sg.ID,
 				"goal_id":    sg.GoalID,
+				"plan_id":    planID,
 				"title":      sg.Title,
 				"priority":   sg.Priority,
 				"horizon":    string(sg.Horizon),
+				"strategy":   string(sg.Strategy),
 			})
 		}
 	}
@@ -223,8 +301,26 @@ func (e *Engine) PlanAndEmitTasks(ctx context.Context) (int, error) {
 		}
 	}
 
+	// Gather objective delta for strategy application.
+	objectiveDelta := 0.0
+	if e.objective != nil {
+		objectiveDelta = e.objective.GetNetUtility() - 0.50
+	}
+
 	now := time.Now().UTC()
 	emissions := PlanTasks(all, now)
+
+	// Cap at MaxTasksPerPlan.
+	if len(emissions) > MaxTasksPerPlan {
+		emissions = emissions[:MaxTasksPerPlan]
+	}
+
+	// Apply strategy adjustments.
+	for i, em := range emissions {
+		sg := activeMap[em.SubgoalID]
+		strategy := SelectStrategy(sg, objectiveDelta)
+		emissions[i] = ApplyStrategyToEmission(em, strategy)
+	}
 
 	if e.emitter == nil {
 		return len(emissions), nil // dry run
@@ -254,6 +350,7 @@ func (e *Engine) PlanAndEmitTasks(ctx context.Context) (int, error) {
 			"action_type": em.ActionType,
 			"urgency":     em.Urgency,
 			"priority":    em.Priority,
+			"strategy":    em.StrategyType,
 		})
 	}
 	return emitted, nil
@@ -291,6 +388,15 @@ func (e *Engine) RunCycle(ctx context.Context, sysGoals []goals.SystemGoal) erro
 	})
 
 	return nil
+}
+
+// RunReplanCycle executes adaptive replanning based on execution feedback.
+// Returns the number of subgoals replanned.
+func (e *Engine) RunReplanCycle(ctx context.Context) (int, error) {
+	if e.replanner == nil {
+		return 0, nil
+	}
+	return e.replanner.RunReplanCycle(ctx)
 }
 
 // GetSubgoal returns a single subgoal by ID.
@@ -349,6 +455,64 @@ func (e *Engine) TransitionSubgoal(ctx context.Context, id string, to SubgoalSta
 		return fmt.Errorf("invalid transition: %s → %s", sg.Status, to)
 	}
 	return e.subgoalStore.UpdateStatus(ctx, id, to, reason)
+}
+
+// CreatePlan creates a new goal plan. Returns the plan ID.
+func (e *Engine) CreatePlan(ctx context.Context, goalID string, horizon Horizon, strategy Strategy) (GoalPlan, error) {
+	if e.planStore == nil {
+		return GoalPlan{}, fmt.Errorf("plan store not configured")
+	}
+
+	now := time.Now().UTC()
+	plan := GoalPlan{
+		ID:              uuid.New().String(),
+		GoalID:          goalID,
+		Version:         1,
+		Horizon:         horizon,
+		Strategy:        strategy,
+		Status:          PlanDraft,
+		ExpectedUtility: 0.50,
+		RiskEstimate:    0.20,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := e.planStore.Insert(ctx, plan); err != nil {
+		return GoalPlan{}, err
+	}
+
+	e.auditEvent(ctx, "goal_planning.plan_created", map[string]any{
+		"plan_id":  plan.ID,
+		"goal_id":  goalID,
+		"horizon":  string(horizon),
+		"strategy": string(strategy),
+	})
+
+	return plan, nil
+}
+
+// GetPlan returns a plan by ID.
+func (e *Engine) GetPlan(ctx context.Context, id string) (GoalPlan, error) {
+	if e.planStore == nil {
+		return GoalPlan{}, fmt.Errorf("plan store not configured")
+	}
+	return e.planStore.Get(ctx, id)
+}
+
+// ListPlans returns all plans.
+func (e *Engine) ListPlans(ctx context.Context) ([]GoalPlan, error) {
+	if e.planStore == nil {
+		return nil, nil
+	}
+	return e.planStore.ListAll(ctx)
+}
+
+// Replan triggers adaptive replanning for a specific goal.
+// Returns the number of subgoals replanned.
+func (e *Engine) Replan(ctx context.Context, goalID string) (int, error) {
+	if e.replanner == nil {
+		return 0, nil
+	}
+	return e.replanner.RunReplanCycle(ctx)
 }
 
 func (e *Engine) auditEvent(ctx context.Context, eventType string, payload map[string]any) {

@@ -823,3 +823,796 @@ func TestClamp01(t *testing.T) {
 		}
 	}
 }
+
+// --- Plan Status Transitions ---
+
+func TestValidatePlanTransition(t *testing.T) {
+	cases := []struct {
+		from  PlanStatus
+		to    PlanStatus
+		valid bool
+	}{
+		{PlanDraft, PlanActive, true},
+		{PlanActive, PlanCompleted, true},
+		{PlanActive, PlanAbandoned, true},
+		{PlanActive, PlanReplanning, true},
+		{PlanReplanning, PlanActive, true},
+		{PlanReplanning, PlanAbandoned, true},
+		{PlanDraft, PlanCompleted, false},
+		{PlanCompleted, PlanActive, false},
+		{PlanAbandoned, PlanActive, false},
+	}
+	for _, tc := range cases {
+		got := ValidatePlanTransition(tc.from, tc.to)
+		if got != tc.valid {
+			t.Errorf("%s→%s: expected %v, got %v", tc.from, tc.to, tc.valid, got)
+		}
+	}
+}
+
+// --- Strategy Tests ---
+
+func TestSelectStrategy_Default(t *testing.T) {
+	sg := Subgoal{FailureCount: 0, SuccessCount: 0}
+	s := SelectStrategy(sg, 0)
+	if s != StrategyExploitSuccess {
+		t.Errorf("expected exploit_success_path, got %s", s)
+	}
+}
+
+func TestSelectStrategy_RepeatedFailure(t *testing.T) {
+	sg := Subgoal{FailureCount: 3, SuccessCount: 0}
+	s := SelectStrategy(sg, 0)
+	if s != StrategyReduceFailure {
+		t.Errorf("expected reduce_failure_path, got %s", s)
+	}
+}
+
+func TestSelectStrategy_ObjectivePenalty(t *testing.T) {
+	sg := Subgoal{FailureCount: 0, SuccessCount: 0}
+	s := SelectStrategy(sg, -0.10)
+	if s != StrategyDeferHighRisk {
+		t.Errorf("expected defer_high_risk, got %s", s)
+	}
+}
+
+func TestSelectStrategy_Diversify(t *testing.T) {
+	sg := Subgoal{FailureCount: 1, SuccessCount: 2}
+	s := SelectStrategy(sg, 0)
+	if s != StrategyDiversify {
+		t.Errorf("expected diversify_attempts, got %s", s)
+	}
+}
+
+func TestApplyStrategyToEmission_DeferHighRisk(t *testing.T) {
+	em := TaskEmission{Priority: 0.80, RiskLevel: 0.10, ExpectedValue: 0.50}
+	result := ApplyStrategyToEmission(em, StrategyDeferHighRisk)
+	if result.Priority >= 0.80 {
+		t.Error("defer should reduce priority")
+	}
+	if result.RiskLevel <= 0.10 {
+		t.Error("defer should increase risk level")
+	}
+	if result.StrategyType != string(StrategyDeferHighRisk) {
+		t.Errorf("expected strategy type defer_high_risk, got %s", result.StrategyType)
+	}
+}
+
+func TestApplyStrategyToEmission_ExploitSuccess(t *testing.T) {
+	em := TaskEmission{Priority: 0.80, RiskLevel: 0.10}
+	result := ApplyStrategyToEmission(em, StrategyExploitSuccess)
+	if result.Priority <= 0.80 {
+		t.Error("exploit should boost priority")
+	}
+}
+
+func TestShouldReplan_ObjectivePenalty(t *testing.T) {
+	sg := Subgoal{}
+	replan, trigger := ShouldReplan(sg, -0.10)
+	if !replan {
+		t.Error("expected replan for objective penalty")
+	}
+	if trigger != TriggerObjectivePenalty {
+		t.Errorf("expected objective_penalty trigger, got %s", trigger)
+	}
+}
+
+func TestShouldReplan_RepeatedFailure(t *testing.T) {
+	sg := Subgoal{FailureCount: 3}
+	replan, trigger := ShouldReplan(sg, 0)
+	if !replan {
+		t.Error("expected replan for repeated failure")
+	}
+	if trigger != TriggerRepeatedFailure {
+		t.Errorf("expected repeated_failure trigger, got %s", trigger)
+	}
+}
+
+func TestShouldReplan_SingleFailure(t *testing.T) {
+	sg := Subgoal{FailureCount: 1, SuccessCount: 0}
+	replan, trigger := ShouldReplan(sg, 0)
+	if !replan {
+		t.Error("expected replan for single failure")
+	}
+	if trigger != TriggerExecFailure {
+		t.Errorf("expected execution_failure trigger, got %s", trigger)
+	}
+}
+
+func TestShouldReplan_Reinforcement(t *testing.T) {
+	sg := Subgoal{SuccessCount: 3, FailureCount: 0}
+	replan, trigger := ShouldReplan(sg, 0)
+	if !replan {
+		t.Error("expected replan signal for reinforcement")
+	}
+	if trigger != TriggerReinforcement {
+		t.Errorf("expected positive_reinforcement trigger, got %s", trigger)
+	}
+}
+
+func TestShouldReplan_NoAction(t *testing.T) {
+	sg := Subgoal{FailureCount: 0, SuccessCount: 1}
+	replan, _ := ShouldReplan(sg, 0)
+	if replan {
+		t.Error("expected no replan for stable subgoal")
+	}
+}
+
+// --- Dependency Graph Tests ---
+
+func TestDependencyGraph_NoCycle(t *testing.T) {
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "B"},
+		{FromSubgoalID: "B", ToSubgoalID: "C"},
+	}
+	g := NewDependencyGraph(deps)
+	if g.HasCycle() {
+		t.Error("expected no cycle in linear chain")
+	}
+}
+
+func TestDependencyGraph_WithCycle(t *testing.T) {
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "B"},
+		{FromSubgoalID: "B", ToSubgoalID: "C"},
+		{FromSubgoalID: "C", ToSubgoalID: "A"},
+	}
+	g := NewDependencyGraph(deps)
+	if !g.HasCycle() {
+		t.Error("expected cycle in circular chain")
+	}
+}
+
+func TestDependencyGraph_TopologicalSort(t *testing.T) {
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "B"},
+		{FromSubgoalID: "A", ToSubgoalID: "C"},
+	}
+	g := NewDependencyGraph(deps)
+	order := g.TopologicalSort([]string{"A", "B", "C"})
+	if order == nil {
+		t.Fatal("expected non-nil order")
+	}
+	// B and C should come before A (they are dependencies OF A).
+	aIdx := -1
+	for i, id := range order {
+		if id == "A" {
+			aIdx = i
+		}
+	}
+	if aIdx == -1 {
+		t.Fatal("A not found in order")
+	}
+}
+
+func TestDependencyGraph_TopologicalSort_Cycle(t *testing.T) {
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "B"},
+		{FromSubgoalID: "B", ToSubgoalID: "A"},
+	}
+	g := NewDependencyGraph(deps)
+	order := g.TopologicalSort([]string{"A", "B"})
+	if order != nil {
+		t.Error("expected nil order for cyclic graph")
+	}
+}
+
+func TestDependencyGraph_Depth(t *testing.T) {
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "B"},
+		{FromSubgoalID: "B", ToSubgoalID: "C"},
+	}
+	g := NewDependencyGraph(deps)
+	depth := g.Depth("A")
+	if depth != 3 {
+		t.Errorf("expected depth 3 for A→B→C, got %d", depth)
+	}
+}
+
+func TestDependencyGraph_MaxDepthValidation(t *testing.T) {
+	// Depth 3 chain: A→B→C (depth=3), should pass MaxDepth=3.
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "B"},
+		{FromSubgoalID: "B", ToSubgoalID: "C"},
+	}
+	g := NewDependencyGraph(deps)
+	if !g.ValidateMaxDepth([]string{"A", "B", "C"}) {
+		t.Error("depth 3 should pass MaxDepth=3")
+	}
+
+	// Depth 4 chain: A→B→C→D (depth=4), should fail MaxDepth=3.
+	deps = append(deps, GoalDependency{FromSubgoalID: "C", ToSubgoalID: "D"})
+	g = NewDependencyGraph(deps)
+	if g.ValidateMaxDepth([]string{"A", "B", "C", "D"}) {
+		t.Error("depth 4 should fail MaxDepth=3")
+	}
+}
+
+func TestDependencyGraph_Prerequisites(t *testing.T) {
+	deps := []GoalDependency{
+		{FromSubgoalID: "A", ToSubgoalID: "C"},
+		{FromSubgoalID: "B", ToSubgoalID: "C"},
+	}
+	g := NewDependencyGraph(deps)
+	prereqs := g.Prerequisites("C")
+	if len(prereqs) != 2 {
+		t.Errorf("expected 2 prerequisites for C, got %d", len(prereqs))
+	}
+}
+
+// --- Plan Store Tests ---
+
+func TestInMemoryPlanStore(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryPlanStore()
+
+	plan := GoalPlan{
+		ID:       "plan-1",
+		GoalID:   "goal-1",
+		Version:  1,
+		Strategy: StrategyExploitSuccess,
+		Status:   PlanDraft,
+	}
+	if err := store.Insert(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get(ctx, "plan-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GoalID != "goal-1" {
+		t.Errorf("expected goal-1, got %s", got.GoalID)
+	}
+
+	if err := store.UpdateStatus(ctx, "plan-1", PlanActive); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.Get(ctx, "plan-1")
+	if got.Status != PlanActive {
+		t.Errorf("expected active, got %s", got.Status)
+	}
+
+	if err := store.IncrementVersion(ctx, "plan-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.Get(ctx, "plan-1")
+	if got.Version != 2 {
+		t.Errorf("expected version 2, got %d", got.Version)
+	}
+
+	if err := store.IncrementReplanCount(ctx, "plan-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.Get(ctx, "plan-1")
+	if got.ReplanCount != 1 {
+		t.Errorf("expected replan count 1, got %d", got.ReplanCount)
+	}
+
+	// GetByGoal
+	byGoal, err := store.GetByGoal(ctx, "goal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byGoal.ID != "plan-1" {
+		t.Errorf("expected plan-1, got %s", byGoal.ID)
+	}
+
+	// ListAll
+	all, err := store.ListAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Errorf("expected 1 plan, got %d", len(all))
+	}
+}
+
+// --- Dependency Store Tests ---
+
+func TestInMemoryDependencyStore(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryDependencyStore()
+
+	dep := GoalDependency{
+		ID:            "dep-1",
+		PlanID:        "plan-1",
+		FromSubgoalID: "sg-1",
+		ToSubgoalID:   "sg-2",
+	}
+	if err := store.Insert(ctx, dep); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, err := store.ListByPlan(ctx, "plan-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("expected 1 dep, got %d", len(deps))
+	}
+
+	if err := store.DeleteByPlan(ctx, "plan-1"); err != nil {
+		t.Fatal(err)
+	}
+	deps, _ = store.ListByPlan(ctx, "plan-1")
+	if len(deps) != 0 {
+		t.Errorf("expected 0 deps after delete, got %d", len(deps))
+	}
+}
+
+// --- Replanner Tests ---
+
+type mockReflectionProvider struct {
+	signals []ReflectionSignalInput
+}
+
+func (m *mockReflectionProvider) GetReflectionSignals(_ context.Context) []ReflectionSignalInput {
+	return m.signals
+}
+
+type mockExecFeedbackProvider struct {
+	feedback map[string][3]int // goalID → [successes, failures, consecutive]
+}
+
+func (m *mockExecFeedbackProvider) GetFeedbackForGoal(_ context.Context, goalID string) (int, int, int) {
+	fb, ok := m.feedback[goalID]
+	if !ok {
+		return 0, 0, 0
+	}
+	return fb[0], fb[1], fb[2]
+}
+
+type mockObjectiveProvider struct {
+	netUtility float64
+}
+
+func (m *mockObjectiveProvider) GetNetUtility() float64   { return m.netUtility }
+func (m *mockObjectiveProvider) GetUtilityScore() float64 { return m.netUtility }
+func (m *mockObjectiveProvider) GetRiskScore() float64    { return 0 }
+
+func TestReplanner_RepeatedFailure(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	planStore := NewInMemoryPlanStore()
+
+	sg := Subgoal{
+		ID:       "sg-1",
+		GoalID:   "goal-1",
+		Status:   SubgoalActive,
+		Strategy: StrategyExploitSuccess,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithExecutionFeedback(&mockExecFeedbackProvider{
+			feedback: map[string][3]int{"goal-1": {0, 3, 3}},
+		}).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.50})
+
+	count, err := replanner.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 replanned, got %d", count)
+	}
+
+	// Check strategy changed.
+	updated, _ := sgStore.Get(ctx, "sg-1")
+	if updated.Strategy != StrategyReduceFailure {
+		t.Errorf("expected reduce_failure_path, got %s", updated.Strategy)
+	}
+	// Should be blocked due to repeated failure.
+	if updated.Status != SubgoalBlocked {
+		t.Errorf("expected blocked status, got %s", updated.Status)
+	}
+}
+
+func TestReplanner_ObjectivePenalty(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	planStore := NewInMemoryPlanStore()
+
+	sg := Subgoal{
+		ID:       "sg-1",
+		GoalID:   "goal-1",
+		Status:   SubgoalActive,
+		Strategy: StrategyExploitSuccess,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.30}) // delta = -0.20
+
+	count, err := replanner.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 replanned, got %d", count)
+	}
+
+	updated, _ := sgStore.Get(ctx, "sg-1")
+	if updated.Strategy != StrategyDeferHighRisk {
+		t.Errorf("expected defer_high_risk, got %s", updated.Strategy)
+	}
+}
+
+func TestReplanner_PositiveReinforcement(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	planStore := NewInMemoryPlanStore()
+
+	sg := Subgoal{
+		ID:       "sg-1",
+		GoalID:   "goal-1",
+		Status:   SubgoalActive,
+		Strategy: StrategyExploitSuccess,
+		Priority: 0.70,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithExecutionFeedback(&mockExecFeedbackProvider{
+			feedback: map[string][3]int{"goal-1": {3, 0, 0}},
+		}).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.60})
+
+	count, err := replanner.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 replanned (reinforcement), got %d", count)
+	}
+
+	updated, _ := sgStore.Get(ctx, "sg-1")
+	if updated.Strategy != StrategyExploitSuccess {
+		t.Errorf("expected exploit_success_path after reinforcement, got %s", updated.Strategy)
+	}
+}
+
+func TestReplanner_NoAction(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	planStore := NewInMemoryPlanStore()
+
+	sg := Subgoal{
+		ID:       "sg-1",
+		GoalID:   "goal-1",
+		Status:   SubgoalActive,
+		Strategy: StrategyExploitSuccess,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.50})
+
+	count, err := replanner.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 replanned for stable state, got %d", count)
+	}
+}
+
+func TestReplanner_WithReflectionSignals(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	planStore := NewInMemoryPlanStore()
+
+	sg := Subgoal{
+		ID:       "sg-1",
+		GoalID:   "goal-1",
+		Status:   SubgoalActive,
+		Strategy: StrategyExploitSuccess,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithReflection(&mockReflectionProvider{
+			signals: []ReflectionSignalInput{
+				{SignalType: "execution_failure", Strength: 0.8, GoalID: "goal-1"},
+			},
+		}).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.50})
+
+	count, err := replanner.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reflection signal adds 1 failure → single failure → replan.
+	if count != 1 {
+		t.Errorf("expected 1 replanned, got %d", count)
+	}
+}
+
+func TestReplanner_SkipsCompletedSubgoals(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	planStore := NewInMemoryPlanStore()
+
+	sg := Subgoal{
+		ID:     "sg-1",
+		GoalID: "goal-1",
+		Status: SubgoalCompleted,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithExecutionFeedback(&mockExecFeedbackProvider{
+			feedback: map[string][3]int{"goal-1": {0, 5, 5}},
+		}).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.50})
+
+	count, _ := replanner.RunReplanCycle(ctx)
+	if count != 0 {
+		t.Errorf("expected 0 replanned for completed subgoal, got %d", count)
+	}
+}
+
+// --- Engine Plan Integration Tests ---
+
+func TestEngine_CreatePlan(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+	planStore := NewInMemoryPlanStore()
+
+	engine := NewEngine(sgStore, pStore, nil, nil).
+		WithPlanStore(planStore)
+
+	plan, err := engine.CreatePlan(ctx, "goal-1", HorizonMedium, StrategyExploitSuccess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.GoalID != "goal-1" {
+		t.Errorf("expected goal-1, got %s", plan.GoalID)
+	}
+	if plan.Status != PlanDraft {
+		t.Errorf("expected draft, got %s", plan.Status)
+	}
+	if plan.Version != 1 {
+		t.Errorf("expected version 1, got %d", plan.Version)
+	}
+}
+
+func TestEngine_ListPlans(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+	planStore := NewInMemoryPlanStore()
+
+	engine := NewEngine(sgStore, pStore, nil, nil).
+		WithPlanStore(planStore)
+
+	_, _ = engine.CreatePlan(ctx, "goal-1", HorizonMedium, StrategyExploitSuccess)
+	_, _ = engine.CreatePlan(ctx, "goal-2", HorizonLong, StrategyDiversify)
+
+	plans, err := engine.ListPlans(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Errorf("expected 2 plans, got %d", len(plans))
+	}
+}
+
+func TestEngine_DecomposeGoals_CreatesPlan(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+	planStore := NewInMemoryPlanStore()
+	depStore := NewInMemoryDependencyStore()
+
+	engine := NewEngine(sgStore, pStore, nil, nil).
+		WithPlanStore(planStore).
+		WithDependencyStore(depStore)
+
+	sysGoals := []goals.SystemGoal{
+		{ID: "g1", Type: "safety", Priority: 0.90, Horizon: "daily"},
+	}
+
+	count, err := engine.DecomposeGoals(ctx, sysGoals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 { // safety has 2 templates
+		t.Errorf("expected 2 subgoals, got %d", count)
+	}
+
+	// Verify plan was created.
+	plans, _ := planStore.ListAll(ctx)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	if plans[0].GoalID != "g1" {
+		t.Errorf("expected plan for g1, got %s", plans[0].GoalID)
+	}
+	if plans[0].Status != PlanActive {
+		t.Errorf("expected active plan, got %s", plans[0].Status)
+	}
+
+	// Verify dependencies were created (sequential).
+	deps, _ := depStore.ListByPlan(ctx, plans[0].ID)
+	if len(deps) != 1 {
+		t.Errorf("expected 1 dependency (0→1), got %d", len(deps))
+	}
+
+	// Verify subgoals have plan_id set.
+	sgs, _ := sgStore.ListAll(ctx)
+	for _, sg := range sgs {
+		if sg.PlanID != plans[0].ID {
+			t.Errorf("subgoal %s missing plan_id", sg.ID)
+		}
+		if sg.Strategy != StrategyExploitSuccess {
+			t.Errorf("subgoal %s expected exploit strategy, got %s", sg.ID, sg.Strategy)
+		}
+	}
+}
+
+func TestEngine_RunReplanCycle(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+	planStore := NewInMemoryPlanStore()
+
+	replanner := NewReplanner(sgStore, planStore, nil, nil).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.30})
+
+	engine := NewEngine(sgStore, pStore, nil, nil).
+		WithReplanner(replanner)
+
+	sg := Subgoal{
+		ID:       "sg-1",
+		GoalID:   "goal-1",
+		Status:   SubgoalActive,
+		Strategy: StrategyExploitSuccess,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	count, err := engine.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 replanned, got %d", count)
+	}
+}
+
+func TestEngine_RunReplanCycle_NilReplanner(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+
+	engine := NewEngine(sgStore, pStore, nil, nil)
+
+	count, err := engine.RunReplanCycle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 with nil replanner, got %d", count)
+	}
+}
+
+// --- MaxSubgoalsPerGoal Test ---
+
+func TestMaxSubgoalsPerGoal(t *testing.T) {
+	if MaxSubgoalsPerGoal != 5 {
+		t.Errorf("expected MaxSubgoalsPerGoal=5, got %d", MaxSubgoalsPerGoal)
+	}
+}
+
+func TestMaxTasksPerPlan(t *testing.T) {
+	if MaxTasksPerPlan != 10 {
+		t.Errorf("expected MaxTasksPerPlan=10, got %d", MaxTasksPerPlan)
+	}
+}
+
+func TestMaxDepth(t *testing.T) {
+	if MaxDepth != 3 {
+		t.Errorf("expected MaxDepth=3, got %d", MaxDepth)
+	}
+}
+
+// --- Horizon Mapping Tests ---
+
+func TestHorizonShortMediumLong(t *testing.T) {
+	if HorizonDays[HorizonShort] != 1 {
+		t.Errorf("short should be 1 day")
+	}
+	if HorizonDays[HorizonMedium] != 7 {
+		t.Errorf("medium should be 7 days")
+	}
+	if HorizonDays[HorizonLong] != 30 {
+		t.Errorf("long should be 30 days")
+	}
+}
+
+// --- Adapter Plan Tests ---
+
+func TestGraphAdapter_ListPlans_NilSafe(t *testing.T) {
+	var a *GraphAdapter
+	plans := a.ListPlans(context.Background())
+	if plans != nil {
+		t.Error("expected nil from nil adapter")
+	}
+}
+
+func TestGraphAdapter_Replan_NilSafe(t *testing.T) {
+	var a *GraphAdapter
+	count := a.Replan(context.Background(), "goal-1")
+	if count != 0 {
+		t.Errorf("expected 0 from nil adapter, got %d", count)
+	}
+}
+
+func TestGraphAdapter_RunReplanCycle_NilSafe(t *testing.T) {
+	var a *GraphAdapter
+	count := a.RunReplanCycle(context.Background())
+	if count != 0 {
+		t.Errorf("expected 0 from nil adapter, got %d", count)
+	}
+}
+
+// --- Strategy with Engine PlanAndEmitTasks ---
+
+func TestEngine_PlanAndEmitTasks_AppliesStrategy(t *testing.T) {
+	ctx := context.Background()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+
+	now := time.Now().UTC()
+	sg := Subgoal{
+		ID:              "sg-1",
+		GoalID:          "goal-1",
+		Status:          SubgoalActive,
+		Priority:        0.80,
+		Horizon:         HorizonWeekly,
+		PreferredAction: "analyze",
+		ProgressScore:   0.20,
+		FailureCount:    3, // will trigger reduce_failure strategy
+		CreatedAt:       now.Add(-48 * time.Hour),
+		UpdatedAt:       now,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	emitter := &mockEmitter{}
+
+	engine := NewEngine(sgStore, pStore, nil, nil).
+		WithEmitter(emitter)
+
+	count, err := engine.PlanAndEmitTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 emitted, got %d", count)
+	}
+	if emitter.emitted[0].StrategyType != string(StrategyReduceFailure) {
+		t.Errorf("expected reduce_failure strategy, got %s", emitter.emitted[0].StrategyType)
+	}
+}

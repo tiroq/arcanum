@@ -64,3 +64,51 @@ func (a *GraphAdapter) GetOverallProgress(ctx context.Context, goalID string) fl
 	}
 	return ComputeOverallProgress(sgs)
 }
+
+// ListPlans returns all goal plans. Returns nil on error.
+func (a *GraphAdapter) ListPlans(ctx context.Context) []GoalPlan {
+	if a == nil || a.engine == nil {
+		return nil
+	}
+	plans, err := a.engine.ListPlans(ctx)
+	if err != nil {
+		return nil
+	}
+	return plans
+}
+
+// CreatePlan creates a new goal plan. Returns zero plan on error.
+func (a *GraphAdapter) CreatePlan(ctx context.Context, goalID string, horizon Horizon, strategy Strategy) GoalPlan {
+	if a == nil || a.engine == nil {
+		return GoalPlan{}
+	}
+	plan, err := a.engine.CreatePlan(ctx, goalID, horizon, strategy)
+	if err != nil {
+		return GoalPlan{}
+	}
+	return plan
+}
+
+// Replan triggers adaptive replanning. Returns count of subgoals replanned.
+func (a *GraphAdapter) Replan(ctx context.Context, goalID string) int {
+	if a == nil || a.engine == nil {
+		return 0
+	}
+	count, err := a.engine.Replan(ctx, goalID)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+// RunReplanCycle runs the full replanning cycle. Returns count of subgoals replanned.
+func (a *GraphAdapter) RunReplanCycle(ctx context.Context) int {
+	if a == nil || a.engine == nil {
+		return 0
+	}
+	count, err := a.engine.RunReplanCycle(ctx)
+	if err != nil {
+		return 0
+	}
+	return count
+}
