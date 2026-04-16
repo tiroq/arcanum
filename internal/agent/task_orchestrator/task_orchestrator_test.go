@@ -46,15 +46,28 @@ func (m *mockPortfolioProvider) GetStrategyBoost(_ context.Context, strategyType
 type mockExecutionLoopProvider struct {
 	calls    []string
 	failNext bool
+	// terminalStatus controls what status subsequent calls return. Empty
+	// defaults to "completed" to preserve prior test behaviour where
+	// dispatch was expected to succeed.
+	terminalStatus string
+	errorMsg       string
 }
 
-func (m *mockExecutionLoopProvider) CreateAndRun(_ context.Context, goal string) (string, error) {
+func (m *mockExecutionLoopProvider) CreateAndRun(_ context.Context, goal string) (DispatchOutcome, error) {
 	m.calls = append(m.calls, goal)
 	if m.failNext {
 		m.failNext = false
-		return "", ErrGovernanceFrozen
+		return DispatchOutcome{}, ErrGovernanceFrozen
 	}
-	return "exec-" + goal, nil
+	status := m.terminalStatus
+	if status == "" {
+		status = "completed"
+	}
+	return DispatchOutcome{
+		ExecutionID:    "exec-" + goal,
+		TerminalStatus: status,
+		Error:          m.errorMsg,
+	}, nil
 }
 
 // --- Test helpers ---
@@ -462,21 +475,46 @@ func TestEngine_RecomputePriorities_SkipsRunning(t *testing.T) {
 }
 
 func TestEngine_RecomputePriorities_SkipsCooldown(t *testing.T) {
-	engine, _, _ := newTestEngine()
+	// Cooldown must NOT block pending tasks on their first recompute —
+	// otherwise newly-created tasks never enter the dispatch queue.
+	// Cooldown only applies to tasks that have already been scored
+	// (i.e. queued or paused).
+	engine, ts, qs := newTestEngine()
 	ctx := context.Background()
 	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
 	restore := fixedTime(now)
 	defer restore()
 
-	task, _ := engine.CreateTask(ctx, "manual", "cooldown goal", 0.5, 500, 0.3, "")
-	// Task was just created, within cooldown window.
+	// Pending task — just created, UpdatedAt == now, so within cooldown.
+	pendingTask, _ := engine.CreateTask(ctx, "manual", "pending goal", 0.5, 500, 0.3, "")
 
-	_ = engine.RecomputePriorities(ctx)
+	// Queued task — already scored recently; cooldown should skip re-score.
+	queuedTask, _ := engine.CreateTask(ctx, "manual", "queued goal", 0.5, 500, 0.3, "")
+	qt, _ := ts.Get(ctx, queuedTask.ID)
+	qt.Status = TaskStatusQueued
+	qt.PriorityScore = 0.42
+	qt.CreatedAt = now.Add(-2 * time.Minute)
+	qt.UpdatedAt = now.Add(-2 * time.Minute) // within cooldown window
+	_ = ts.Update(ctx, qt)
+	_ = qs.Upsert(ctx, TaskQueueEntry{TaskID: qt.ID, PriorityScore: 0.42, InsertedAt: qt.CreatedAt, LastUpdatedAt: qt.UpdatedAt})
 
-	// Should remain pending (skipped due to cooldown).
-	updated, _ := engine.GetTask(ctx, task.ID)
-	if updated.Status != TaskStatusPending {
-		t.Errorf("expected pending (cooldown), got %s", updated.Status)
+	if err := engine.RecomputePriorities(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Pending task must be transitioned to queued and present in queue.
+	p, _ := engine.GetTask(ctx, pendingTask.ID)
+	if p.Status != TaskStatusQueued {
+		t.Errorf("expected pending→queued even under cooldown, got %s", p.Status)
+	}
+	if _, ok := qs.GetEntryDirect(pendingTask.ID); !ok {
+		t.Error("expected pending task to enter queue after first recompute")
+	}
+
+	// Queued task must remain untouched — cooldown still applies.
+	q, _ := engine.GetTask(ctx, queuedTask.ID)
+	if q.PriorityScore != 0.42 {
+		t.Errorf("expected cooldown to skip re-score, priority changed to %f", q.PriorityScore)
 	}
 }
 
@@ -553,10 +591,19 @@ func TestEngine_Dispatch_Basic(t *testing.T) {
 		t.Errorf("expected %s dispatched, got %s", task.ID, result.Dispatched[0])
 	}
 
-	// Task should be running.
+	// Task should transition to completed (mock returns terminal "completed").
 	updated, _ := ts.Get(ctx, task.ID)
-	if updated.Status != TaskStatusRunning {
-		t.Errorf("expected running, got %s", updated.Status)
+	if updated.Status != TaskStatusCompleted {
+		t.Errorf("expected completed after synchronous execution, got %s", updated.Status)
+	}
+	if updated.ExecutionTaskID == "" {
+		t.Error("expected execution_task_id to be linked after dispatch")
+	}
+	if updated.OutcomeType != "success" {
+		t.Errorf("expected outcome_type=success, got %q", updated.OutcomeType)
+	}
+	if updated.CompletedAt == nil {
+		t.Error("expected completed_at to be set")
 	}
 
 	// Queue should be empty.
@@ -1071,10 +1118,12 @@ func TestEngine_FullCycle(t *testing.T) {
 		t.Fatal("expected at least 1 dispatched")
 	}
 
-	// Complete first dispatched.
-	_, err = engine.CompleteTask(ctx, result.Dispatched[0])
-	if err != nil {
-		t.Fatalf("unexpected error completing task: %v", err)
+	// Dispatch now auto-completes the task because the mock execution
+	// loop returns a terminal status synchronously. Verify that the
+	// dispatched task is in a terminal state.
+	first, _ := ts.Get(ctx, result.Dispatched[0])
+	if !first.Status.IsTerminal() {
+		t.Errorf("expected dispatched task to be terminal, got %s", first.Status)
 	}
 
 	// Verify execution loop was called.
@@ -1195,4 +1244,329 @@ func TestEngine_Dispatch_TerminalTasksRemovedFromQueue(t *testing.T) {
 	if ok {
 		t.Error("expected stale queue entry to be removed")
 	}
+}
+
+// ============================
+// Phase 1 — End-to-end lifecycle truth tests
+// ============================
+
+// TestLifecycle_CreateRecomputeDispatchComplete proves that a task created
+// at "now" can reach completion in a single recompute+dispatch cycle,
+// without any test-only SetTimestamps back-dating. This is the regression
+// test for the cooldown bug that kept pending tasks out of the queue.
+func TestLifecycle_CreateRecomputeDispatchComplete(t *testing.T) {
+	engine, ts, qs := newTestEngine()
+	execLoop := &mockExecutionLoopProvider{terminalStatus: "completed"}
+	engine.WithExecutionLoop(execLoop)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	restore := fixedTime(now)
+	defer restore()
+
+	// Step 1: Create task. UpdatedAt == now, i.e. inside cooldown window.
+	task, err := engine.CreateTask(ctx, "manual", "lifecycle goal", 0.8, 800, 0.2, "consulting")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if task.Status != TaskStatusPending {
+		t.Fatalf("initial status: want pending, got %s", task.Status)
+	}
+
+	// Step 2: Recompute. Pending task must bypass cooldown and enter queue.
+	if err := engine.RecomputePriorities(ctx); err != nil {
+		t.Fatalf("recompute: %v", err)
+	}
+
+	after, _ := ts.Get(ctx, task.ID)
+	if after.Status != TaskStatusQueued {
+		t.Fatalf("after recompute: want queued, got %s", after.Status)
+	}
+	if after.PriorityScore <= 0 {
+		t.Errorf("priority not computed: %f", after.PriorityScore)
+	}
+	if _, ok := qs.GetEntryDirect(task.ID); !ok {
+		t.Fatalf("task not present in queue after recompute")
+	}
+
+	// Step 3: Dispatch. Must select the task, call exec loop, and
+	// propagate terminal status back.
+	dispatchResult, err := engine.Dispatch(ctx)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(dispatchResult.Dispatched) != 1 || dispatchResult.Dispatched[0] != task.ID {
+		t.Fatalf("dispatched=%v, want [%s]", dispatchResult.Dispatched, task.ID)
+	}
+	if len(execLoop.calls) != 1 {
+		t.Fatalf("execution loop calls=%d, want 1", len(execLoop.calls))
+	}
+
+	// Step 4: Final state. Completion must have propagated from the
+	// execution loop back into the orchestrated task.
+	final, _ := ts.Get(ctx, task.ID)
+	if final.Status != TaskStatusCompleted {
+		t.Errorf("final status: want completed, got %s", final.Status)
+	}
+	if final.ExecutionTaskID == "" {
+		t.Error("final.ExecutionTaskID is empty: execution link not stored")
+	}
+	if final.OutcomeType != "success" {
+		t.Errorf("final.OutcomeType: want success, got %q", final.OutcomeType)
+	}
+	if final.CompletedAt == nil {
+		t.Error("final.CompletedAt not set")
+	}
+	if final.AttemptCount != 1 {
+		t.Errorf("attempt_count: want 1, got %d", final.AttemptCount)
+	}
+	if qs.CountDirect() != 0 {
+		t.Errorf("queue not drained: %d entries remain", qs.CountDirect())
+	}
+}
+
+// TestLifecycle_ExecutionFailurePropagates proves that a failed execution
+// transitions the orchestrated task to failed, records the error, and clears
+// the queue entry.
+func TestLifecycle_ExecutionFailurePropagates(t *testing.T) {
+	engine, ts, qs := newTestEngine()
+	execLoop := &mockExecutionLoopProvider{
+		terminalStatus: "failed",
+		errorMsg:       "simulated failure",
+	}
+	engine.WithExecutionLoop(execLoop)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	restore := fixedTime(now)
+	defer restore()
+
+	task, _ := engine.CreateTask(ctx, "manual", "will fail", 0.7, 500, 0.2, "")
+	_ = engine.RecomputePriorities(ctx)
+	if _, err := engine.Dispatch(ctx); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	final, _ := ts.Get(ctx, task.ID)
+	if final.Status != TaskStatusFailed {
+		t.Errorf("final status: want failed, got %s", final.Status)
+	}
+	if final.LastError != "simulated failure" {
+		t.Errorf("last_error: want %q, got %q", "simulated failure", final.LastError)
+	}
+	if final.OutcomeType != "failed" {
+		t.Errorf("outcome_type: want failed, got %q", final.OutcomeType)
+	}
+	if qs.CountDirect() != 0 {
+		t.Errorf("queue not drained after failure: %d entries", qs.CountDirect())
+	}
+}
+
+// TestLifecycle_DispatchErrorFailsTask proves that when the execution loop
+// bridge itself errors (e.g. service unavailable), the task is transitioned
+// to failed rather than being left dangling.
+func TestLifecycle_DispatchErrorFailsTask(t *testing.T) {
+	engine, ts, qs := newTestEngine()
+	execLoop := &mockExecutionLoopProvider{failNext: true}
+	engine.WithExecutionLoop(execLoop)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	restore := fixedTime(now)
+	defer restore()
+
+	task, _ := engine.CreateTask(ctx, "manual", "dispatch error", 0.5, 100, 0.1, "")
+	_ = engine.RecomputePriorities(ctx)
+	if _, err := engine.Dispatch(ctx); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	final, _ := ts.Get(ctx, task.ID)
+	if final.Status != TaskStatusFailed {
+		t.Errorf("final status: want failed on dispatch error, got %s", final.Status)
+	}
+	if final.LastError == "" {
+		t.Error("last_error should capture dispatch error")
+	}
+	if qs.CountDirect() != 0 {
+		t.Errorf("queue not drained after dispatch error: %d entries", qs.CountDirect())
+	}
+}
+
+// TestLifecycle_SupervisedReviewGateRemovesFromQueue proves that a
+// high-risk task in supervised mode is paused AND removed from the queue
+// so it cannot thrash across dispatch cycles.
+func TestLifecycle_SupervisedReviewGateRemovesFromQueue(t *testing.T) {
+	engine, ts, qs := newTestEngine()
+	engine.WithGovernance(&mockGovernanceProvider{mode: "supervised"})
+	execLoop := &mockExecutionLoopProvider{}
+	engine.WithExecutionLoop(execLoop)
+	ctx := context.Background()
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	restore := fixedTime(now)
+	defer restore()
+
+	task, _ := engine.CreateTask(ctx, "manual", "needs review", 0.5, 200, 0.80, "")
+	_ = engine.RecomputePriorities(ctx)
+	if _, ok := qs.GetEntryDirect(task.ID); !ok {
+		t.Fatal("task must enter queue before supervised gate applies")
+	}
+
+	if _, err := engine.Dispatch(ctx); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	after, _ := ts.Get(ctx, task.ID)
+	if after.Status != TaskStatusPaused {
+		t.Errorf("want paused after supervised review gate, got %s", after.Status)
+	}
+	if _, ok := qs.GetEntryDirect(task.ID); ok {
+		t.Error("paused task must be removed from queue to prevent thrash")
+	}
+
+	// Second dispatch must be a no-op for this task.
+	if _, err := engine.Dispatch(ctx); err != nil {
+		t.Fatalf("dispatch 2: %v", err)
+	}
+	// Mock calls count must still be 0 (never dispatched to exec loop).
+	if len(execLoop.calls) != 0 {
+		t.Errorf("paused task should never reach exec loop, calls=%d", len(execLoop.calls))
+	}
+}
+
+// TestLifecycle_ManualPauseRemovesFromQueue proves that a manual pause of a
+// queued task also removes it from the queue.
+func TestLifecycle_ManualPauseRemovesFromQueue(t *testing.T) {
+	engine, _, qs := newTestEngine()
+	ctx := context.Background()
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	restore := fixedTime(now)
+	defer restore()
+
+	task, _ := engine.CreateTask(ctx, "manual", "pause me", 0.5, 100, 0.1, "")
+	_ = engine.RecomputePriorities(ctx)
+	if _, ok := qs.GetEntryDirect(task.ID); !ok {
+		t.Fatal("task not queued after recompute")
+	}
+
+	if _, err := engine.PauseTask(ctx, task.ID); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if _, ok := qs.GetEntryDirect(task.ID); ok {
+		t.Error("manual pause should remove task from queue")
+	}
+}
+
+// --- Causal proof: vector changes task scoring ---
+
+type mockVectorProvider struct {
+	riskTolerance  float64
+	incomePriority float64
+}
+
+func (m *mockVectorProvider) GetRiskTolerance() float64  { return m.riskTolerance }
+func (m *mockVectorProvider) GetIncomePriority() float64 { return m.incomePriority }
+
+func TestCausalProof_VectorChangesPriority(t *testing.T) {
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	task := OrchestratedTask{
+		ID:            "task-1",
+		Source:        "actuation",
+		Goal:          "earn more",
+		Urgency:       0.70,
+		ExpectedValue: 500,
+		RiskLevel:     0.30,
+		StrategyType:  "consulting",
+		CreatedAt:     now.Add(-2 * time.Hour),
+		UpdatedAt:     now,
+	}
+	input := ScoringInput{ObjectiveSignalType: "boost", ObjectiveSignalStrength: 0.02}
+
+	// Baseline: no vector.
+	baseline := ComputePriority(task, input, 0, now)
+
+	// Default vector: should produce identical result.
+	defaultVec := VectorScoringParams{
+		RiskTolerance:  VectorBaselineRiskTolerance,
+		IncomePriority: VectorBaselineIncomePriority,
+	}
+	withDefault := ComputePriorityWithVector(task, input, 0, now, defaultVec)
+	if diff := baseline - withDefault; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("default vector should match baseline: baseline=%.6f default=%.6f", baseline, withDefault)
+	}
+
+	// High income vector: should boost priority.
+	highIncome := VectorScoringParams{
+		RiskTolerance:  VectorBaselineRiskTolerance,
+		IncomePriority: 1.00,
+	}
+	withHighIncome := ComputePriorityWithVector(task, input, 0, now, highIncome)
+	if withHighIncome <= baseline {
+		t.Errorf("CAUSAL FAILURE: high income vector should boost priority: baseline=%.6f highIncome=%.6f",
+			baseline, withHighIncome)
+	}
+
+	t.Logf("Causal proof: baseline=%.4f default=%.4f highIncome=%.4f", baseline, withDefault, withHighIncome)
+}
+
+func TestCausalProof_VectorChangesRiskCap(t *testing.T) {
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	// High-risk task that normally gets capped.
+	task := OrchestratedTask{
+		ID:            "task-risky",
+		Source:        "actuation",
+		Goal:          "risky thing",
+		Urgency:       0.90,
+		ExpectedValue: 800,
+		RiskLevel:     0.80, // above HighRiskThreshold=0.70
+		StrategyType:  "automation",
+		CreatedAt:     now.Add(-2 * time.Hour),
+		UpdatedAt:     now,
+	}
+	input := ScoringInput{ObjectiveSignalType: "boost", ObjectiveSignalStrength: 0.02}
+
+	// Baseline (no vector): priority capped at HighRiskMaxPrio=0.50.
+	baseline := ComputePriority(task, input, 0.05, now)
+	if baseline > HighRiskMaxPrio+0.001 {
+		t.Fatalf("baseline should be capped at %f, got %f", HighRiskMaxPrio, baseline)
+	}
+
+	// Low risk tolerance: cap should be even lower.
+	lowRT := VectorScoringParams{RiskTolerance: 0.10, IncomePriority: VectorBaselineIncomePriority}
+	withLowRT := ComputePriorityWithVector(task, input, 0.05, now, lowRT)
+
+	// High risk tolerance: cap should be higher, allowing more priority.
+	highRT := VectorScoringParams{RiskTolerance: 0.80, IncomePriority: VectorBaselineIncomePriority}
+	withHighRT := ComputePriorityWithVector(task, input, 0.05, now, highRT)
+
+	if withHighRT <= withLowRT {
+		t.Errorf("CAUSAL FAILURE: high risk tolerance should allow higher priority for risky tasks: lowRT=%.4f highRT=%.4f",
+			withLowRT, withHighRT)
+	}
+
+	t.Logf("Causal proof: baseline=%.4f lowRT=%.4f highRT=%.4f", baseline, withLowRT, withHighRT)
+}
+
+func TestCausalProof_VectorWiredInEngine(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 4, 14, 12, 0, 0, 0, time.UTC)
+	restore := fixedTime(now)
+	defer restore()
+
+	// Engine WITHOUT vector.
+	engA, tsA, _ := newTestEngine()
+	taskA, _ := engA.CreateTask(ctx, "actuation", "test goal", 0.70, 500, 0.30, "consulting")
+	_ = engA.RecomputePriorities(ctx)
+	gotA, _ := tsA.Get(ctx, taskA.ID)
+
+	// Engine WITH high-income vector.
+	engB, tsB, _ := newTestEngine()
+	engB.WithVector(&mockVectorProvider{riskTolerance: 0.30, incomePriority: 1.00})
+	taskB, _ := engB.CreateTask(ctx, "actuation", "test goal", 0.70, 500, 0.30, "consulting")
+	_ = engB.RecomputePriorities(ctx)
+	gotB, _ := tsB.Get(ctx, taskB.ID)
+
+	if gotB.PriorityScore <= gotA.PriorityScore {
+		t.Errorf("CAUSAL FAILURE: engine with high-income vector should score higher: noVec=%.4f withVec=%.4f",
+			gotA.PriorityScore, gotB.PriorityScore)
+	}
+
+	t.Logf("Causal proof: engineNoVec=%.4f engineWithVec=%.4f", gotA.PriorityScore, gotB.PriorityScore)
 }

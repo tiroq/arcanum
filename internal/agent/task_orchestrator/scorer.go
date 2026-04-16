@@ -78,6 +78,68 @@ func IsInCooldown(task OrchestratedTask, now time.Time) bool {
 	return now.Sub(task.UpdatedAt).Minutes() < CooldownMinutes
 }
 
+// --- Vector-adjusted scoring ---
+
+// VectorScoringParams holds vector fields that affect task priority scoring.
+type VectorScoringParams struct {
+	RiskTolerance  float64
+	IncomePriority float64
+}
+
+// VectorBaselineRiskTolerance is the default vector risk tolerance value.
+// When vector matches this, scoring is identical to non-vector path.
+const VectorBaselineRiskTolerance = 0.30
+
+// VectorBaselineIncomePriority is the default vector income priority value.
+const VectorBaselineIncomePriority = 0.70
+
+// ComputePriorityWithVector calculates priority with vector influence.
+//
+// Vector effects:
+//   - RiskTolerance adjusts the high-risk cap: higher tolerance → higher cap (more aggressive tasks allowed).
+//   - IncomePriority > baseline adds a small income-aligned boost.
+//
+// When v matches the default vector, output is identical to ComputePriority.
+func ComputePriorityWithVector(task OrchestratedTask, input ScoringInput, portfolioBoost float64, now time.Time, v VectorScoringParams) float64 {
+	// Delegate to base formula.
+	objectiveScore := 1.0
+	if input.ObjectiveSignalType == "penalty" && input.ObjectiveSignalStrength > 0 {
+		objectiveScore = clamp01(1.0 - input.ObjectiveSignalStrength)
+	}
+	valueScore := clamp01(task.ExpectedValue / 1000.0)
+	urgency := clamp01(task.Urgency)
+	recencyBoost := ComputeRecencyBoost(task.CreatedAt, now)
+	riskScore := clamp01(task.RiskLevel)
+	stratBoost := clamp(portfolioBoost, -0.10, 0.12)
+
+	// Income alignment boost: proportional to deviation above baseline.
+	incomeBoost := clamp01((v.IncomePriority - VectorBaselineIncomePriority) * 0.15) // max +0.045
+
+	priority := objectiveScore*WeightObjective +
+		valueScore*WeightValue +
+		urgency*WeightUrgency +
+		recencyBoost*WeightRecency -
+		riskScore*WeightRisk +
+		stratBoost +
+		incomeBoost
+
+	priority = clamp01(priority)
+
+	// Vector-adjusted high-risk cap: scale threshold by risk tolerance ratio.
+	// Default (0.30): cap = 0.70 (unchanged). High (0.80): cap raised to ~0.87.
+	// Low (0.10): cap lowered to ~0.53.
+	adjHighRisk := clamp(HighRiskThreshold*(v.RiskTolerance/VectorBaselineRiskTolerance), 0.40, 0.95)
+	adjCap := clamp(HighRiskMaxPrio*(v.RiskTolerance/VectorBaselineRiskTolerance), 0.30, 0.80)
+
+	if task.RiskLevel > adjHighRisk {
+		if priority > adjCap {
+			priority = adjCap
+		}
+	}
+
+	return priority
+}
+
 // ShouldReduceDispatch returns true if capacity is overloaded.
 func ShouldReduceDispatch(capacityLoad float64) bool {
 	return capacityLoad > OverloadThreshold

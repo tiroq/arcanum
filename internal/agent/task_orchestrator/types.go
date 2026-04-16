@@ -150,9 +150,32 @@ type PortfolioProvider interface {
 	GetStrategyBoost(ctx context.Context, strategyType string) float64
 }
 
-// ExecutionLoopProvider dispatches a task to the execution loop.
+// ExecutionLoopProvider dispatches a task to the execution loop and returns
+// the resulting execution state. Since the execution loop is bounded and
+// typically synchronous, callers should inspect DispatchOutcome.TerminalStatus
+// to propagate completion back into the orchestrator.
 type ExecutionLoopProvider interface {
-	CreateAndRun(ctx context.Context, goal string) (string, error)
+	CreateAndRun(ctx context.Context, goal string) (DispatchOutcome, error)
+}
+
+// DispatchOutcome describes the result of a single execution-loop dispatch.
+//
+// TerminalStatus mirrors the execution_loop TaskStatus:
+//   - "completed"  → task orchestrator should transition to completed
+//   - "failed"     → task orchestrator should transition to failed
+//   - "aborted"    → task orchestrator should transition to failed
+//   - "running"    → execution did not finish synchronously; task stays running
+//   - ""           → unknown / dispatch did not start; treated as failure
+type DispatchOutcome struct {
+	ExecutionID    string `json:"execution_id"`
+	TerminalStatus string `json:"terminal_status"`
+	Error          string `json:"error,omitempty"`
+}
+
+// VectorProvider reads system vector fields for task priority adjustment.
+type VectorProvider interface {
+	GetRiskTolerance() float64
+	GetIncomePriority() float64
 }
 
 // --- Errors ---
