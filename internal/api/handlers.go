@@ -53,6 +53,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/strategy"
 	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
 	taskorchestrator "github.com/tiroq/arcanum/internal/agent/task_orchestrator"
+	"github.com/tiroq/arcanum/internal/agent/vector"
 	"github.com/tiroq/arcanum/internal/contracts/events"
 	"github.com/tiroq/arcanum/internal/contracts/subjects"
 	"github.com/tiroq/arcanum/internal/db/models"
@@ -174,6 +175,7 @@ type Handlers struct {
 	executionLoopAdapter  *executionloop.GraphAdapter
 	taskOrchAdapter       *taskorchestrator.GraphAdapter
 	goalPlanningAdapter   *goalplanning.GraphAdapter
+	vectorEngine          *vector.Engine
 	autonomyOrch          AutonomyOrchestrator
 	logger                *zap.Logger
 }
@@ -451,6 +453,12 @@ func (h *Handlers) WithTaskOrchestrator(ta *taskorchestrator.GraphAdapter) *Hand
 // WithGoalPlanning attaches the goal planning adapter (Iteration 55).
 func (h *Handlers) WithGoalPlanning(gp *goalplanning.GraphAdapter) *Handlers {
 	h.goalPlanningAdapter = gp
+	return h
+}
+
+// WithVector attaches the system vector engine.
+func (h *Handlers) WithVector(ve *vector.Engine) *Handlers {
+	h.vectorEngine = ve
 	return h
 }
 
@@ -5748,4 +5756,45 @@ func (h *Handlers) GoalPlanningReplan(w http.ResponseWriter, r *http.Request) {
 	}
 	count := h.goalPlanningAdapter.Replan(r.Context(), req.GoalID)
 	writeJSON(w, http.StatusOK, map[string]int{"replanned": count})
+}
+
+// --- System Vector (Operationalization Sprint) ---
+
+func (h *Handlers) VectorGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if h.vectorEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "vector engine not available")
+		return
+	}
+	v, err := h.vectorEngine.Get(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+func (h *Handlers) VectorSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	if h.vectorEngine == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "vector engine not available")
+		return
+	}
+	var v vector.SystemVector
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.vectorEngine.Set(r.Context(), v); err != nil {
+		writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+	got, _ := h.vectorEngine.Get(r.Context())
+	writeJSON(w, http.StatusOK, got)
 }

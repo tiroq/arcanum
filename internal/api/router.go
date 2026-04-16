@@ -302,5 +302,9 @@ func NewRouter(handlers *Handlers, registry *prometheus.Registry, rc *health.Rea
 	mux.Handle("/api/v1/agent/autonomy/reports", chain(handlers.AutonomyReports))
 	mux.Handle("/api/v1/agent/autonomy/set-mode", chain(handlers.AutonomySetMode))
 
+	// System vector (Operationalization Sprint)
+	mux.Handle("/api/v1/agent/vector", chain(handlers.VectorGet))
+	mux.Handle("/api/v1/agent/vector/set", chain(handlers.VectorSet))
+
 	return requestIDMiddleware(mux)
 }
