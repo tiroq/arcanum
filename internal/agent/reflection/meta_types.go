@@ -15,6 +15,14 @@ const (
 	SignalOverloadRisk          ReflectionSignalType = "overload_risk"
 	SignalIncomeInstability     ReflectionSignalType = "income_instability"
 	SignalAutomationOpportunity ReflectionSignalType = "automation_opportunity"
+
+	// Iteration 55A: Execution feedback signals.
+	SignalExecutionInefficiency ReflectionSignalType = "execution_inefficiency"
+	SignalExecutionRisk         ReflectionSignalType = "execution_risk"
+	SignalWorkflowFriction      ReflectionSignalType = "workflow_friction"
+	SignalSystemInstability     ReflectionSignalType = "system_instability"
+	SignalPositiveReinforcement ReflectionSignalType = "positive_reinforcement"
+	SignalGovernanceFriction    ReflectionSignalType = "governance_friction"
 )
 
 // ReflectionSignal carries a scored insight for the decision graph.
@@ -81,6 +89,21 @@ type AggregatedData struct {
 	OwnerLoadScore     float64
 	SignalsSummary     map[string]float64
 	ManualActionCounts map[string]int // action_type → count of manual repeats
+
+	// Iteration 55A: Execution feedback.
+	ExecutionFeedback ReflectionExecutionSummary
+}
+
+// ReflectionExecutionSummary aggregates structured execution feedback for reflection.
+type ReflectionExecutionSummary struct {
+	SuccessCount             int `json:"success_count"`
+	FailureCount             int `json:"failure_count"`
+	RepeatedFailureCount     int `json:"repeated_failure_count"`
+	BlockedByReviewCount     int `json:"blocked_by_review_count"`
+	BlockedByGovernanceCount int `json:"blocked_by_governance_count"`
+	ObjectiveAbortCount      int `json:"objective_abort_count"`
+	SafeSuccessCount         int `json:"safe_success_count"`
+	TotalCount               int `json:"total_count"`
 }
 
 // ReflectionInsights is the output of deterministic analysis on AggregatedData.

@@ -13,6 +13,13 @@ const (
 	AutomationMinRepeats       = 3    // repeated manual actions ≥ this → automation opportunity
 	ReflectionSignalBoostMax   = 0.10 // max scoring boost from reflection signals
 	ReflectionSignalBoostScale = 0.05 // per-signal strength multiplier
+
+	// Iteration 55A: Execution feedback thresholds.
+	ExecRepeatedFailureThreshold = 2    // repeated_failure count ≥ this → inefficiency
+	ExecFailureClusterThreshold  = 3    // execution_failure count ≥ this → risk flag
+	ExecBlockedReviewThreshold   = 2    // blocked_by_review count ≥ this → friction improvement
+	ExecSafeSuccessThreshold     = 3    // safe_action_succeeded count ≥ this for reinforcement
+	ExecSafeSuccessLowFailRatio  = 0.25 // failure/total must be below this for reinforcement
 )
 
 // MetaAnalyze runs deterministic analysis rules on aggregated data
@@ -25,6 +32,14 @@ func MetaAnalyze(data AggregatedData) ReflectionInsights {
 	insights = rulePricingMisalignment(data, insights)
 	insights = ruleIncomeInstability(data, insights)
 	insights = ruleAutomationOpportunity(data, insights)
+
+	// Iteration 55A: Execution feedback rules.
+	insights = ruleExecRepeatedFailure(data, insights)
+	insights = ruleExecFailureCluster(data, insights)
+	insights = ruleExecBlockedReview(data, insights)
+	insights = ruleExecObjectiveAbort(data, insights)
+	insights = ruleExecPositiveReinforcement(data, insights)
+	insights = ruleExecGovernanceFriction(data, insights)
 
 	return insights
 }
@@ -168,4 +183,159 @@ func ruleAutomationOpportunity(data AggregatedData, insights ReflectionInsights)
 		}
 	}
 	return insights
+}
+
+// --- Iteration 55A: Execution Feedback Rules ---
+
+// Rule 6: REPEATED FAILURE — systemic inefficiency.
+// If repeated_failure count ≥ 2 in window → emit inefficiency.
+func ruleExecRepeatedFailure(data AggregatedData, insights ReflectionInsights) ReflectionInsights {
+	ef := data.ExecutionFeedback
+	if ef.RepeatedFailureCount >= ExecRepeatedFailureThreshold {
+		severity := clampMeta(float64(ef.RepeatedFailureCount) / 5.0)
+		insights.Inefficiencies = append(insights.Inefficiencies, Inefficiency{
+			Type: "execution_repeated_failure",
+			Description: fmt.Sprintf(
+				"%d repeated execution failures detected — systemic problem likely",
+				ef.RepeatedFailureCount,
+			),
+			Severity: severity,
+		})
+		insights.Signals = append(insights.Signals, ReflectionSignal{
+			SignalType:  SignalExecutionInefficiency,
+			Strength:    severity,
+			ContextTags: []string{"execution", "repeated_failure"},
+		})
+	}
+	return insights
+}
+
+// Rule 7: FAILURE CLUSTER — execution risk flag.
+// If total execution failures ≥ 3 in window → emit risk.
+func ruleExecFailureCluster(data AggregatedData, insights ReflectionInsights) ReflectionInsights {
+	ef := data.ExecutionFeedback
+	if ef.FailureCount >= ExecFailureClusterThreshold {
+		severity := clampMeta(float64(ef.FailureCount) / 6.0)
+		insights.RiskFlags = append(insights.RiskFlags, RiskFlag{
+			Type: "execution_failure_cluster",
+			Description: fmt.Sprintf(
+				"%d execution failures in period — elevated execution risk",
+				ef.FailureCount,
+			),
+			Severity: severity,
+		})
+		insights.Signals = append(insights.Signals, ReflectionSignal{
+			SignalType:  SignalExecutionRisk,
+			Strength:    severity,
+			ContextTags: []string{"execution", "failure_cluster"},
+		})
+	}
+	return insights
+}
+
+// Rule 8: BLOCKED BY REVIEW — workflow friction.
+// If blocked_by_review ≥ 2 → emit improvement suggestion.
+func ruleExecBlockedReview(data AggregatedData, insights ReflectionInsights) ReflectionInsights {
+	ef := data.ExecutionFeedback
+	if ef.BlockedByReviewCount >= ExecBlockedReviewThreshold {
+		severity := clampMeta(float64(ef.BlockedByReviewCount) / 5.0)
+		insights.Improvements = append(insights.Improvements, Improvement{
+			Type: "workflow_friction",
+			Description: fmt.Sprintf(
+				"%d tasks blocked by review — approval bottleneck detected",
+				ef.BlockedByReviewCount,
+			),
+		})
+		insights.Signals = append(insights.Signals, ReflectionSignal{
+			SignalType:  SignalWorkflowFriction,
+			Strength:    severity,
+			ContextTags: []string{"execution", "review_blocked"},
+		})
+	}
+	return insights
+}
+
+// Rule 9: OBJECTIVE PENALTY ABORT — system instability.
+// If any objective_penalty_abort occurred → emit instability warning.
+func ruleExecObjectiveAbort(data AggregatedData, insights ReflectionInsights) ReflectionInsights {
+	ef := data.ExecutionFeedback
+	if ef.ObjectiveAbortCount >= 1 {
+		severity := clampMeta(float64(ef.ObjectiveAbortCount) / 3.0)
+		insights.RiskFlags = append(insights.RiskFlags, RiskFlag{
+			Type: "system_instability",
+			Description: fmt.Sprintf(
+				"%d execution(s) aborted due to objective penalty — operating state may be unsafe",
+				ef.ObjectiveAbortCount,
+			),
+			Severity: severity,
+		})
+		insights.Signals = append(insights.Signals, ReflectionSignal{
+			SignalType:  SignalSystemInstability,
+			Strength:    severity,
+			ContextTags: []string{"execution", "objective_abort"},
+		})
+	}
+	return insights
+}
+
+// Rule 10: POSITIVE REINFORCEMENT — safe success pattern.
+// If safe_action_succeeded ≥ 3 and failure ratio is low → emit reinforcement.
+func ruleExecPositiveReinforcement(data AggregatedData, insights ReflectionInsights) ReflectionInsights {
+	ef := data.ExecutionFeedback
+	if ef.SafeSuccessCount < ExecSafeSuccessThreshold {
+		return insights
+	}
+	failRatio := 0.0
+	if ef.TotalCount > 0 {
+		failRatio = float64(ef.FailureCount) / float64(ef.TotalCount)
+	}
+	if failRatio > ExecSafeSuccessLowFailRatio {
+		return insights
+	}
+	strength := clampMeta(float64(ef.SafeSuccessCount) / 6.0)
+	insights.Improvements = append(insights.Improvements, Improvement{
+		Type: "positive_reinforcement",
+		Description: fmt.Sprintf(
+			"%d safe actions succeeded with low failure rate (%.0f%%) — effective execution pattern",
+			ef.SafeSuccessCount, failRatio*100,
+		),
+	})
+	insights.Signals = append(insights.Signals, ReflectionSignal{
+		SignalType:  SignalPositiveReinforcement,
+		Strength:    strength,
+		ContextTags: []string{"execution", "safe_success"},
+	})
+	return insights
+}
+
+// Rule 11: GOVERNANCE FRICTION — governance blocking execution.
+// If blocked_by_governance ≥ 2 → emit governance friction signal.
+func ruleExecGovernanceFriction(data AggregatedData, insights ReflectionInsights) ReflectionInsights {
+	ef := data.ExecutionFeedback
+	if ef.BlockedByGovernanceCount >= 2 {
+		severity := clampMeta(float64(ef.BlockedByGovernanceCount) / 4.0)
+		insights.Improvements = append(insights.Improvements, Improvement{
+			Type: "governance_friction",
+			Description: fmt.Sprintf(
+				"%d tasks blocked by governance — intentional suppression or mode too restrictive",
+				ef.BlockedByGovernanceCount,
+			),
+		})
+		insights.Signals = append(insights.Signals, ReflectionSignal{
+			SignalType:  SignalGovernanceFriction,
+			Strength:    severity,
+			ContextTags: []string{"execution", "governance_blocked"},
+		})
+	}
+	return insights
+}
+
+func clampMeta(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }

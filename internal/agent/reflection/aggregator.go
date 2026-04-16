@@ -36,14 +36,29 @@ type ExternalActionsProvider interface {
 	GetRecentActionCounts(ctx context.Context, since time.Time) map[string]int
 }
 
+// ExecutionFeedbackProvider reads structured execution feedback for reflection.
+type ExecutionFeedbackProvider interface {
+	GetReflectionFeedback(ctx context.Context) []ExecutionFeedbackEntry
+}
+
+// ExecutionFeedbackEntry is a single execution feedback record (local type to avoid import cycles).
+type ExecutionFeedbackEntry struct {
+	Signal    string
+	Outcome   string
+	Success   bool
+	TaskID    string
+	CreatedAt time.Time
+}
+
 // Aggregator collects and computes data from all sources for a time window.
 type Aggregator struct {
-	income          IncomeDataProvider
-	financialTruth  FinancialTruthProvider
-	signals         SignalDataProvider
-	capacity        CapacityDataProvider
-	externalActions ExternalActionsProvider
-	logger          *zap.Logger
+	income            IncomeDataProvider
+	financialTruth    FinancialTruthProvider
+	signals           SignalDataProvider
+	capacity          CapacityDataProvider
+	externalActions   ExternalActionsProvider
+	executionFeedback ExecutionFeedbackProvider
+	logger            *zap.Logger
 }
 
 // NewAggregator creates an Aggregator with all data source providers.
@@ -78,6 +93,12 @@ func (a *Aggregator) WithCapacity(p CapacityDataProvider) *Aggregator {
 // WithExternalActions attaches the external actions provider.
 func (a *Aggregator) WithExternalActions(p ExternalActionsProvider) *Aggregator {
 	a.externalActions = p
+	return a
+}
+
+// WithExecutionFeedback attaches the execution feedback provider.
+func (a *Aggregator) WithExecutionFeedback(p ExecutionFeedbackProvider) *Aggregator {
+	a.executionFeedback = p
 	return a
 }
 
@@ -138,6 +159,43 @@ func (a *Aggregator) Aggregate(ctx context.Context, periodStart, periodEnd time.
 	}
 	if data.TotalEffortHours > 0 {
 		data.ValuePerHour = income / data.TotalEffortHours
+	}
+
+	// Execution feedback (Iteration 55A)
+	if a.executionFeedback != nil {
+		entries := a.executionFeedback.GetReflectionFeedback(ctx)
+		summary := ReflectionExecutionSummary{}
+		for _, e := range entries {
+			if e.CreatedAt.Before(periodStart) {
+				continue // outside window
+			}
+			summary.TotalCount++
+			switch e.Signal {
+			case "safe_action_succeeded":
+				summary.SafeSuccessCount++
+				summary.SuccessCount++
+			case "repeated_failure":
+				summary.RepeatedFailureCount++
+				summary.FailureCount++
+			case "execution_failure":
+				summary.FailureCount++
+			case "blocked_by_review":
+				summary.BlockedByReviewCount++
+			case "blocked_by_governance":
+				summary.BlockedByGovernanceCount++
+			case "objective_penalty_abort":
+				summary.ObjectiveAbortCount++
+			case "execution_aborted":
+				summary.FailureCount++
+			default:
+				if e.Success {
+					summary.SuccessCount++
+				} else {
+					summary.FailureCount++
+				}
+			}
+		}
+		data.ExecutionFeedback = summary
 	}
 
 	return data
