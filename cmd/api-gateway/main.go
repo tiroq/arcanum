@@ -709,11 +709,18 @@ func run() error {
 
 	// Goal decomposition + long-horizon planning (Iteration 55).
 	// Decomposes strategic goals into measurable subgoals, tracks progress,
-	// and emits tasks to the task orchestrator.
+	// and emits tasks to the task orchestrator. Includes plan versioning,
+	// dependency graphs, strategy selection, and adaptive replanning.
 	goalPlanSubgoalStore := goalplanning.NewSubgoalStore(pool)
 	goalPlanProgressStore := goalplanning.NewProgressStore(pool)
+	goalPlanPlanStore := goalplanning.NewPlanStore(pool)
+	goalPlanDepStore := goalplanning.NewDependencyStore(pool)
+	goalPlanReplanner := goalplanning.NewReplanner(goalPlanSubgoalStore, goalPlanPlanStore, auditor, logger)
 	goalPlanEngine := goalplanning.NewEngine(goalPlanSubgoalStore, goalPlanProgressStore, auditor, logger).
-		WithEmitter(goalPlanEmitterBridge{ta: taskOrchAdapter})
+		WithEmitter(goalPlanEmitterBridge{ta: taskOrchAdapter}).
+		WithPlanStore(goalPlanPlanStore).
+		WithDependencyStore(goalPlanDepStore).
+		WithReplanner(goalPlanReplanner)
 	goalPlanAdapter := goalplanning.NewGraphAdapter(goalPlanEngine, logger)
 	logger.Info("goal planning engine initialised")
 
@@ -746,7 +753,8 @@ func run() error {
 			WithTaskOrchestrator(autonomyTaskOrchBridge{ta: taskOrchAdapter}).
 			WithExecutionLoop(autonomyExecLoopBridge{el: execLoopAdapter}).
 			WithFeedbackStore(autonomy.NewPgExecutionFeedbackStore(pool)).
-			WithGoalPlanning(autonomyGoalPlanBridge{engine: goalPlanEngine, goals: systemGoals})
+			WithGoalPlanning(autonomyGoalPlanBridge{engine: goalPlanEngine, goals: systemGoals}).
+			WithGoalReplanning(autonomyGoalReplanBridge{replanner: goalPlanReplanner})
 		autonomyAdapter = autonomy.NewAPIAdapter(autonomyOrch, autonomyConfigPath)
 
 		// Iteration 55A: Wire execution feedback into reflection and objective.
@@ -2015,4 +2023,16 @@ func (b autonomyGoalPlanBridge) RunCycle(ctx context.Context) error {
 		return nil
 	}
 	return b.engine.RunCycle(ctx, b.goals.Goals)
+}
+
+// autonomyGoalReplanBridge bridges autonomy.GoalReplanningRunner → goal_planning.Replanner.
+type autonomyGoalReplanBridge struct {
+	replanner *goalplanning.Replanner
+}
+
+func (b autonomyGoalReplanBridge) RunReplanCycle(ctx context.Context) (int, error) {
+	if b.replanner == nil {
+		return 0, nil
+	}
+	return b.replanner.RunReplanCycle(ctx)
 }
