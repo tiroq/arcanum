@@ -83,6 +83,7 @@ type CyclesCfg struct {
 	TaskRecomputeHours int `yaml:"task_recompute_hours"`
 	TaskDispatchHours  int `yaml:"task_dispatch_hours"`
 	GoalPlanningHours  int `yaml:"goal_planning_hours"`
+	GoalReplanHours    int `yaml:"goal_replan_hours"`
 	ReportingHours     int `yaml:"reporting_hours"`
 }
 
@@ -420,6 +421,8 @@ func (c *AutonomyConfig) CycleDuration(cycle string) time.Duration {
 		hours = c.Scheduler.Cycles.TaskDispatchHours
 	case "goal_planning":
 		hours = c.Scheduler.Cycles.GoalPlanningHours
+	case "goal_replanning":
+		hours = c.Scheduler.Cycles.GoalReplanHours
 	case "reporting":
 		hours = c.Scheduler.Cycles.ReportingHours
 	}

@@ -43,6 +43,11 @@ type GoalPlanningRunner interface {
 	RunCycle(ctx context.Context) error
 }
 
+// GoalReplanningRunner runs adaptive replanning based on execution feedback.
+type GoalReplanningRunner interface {
+	RunReplanCycle(ctx context.Context) (int, error)
+}
+
 // --- Lightweight result types (no import cycles) ---
 
 // CreatedTaskInfo is the result of creating a task via TaskOrchestratorRunner.
