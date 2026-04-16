@@ -180,3 +180,81 @@ func ValidateTransition(from, to DecisionStatus) bool {
 	}
 	return false
 }
+
+// --- Vector-adjusted actuation ---
+
+// VectorRulesParams holds vector fields that affect actuation rule evaluation.
+type VectorRulesParams struct {
+	HumanReviewStrictness float64
+	RiskTolerance         float64
+	IncomePriority        float64
+}
+
+// VectorBaselineHumanReviewStrictness is the default vector value for review strictness.
+const VectorBaselineHumanReviewStrictness = 0.80
+
+// VectorBaselineRiskTolerance is the default vector value for risk tolerance.
+const VectorBaselineRiskTolerance = 0.30
+
+// VectorBaselineIncomePriority is the default vector value for income priority.
+const VectorBaselineIncomePriority = 0.70
+
+// EvaluateRulesWithVector runs the same deterministic rules as EvaluateRules
+// but adjusts thresholds and priorities based on the system vector.
+//
+// Vector effects:
+//   - IncomePriority > baseline boosts income-related action priorities.
+//   - RiskTolerance > baseline raises escalation thresholds (less aggressive).
+//   - HumanReviewStrictness is used in ReviewRequiredWithVector (not in rules).
+func EvaluateRulesWithVector(inputs ActuationInputs, v VectorRulesParams) []proposedAction {
+	// Start with base evaluation.
+	proposals := EvaluateRules(inputs)
+
+	// Income priority boost: when above baseline, income-related actions get a boost.
+	if v.IncomePriority > VectorBaselineIncomePriority {
+		incomeBoost := clamp01((v.IncomePriority - VectorBaselineIncomePriority) * 0.30) // max +0.09
+		for i := range proposals {
+			if proposals[i].Type == ActStabilizeIncome || proposals[i].Type == ActAdjustPricing {
+				proposals[i].Priority = clamp01(proposals[i].Priority + incomeBoost)
+			}
+		}
+	}
+
+	// Risk tolerance dampening: when above baseline, reduce escalation intensity.
+	if v.RiskTolerance > VectorBaselineRiskTolerance {
+		dampenFactor := clamp01(1.0 - (v.RiskTolerance-VectorBaselineRiskTolerance)*0.30) // min 0.91
+		for i := range proposals {
+			if proposals[i].Type == ActReduceLoad || proposals[i].Type == ActShiftScheduling {
+				proposals[i].Priority = clamp01(proposals[i].Priority * dampenFactor)
+			}
+		}
+	}
+
+	return proposals
+}
+
+// ReviewRequiredWithVector determines whether a decision requires human review,
+// modulated by the system vector's human review strictness.
+//
+// At baseline (0.80): only trigger_automation and adjust_pricing require review.
+// At high strictness (>0.90): ALL non-trivial actions require review.
+// At low strictness (<0.50): only trigger_automation requires review.
+func ReviewRequiredWithVector(t ActuationType, strictness float64) bool {
+	// trigger_automation always requires review regardless of vector.
+	if t == ActTriggerAutomation {
+		return true
+	}
+
+	// High strictness: everything except routine scheduling requires review.
+	if strictness > 0.90 {
+		return t != ActShiftScheduling && t != ActReduceLoad
+	}
+
+	// Normal strictness: default behavior.
+	if strictness >= 0.50 {
+		return t == ActAdjustPricing
+	}
+
+	// Low strictness: only trigger_automation (handled above).
+	return false
+}

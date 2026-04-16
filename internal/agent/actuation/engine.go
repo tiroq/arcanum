@@ -21,6 +21,7 @@ type Engine struct {
 
 	reflection ReflectionProvider
 	objective  ObjectiveProvider
+	vector     VectorProvider
 }
 
 // NewEngine creates a new actuation engine.
@@ -44,6 +45,12 @@ func (e *Engine) WithObjective(p ObjectiveProvider) *Engine {
 	return e
 }
 
+// WithVector sets the system vector provider for behavior adjustment.
+func (e *Engine) WithVector(p VectorProvider) *Engine {
+	e.vector = p
+	return e
+}
+
 // Run executes the full actuation pipeline:
 // 1. Gather inputs from reflection + objective providers (fail-open).
 // 2. Evaluate deterministic rules.
@@ -57,7 +64,18 @@ func (e *Engine) Run(ctx context.Context) (ActuationRunResult, error) {
 	e.auditEvent(ctx, "actuation.run_started", map[string]any{"run_at": now})
 
 	inputs := e.gatherInputs(ctx)
-	proposals := EvaluateRules(inputs)
+
+	var proposals []proposedAction
+	if e.vector != nil {
+		vp := VectorRulesParams{
+			HumanReviewStrictness: e.vector.GetHumanReviewStrictness(),
+			RiskTolerance:         e.vector.GetRiskTolerance(),
+			IncomePriority:        e.vector.GetIncomePriority(),
+		}
+		proposals = EvaluateRulesWithVector(inputs, vp)
+	} else {
+		proposals = EvaluateRules(inputs)
+	}
 
 	// Sort proposals by priority descending for deterministic ordering.
 	sort.Slice(proposals, func(i, j int) bool {
@@ -66,6 +84,12 @@ func (e *Engine) Run(ctx context.Context) (ActuationRunResult, error) {
 
 	var decisions []ActuationDecision
 	for _, p := range proposals {
+		// Vector-adjusted review requirement.
+		needsReview := ReviewRequired(p.Type)
+		if e.vector != nil {
+			needsReview = ReviewRequiredWithVector(p.Type, e.vector.GetHumanReviewStrictness())
+		}
+
 		d := ActuationDecision{
 			ID:             uuid.New().String(),
 			Type:           p.Type,
@@ -73,7 +97,7 @@ func (e *Engine) Run(ctx context.Context) (ActuationRunResult, error) {
 			SignalSource:   p.Source,
 			Confidence:     clamp01(p.Confidence),
 			Priority:       clamp01(p.Priority),
-			RequiresReview: ReviewRequired(p.Type),
+			RequiresReview: needsReview,
 			Status:         StatusProposed,
 			Target:         RoutingTarget[p.Type],
 			ProposedAt:     now,

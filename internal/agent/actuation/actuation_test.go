@@ -499,3 +499,115 @@ func proposalTypes(proposals []proposedAction) map[ActuationType]bool {
 	}
 	return m
 }
+
+// --- Causal proof: vector changes actuation behavior ---
+
+func TestCausalProof_VectorChangesIncomePriority(t *testing.T) {
+	inputs := ActuationInputs{
+		ReflectionSignals: []ReflectionSignalInput{
+			{SignalType: "income_instability", Strength: 0.60},
+		},
+		NetUtility:    0.50,
+		FinancialRisk: 0.40,
+		OverloadRisk:  0.30,
+	}
+
+	// Baseline: no vector.
+	baseProposals := EvaluateRules(inputs)
+	var basePriority float64
+	for _, p := range baseProposals {
+		if p.Type == ActStabilizeIncome {
+			basePriority = p.Priority
+		}
+	}
+
+	// With high income priority vector.
+	highIncome := VectorRulesParams{
+		HumanReviewStrictness: VectorBaselineHumanReviewStrictness,
+		RiskTolerance:         VectorBaselineRiskTolerance,
+		IncomePriority:        1.00,
+	}
+	vecProposals := EvaluateRulesWithVector(inputs, highIncome)
+	var vecPriority float64
+	for _, p := range vecProposals {
+		if p.Type == ActStabilizeIncome {
+			vecPriority = p.Priority
+		}
+	}
+
+	if vecPriority <= basePriority {
+		t.Errorf("CAUSAL FAILURE: high income vector should boost income stabilization priority: base=%.4f vec=%.4f",
+			basePriority, vecPriority)
+	}
+
+	t.Logf("Causal proof: basePriority=%.4f vecPriority=%.4f", basePriority, vecPriority)
+}
+
+func TestCausalProof_VectorChangesReviewRequirement(t *testing.T) {
+	// At baseline (0.80): adjust_pricing requires review.
+	baseReview := ReviewRequired(ActAdjustPricing)
+	if !baseReview {
+		t.Fatal("baseline: adjust_pricing should require review")
+	}
+
+	// At low strictness (0.30): adjust_pricing does NOT require review.
+	lowReview := ReviewRequiredWithVector(ActAdjustPricing, 0.30)
+	if lowReview {
+		t.Error("CAUSAL FAILURE: low review strictness should not require review for adjust_pricing")
+	}
+
+	// At high strictness (0.95): even rebalance_portfolio requires review.
+	highReview := ReviewRequiredWithVector(ActRebalancePortfolio, 0.95)
+	if !highReview {
+		t.Error("CAUSAL FAILURE: high review strictness should require review for rebalance_portfolio")
+	}
+
+	// trigger_automation always requires review regardless.
+	if !ReviewRequiredWithVector(ActTriggerAutomation, 0.10) {
+		t.Error("trigger_automation should always require review")
+	}
+
+	t.Logf("Causal proof: base(adjust_pricing)=%v low(adjust_pricing)=%v high(rebalance)=%v",
+		baseReview, lowReview, highReview)
+}
+
+func TestCausalProof_VectorDampensRiskActions(t *testing.T) {
+	inputs := ActuationInputs{
+		ReflectionSignals: []ReflectionSignalInput{
+			{SignalType: "overload_risk", Strength: 0.80},
+		},
+		NetUtility:    0.50,
+		FinancialRisk: 0.30,
+		OverloadRisk:  0.80,
+	}
+
+	// Baseline.
+	baseProposals := EvaluateRules(inputs)
+	var baseReduceLoadPriority float64
+	for _, p := range baseProposals {
+		if p.Type == ActReduceLoad {
+			baseReduceLoadPriority = p.Priority
+		}
+	}
+
+	// High risk tolerance: should dampen reduce_load priority.
+	highRT := VectorRulesParams{
+		HumanReviewStrictness: VectorBaselineHumanReviewStrictness,
+		RiskTolerance:         0.90,
+		IncomePriority:        VectorBaselineIncomePriority,
+	}
+	vecProposals := EvaluateRulesWithVector(inputs, highRT)
+	var vecReduceLoadPriority float64
+	for _, p := range vecProposals {
+		if p.Type == ActReduceLoad {
+			vecReduceLoadPriority = p.Priority
+		}
+	}
+
+	if vecReduceLoadPriority >= baseReduceLoadPriority {
+		t.Errorf("CAUSAL FAILURE: high risk tolerance should dampen reduce_load priority: base=%.4f vec=%.4f",
+			baseReduceLoadPriority, vecReduceLoadPriority)
+	}
+
+	t.Logf("Causal proof: baseReduceLoad=%.4f vecReduceLoad=%.4f", baseReduceLoadPriority, vecReduceLoadPriority)
+}

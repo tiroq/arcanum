@@ -155,3 +155,10 @@ type ObjectiveProvider interface {
 	GetFinancialRisk(ctx context.Context) float64
 	GetOverloadRisk(ctx context.Context) float64
 }
+
+// VectorProvider reads system vector fields for actuation behavior adjustment.
+type VectorProvider interface {
+	GetHumanReviewStrictness() float64
+	GetRiskTolerance() float64
+	GetIncomePriority() float64
+}
