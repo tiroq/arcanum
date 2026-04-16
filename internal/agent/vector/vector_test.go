@@ -3,6 +3,7 @@ package vector
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,4 +104,73 @@ func TestGraphAdapter(t *testing.T) {
 	assert.Equal(t, 0.80, adapter.GetHumanReviewStrictness())
 	assert.Equal(t, 0.30, adapter.GetExplorationLevel())
 	assert.Equal(t, 0.40, adapter.GetAutomationPriority())
+}
+
+func TestGetVector_CacheHit(t *testing.T) {
+	store := NewInMemoryStore()
+	logger := zap.NewNop()
+	engine := NewEngine(store, nil, logger)
+
+	// First call populates cache.
+	v1 := engine.GetVector()
+	assert.Equal(t, 0.70, v1.IncomePriority)
+
+	// Mutate store directly — cache should still return old value.
+	_ = store.Set(context.Background(), SystemVector{
+		IncomePriority:        0.99,
+		FamilySafetyPriority:  0.99,
+		InfraPriority:         0.99,
+		AutomationPriority:    0.99,
+		ExplorationLevel:      0.99,
+		RiskTolerance:         0.99,
+		HumanReviewStrictness: 0.99,
+	})
+
+	v2 := engine.GetVector()
+	assert.Equal(t, 0.70, v2.IncomePriority, "should return cached value, not store value")
+}
+
+func TestGetVector_CacheInvalidatedOnSet(t *testing.T) {
+	store := NewInMemoryStore()
+	logger := zap.NewNop()
+	engine := NewEngine(store, nil, logger)
+
+	v1 := engine.GetVector()
+	assert.Equal(t, 0.70, v1.IncomePriority)
+
+	// Set through engine — cache must update immediately.
+	updated := DefaultVector()
+	updated.IncomePriority = 0.50
+	require.NoError(t, engine.Set(context.Background(), updated))
+
+	v2 := engine.GetVector()
+	assert.Equal(t, 0.50, v2.IncomePriority, "Set must invalidate + refresh cache")
+}
+
+func TestGetVector_CacheExpiry(t *testing.T) {
+	store := NewInMemoryStore()
+	logger := zap.NewNop()
+	engine := NewEngine(store, nil, logger)
+
+	// Populate cache.
+	_ = engine.GetVector()
+
+	// Manually expire the cache.
+	engine.mu.Lock()
+	engine.cachedAt = time.Now().Add(-2 * CacheTTL)
+	engine.mu.Unlock()
+
+	// Mutate store directly.
+	_ = store.Set(context.Background(), SystemVector{
+		IncomePriority:        0.10,
+		FamilySafetyPriority:  1.00,
+		InfraPriority:         0.30,
+		AutomationPriority:    0.40,
+		ExplorationLevel:      0.30,
+		RiskTolerance:         0.30,
+		HumanReviewStrictness: 0.80,
+	})
+
+	v := engine.GetVector()
+	assert.Equal(t, 0.10, v.IncomePriority, "expired cache should re-read from store")
 }

@@ -18,7 +18,9 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-// Get retrieves the current system vector. Returns defaults if no row exists.
+// Get retrieves the current system vector.
+// Returns defaults + nil on no-row (first boot). Returns defaults + error on
+// real DB failures so the caller (Engine) can log a visible warning.
 func (s *Store) Get(ctx context.Context) (SystemVector, error) {
 	v := DefaultVector()
 	err := s.pool.QueryRow(ctx, `
@@ -32,8 +34,12 @@ func (s *Store) Get(ctx context.Context) (SystemVector, error) {
 		&v.HumanReviewStrictness, &v.UpdatedAt,
 	)
 	if err != nil {
-		// Fail-open: return defaults on any error (including no rows).
-		return DefaultVector(), nil
+		if err.Error() == "no rows in result set" {
+			return DefaultVector(), nil
+		}
+		// Real DB error — return defaults but surface the error so
+		// Engine.GetVector can log a visible warning.
+		return DefaultVector(), err
 	}
 	return v, nil
 }
