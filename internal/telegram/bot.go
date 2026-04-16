@@ -20,6 +20,7 @@ type Bot struct {
 	api         *tgbotapi.BotAPI
 	ownerChatID int64
 	pool        *pgxpool.Pool
+	apiClient   *APIClient
 	logger      *zap.Logger
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
@@ -132,17 +133,36 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 	case "help":
 		reply = b.handleHelp()
 	case "status":
-		reply = b.handleStatus()
+		reply = b.handleExtendedStatus()
+	case "goals":
+		reply = b.handleGoals()
 	case "queue":
 		b.handleQueue()
+	case "focus":
+		reply = b.handleFocus()
+	case "report":
+		reply = b.handleReport()
+	case "pause":
+		reply = b.handlePause()
+	case "resume":
+		reply = b.handleResume()
+	case "vector":
+		reply = b.handleVector(update.Message.CommandArguments())
+	case "why":
+		reply = b.handleWhy(strings.TrimSpace(update.Message.CommandArguments()))
 	case "models":
 		reply = b.handleModels()
 	default:
 		cmd := update.Message.Command()
+		args := strings.TrimSpace(update.Message.CommandArguments())
 		if strings.HasPrefix(cmd, "approve_") {
-			reply = b.handleApprove(strings.TrimPrefix(cmd, "approve_"))
+			reply = b.handleApproveActuation(strings.TrimPrefix(cmd, "approve_"))
 		} else if strings.HasPrefix(cmd, "reject_") {
-			reply = b.handleReject(strings.TrimPrefix(cmd, "reject_"))
+			reply = b.handleRejectActuation(strings.TrimPrefix(cmd, "reject_"))
+		} else if cmd == "approve" {
+			reply = b.handleApproveActuation(args)
+		} else if cmd == "reject" {
+			reply = b.handleRejectActuation(args)
 		} else {
 			reply = fmt.Sprintf("Unknown command: /%s\nUse /help to see available commands.", cmd)
 		}
@@ -158,14 +178,29 @@ func (b *Bot) handleUpdate(update tgbotapi.Update) {
 func (b *Bot) handleHelp() string {
 	return `<b>Arcanum Commands</b>
 
-/status — System state: services, queue depth, recent errors
-/queue — Pending proposals (with Approve/Reject buttons)
-/models — Ollama model status
-/help — This message
+<b>Status</b>
+/status — System state: services, autonomy, queue, errors
+/focus — What the system is currently working on
+/report — Latest autonomy report with objective
 
-<b>Proposal Actions</b>
-Use the <b>✅ Approve</b> / <b>❌ Reject</b> buttons on proposal notifications.
-Manual (debug): /approve_&lt;uuid&gt; or /reject_&lt;uuid&gt;`
+<b>Goals &amp; Tasks</b>
+/goals — Active goals and subgoals
+/queue — Pending proposals (with Approve/Reject buttons)
+/why &lt;id&gt; — Explain why a decision or task was made
+
+<b>Control</b>
+/pause — Pause all autonomy (mode: frozen)
+/resume — Resume autonomy (mode: supervised)
+/approve &lt;id&gt; — Approve a decision or proposal
+/reject &lt;id&gt; — Reject a decision or proposal
+
+<b>System Vector</b>
+/vector — Show current system vector
+/vector income_priority=0.8 risk_tolerance=0.5 — Update vector
+
+<b>Info</b>
+/models — Ollama model status
+/help — This message`
 }
 
 func (b *Bot) handleStatus() string {
