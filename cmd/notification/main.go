@@ -93,6 +93,10 @@ func run() error {
 		return fmt.Errorf("init telegram bot: %w", err)
 	}
 
+	// Wire API client for rich commands (goals, queue, focus, vector, etc.)
+	apiClient := telegram.NewAPIClient(cfg.Telegram.APIGatewayURL, cfg.Auth.AdminToken)
+	bot.SetAPIClient(apiClient)
+
 	// Subscribe to NATS events and forward to Telegram
 	sub, err := messaging.NewSubscriber(nc, logger)
 	if err != nil {
@@ -259,7 +263,8 @@ func run() error {
 	bot.StartPolling(botCtx)
 
 	// Send startup notification
-	if err := bot.SendMessage("Arcanum notification service started. Use /help for commands."); err != nil {
+	startupMsg := fmt.Sprintf("<b>🚀 Arcanum Online</b>\n\nNotification service started.\nAPI: %s\n\nUse /help for commands.\nUse /status for system state.", cfg.Telegram.APIGatewayURL)
+	if err := bot.SendMessage(startupMsg); err != nil {
 		logger.Warn("failed to send startup message", zap.Error(err))
 	}
 
