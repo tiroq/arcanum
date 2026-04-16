@@ -736,6 +736,11 @@ func run() error {
 			WithExecutionLoop(autonomyExecLoopBridge{el: execLoopAdapter}).
 			WithFeedbackStore(autonomy.NewPgExecutionFeedbackStore(pool))
 		autonomyAdapter = autonomy.NewAPIAdapter(autonomyOrch, autonomyConfigPath)
+
+		// Iteration 55A: Wire execution feedback into reflection and objective.
+		metaAggregator.WithExecutionFeedback(reflectionExecFeedbackBridge{orch: autonomyOrch})
+		objectiveEngine.WithExecutionMetrics(objectiveExecMetricsBridge{orch: autonomyOrch})
+
 		logger.Info("autonomy orchestrator initialised",
 			zap.String("mode", string(autonomyCfg.Mode)),
 			zap.Bool("scheduler_enabled", autonomyCfg.Scheduler.Enabled),
@@ -1925,4 +1930,48 @@ func (b autonomyExecLoopBridge) GetTask(ctx context.Context, id string) (autonom
 		StepsFailed:    stepsFailed,
 		HasReviewBlock: hasReviewBlock,
 	}, nil
+}
+
+// --- Iteration 55A: Execution feedback bridge adapters ---
+
+// reflectionExecFeedbackBridge bridges autonomy.Orchestrator → reflection.ExecutionFeedbackProvider.
+type reflectionExecFeedbackBridge struct {
+	orch *autonomy.Orchestrator
+}
+
+func (b reflectionExecFeedbackBridge) GetReflectionFeedback(ctx context.Context) []reflection.ExecutionFeedbackEntry {
+	if b.orch == nil {
+		return nil
+	}
+	signals, err := b.orch.GetReflectionFeedback(ctx)
+	if err != nil {
+		return nil
+	}
+	entries := make([]reflection.ExecutionFeedbackEntry, len(signals))
+	for i, s := range signals {
+		entries[i] = reflection.ExecutionFeedbackEntry{
+			Signal:    s.Signal,
+			Outcome:   s.Outcome,
+			TaskID:    s.TaskID,
+			Success:   s.Success,
+			CreatedAt: s.CreatedAt,
+		}
+	}
+	return entries
+}
+
+// objectiveExecMetricsBridge bridges autonomy.Orchestrator → objective.ExecutionMetricsProvider.
+type objectiveExecMetricsBridge struct {
+	orch *autonomy.Orchestrator
+}
+
+func (b objectiveExecMetricsBridge) GetExecMetrics(ctx context.Context) (successRate float64, repeatedFailures, abortedCount, blockedCount, totalExecutions int) {
+	if b.orch == nil {
+		return 0, 0, 0, 0, 0
+	}
+	metrics, err := b.orch.GetObjectiveFeedback(ctx)
+	if err != nil {
+		return 0, 0, 0, 0, 0
+	}
+	return metrics.SuccessRate, metrics.RepeatedFailures, metrics.AbortedCount, metrics.BlockedCount, metrics.TotalExecutions
 }
