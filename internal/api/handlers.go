@@ -5676,3 +5676,76 @@ func (h *Handlers) GoalPlanningProgress(w http.ResponseWriter, r *http.Request) 
 	progress := h.goalPlanningAdapter.GetOverallProgress(r.Context(), goalID)
 	writeJSON(w, http.StatusOK, map[string]float64{"progress": progress})
 }
+
+// GoalPlanningListPlans handles GET /api/v1/agent/goals/plans.
+func (h *Handlers) GoalPlanningListPlans(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalPlanningAdapter == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	plans := h.goalPlanningAdapter.ListPlans(r.Context())
+	if plans == nil {
+		plans = []goalplanning.GoalPlan{}
+	}
+	writeJSON(w, http.StatusOK, plans)
+}
+
+// GoalPlanningCreatePlan handles POST /api/v1/agent/goals/plan.
+func (h *Handlers) GoalPlanningCreatePlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalPlanningAdapter == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "goal planning not available")
+		return
+	}
+	var req struct {
+		GoalID   string `json:"goal_id"`
+		Horizon  string `json:"horizon"`
+		Strategy string `json:"strategy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.GoalID == "" {
+		writeError(w, r, http.StatusBadRequest, "goal_id required")
+		return
+	}
+	horizon := goalplanning.Horizon(req.Horizon)
+	if horizon == "" {
+		horizon = goalplanning.HorizonMedium
+	}
+	strategy := goalplanning.Strategy(req.Strategy)
+	if strategy == "" {
+		strategy = goalplanning.StrategyExploitSuccess
+	}
+	plan := h.goalPlanningAdapter.CreatePlan(r.Context(), req.GoalID, horizon, strategy)
+	writeJSON(w, http.StatusCreated, plan)
+}
+
+// GoalPlanningReplan handles POST /api/v1/agent/goals/replan.
+func (h *Handlers) GoalPlanningReplan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.goalPlanningAdapter == nil {
+		writeJSON(w, http.StatusOK, map[string]int{"replanned": 0})
+		return
+	}
+	var req struct {
+		GoalID string `json:"goal_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	count := h.goalPlanningAdapter.Replan(r.Context(), req.GoalID)
+	writeJSON(w, http.StatusOK, map[string]int{"replanned": count})
+}
