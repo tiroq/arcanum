@@ -28,6 +28,7 @@ type Engine struct {
 	reflection   ReflectionProvider
 	execFeedback ExecutionFeedbackProvider
 	replanner    *Replanner
+	vector       VectorProvider
 }
 
 // NewEngine creates a new goal planning engine.
@@ -97,6 +98,12 @@ func (e *Engine) WithExecutionFeedback(p ExecutionFeedbackProvider) *Engine {
 // WithReplanner sets the replanner for adaptive replanning.
 func (e *Engine) WithReplanner(r *Replanner) *Engine {
 	e.replanner = r
+	return e
+}
+
+// WithVector sets the system vector provider for strategy and priority adjustment.
+func (e *Engine) WithVector(p VectorProvider) *Engine {
+	e.vector = p
 	return e
 }
 
@@ -307,6 +314,14 @@ func (e *Engine) PlanAndEmitTasks(ctx context.Context) (int, error) {
 		objectiveDelta = e.objective.GetNetUtility() - 0.50
 	}
 
+	// Gather vector fields for strategy selection and priority adjustment.
+	var explorationLevel, riskTolerance, incomePriority float64
+	if e.vector != nil {
+		explorationLevel = e.vector.GetExplorationLevel()
+		riskTolerance = e.vector.GetRiskTolerance()
+		incomePriority = e.vector.GetIncomePriority()
+	}
+
 	now := time.Now().UTC()
 	emissions := PlanTasks(all, now)
 
@@ -315,11 +330,18 @@ func (e *Engine) PlanAndEmitTasks(ctx context.Context) (int, error) {
 		emissions = emissions[:MaxTasksPerPlan]
 	}
 
-	// Apply strategy adjustments.
+	// Apply strategy adjustments with vector influence.
 	for i, em := range emissions {
 		sg := activeMap[em.SubgoalID]
-		strategy := SelectStrategy(sg, objectiveDelta)
+		strategy := SelectStrategyWithVector(sg, objectiveDelta, explorationLevel, riskTolerance)
 		emissions[i] = ApplyStrategyToEmission(em, strategy)
+
+		// Vector priority adjustment: income-aligned subgoals get a boost
+		// proportional to how far income priority is above baseline (0.70).
+		if e.vector != nil {
+			incomeBoost := clamp01((incomePriority - 0.70) * 0.30) // max +0.09
+			emissions[i].Priority = clamp01(emissions[i].Priority + incomeBoost)
+		}
 	}
 
 	if e.emitter == nil {

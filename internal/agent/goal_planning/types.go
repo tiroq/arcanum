@@ -302,3 +302,10 @@ type ReflectionSignalInput struct {
 type ExecutionFeedbackProvider interface {
 	GetFeedbackForGoal(ctx context.Context, goalID string) (successes, failures, consecutiveFailures int)
 }
+
+// VectorProvider reads system vector fields for goal planning strategy and priorities.
+type VectorProvider interface {
+	GetIncomePriority() float64
+	GetExplorationLevel() float64
+	GetRiskTolerance() float64
+}

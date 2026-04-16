@@ -1616,3 +1616,142 @@ func TestEngine_PlanAndEmitTasks_AppliesStrategy(t *testing.T) {
 		t.Errorf("expected reduce_failure strategy, got %s", emitter.emitted[0].StrategyType)
 	}
 }
+
+// --- Causal proof: vector changes strategy selection and priorities ---
+
+type mockVectorProvider struct {
+	incomePriority   float64
+	explorationLevel float64
+	riskTolerance    float64
+}
+
+func (m *mockVectorProvider) GetIncomePriority() float64   { return m.incomePriority }
+func (m *mockVectorProvider) GetExplorationLevel() float64 { return m.explorationLevel }
+func (m *mockVectorProvider) GetRiskTolerance() float64    { return m.riskTolerance }
+
+func TestCausalProof_VectorChangesStrategy(t *testing.T) {
+	// A fresh subgoal with no failures and no successes.
+	// Without vector: SelectStrategy → StrategyExploitSuccess
+	// With high exploration (>0.50): SelectStrategyWithVector → StrategyDiversify
+	sg := Subgoal{
+		ID:            "sg-causal-1",
+		GoalID:        "goal-1",
+		Status:        SubgoalActive,
+		Priority:      0.70,
+		FailureCount:  0,
+		SuccessCount:  0,
+		ProgressScore: 0.30,
+	}
+	objectiveDelta := 0.0 // neutral
+
+	// Baseline: no vector.
+	baseline := SelectStrategy(sg, objectiveDelta)
+	if baseline != StrategyExploitSuccess {
+		t.Fatalf("expected exploit_success without vector, got %s", baseline)
+	}
+
+	// Low exploration (default level): should still exploit.
+	lowExplore := SelectStrategyWithVector(sg, objectiveDelta, 0.30, 0.30)
+	if lowExplore != StrategyExploitSuccess {
+		t.Errorf("expected exploit_success with low exploration, got %s", lowExplore)
+	}
+
+	// High exploration: should diversify.
+	highExplore := SelectStrategyWithVector(sg, objectiveDelta, 0.80, 0.30)
+	if highExplore != StrategyDiversify {
+		t.Errorf("CAUSAL FAILURE: expected diversify with high exploration, got %s", highExplore)
+	}
+
+	t.Logf("Causal proof: baseline=%s lowExplore=%s highExplore=%s", baseline, lowExplore, highExplore)
+}
+
+func TestCausalProof_VectorChangesDeferThreshold(t *testing.T) {
+	// Subgoal with no failures but negative objective delta.
+	sg := Subgoal{
+		ID:            "sg-causal-2",
+		GoalID:        "goal-1",
+		Status:        SubgoalActive,
+		Priority:      0.70,
+		FailureCount:  0,
+		SuccessCount:  1,
+		ProgressScore: 0.40,
+	}
+
+	// Moderate penalty: objectiveDelta = -0.06 (just past ObjectivePenaltyThreshold=0.05).
+	objectiveDelta := -0.06
+
+	// Low risk tolerance (0.30): should defer (default behavior).
+	lowRT := SelectStrategyWithVector(sg, objectiveDelta, 0.30, 0.30)
+	if lowRT != StrategyDeferHighRisk {
+		t.Errorf("expected defer with low risk tolerance, got %s", lowRT)
+	}
+
+	// High risk tolerance (0.90): threshold shifts from -0.05 to ≈-0.068, so -0.06 no longer triggers.
+	highRT := SelectStrategyWithVector(sg, objectiveDelta, 0.30, 0.90)
+	if highRT == StrategyDeferHighRisk {
+		t.Errorf("CAUSAL FAILURE: high risk tolerance should prevent deferral at delta=%.3f, got %s", objectiveDelta, highRT)
+	}
+
+	t.Logf("Causal proof: lowRT=%s highRT=%s", lowRT, highRT)
+}
+
+func TestCausalProof_VectorChangesEmittedPriority(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	sgStore := NewInMemorySubgoalStore()
+	pStore := NewInMemoryProgressStore()
+
+	sg := Subgoal{
+		ID:              "sg-vec-pri",
+		GoalID:          "goal-1",
+		Status:          SubgoalActive,
+		Priority:        0.60,
+		Horizon:         HorizonWeekly,
+		PreferredAction: "discover",
+		ProgressScore:   0.30,
+		CreatedAt:       now.Add(-48 * time.Hour),
+		UpdatedAt:       now,
+	}
+	_ = sgStore.Insert(ctx, sg)
+
+	// Without vector: exploit_success adds +0.10 reinforcement boost to priority.
+	emitterA := &mockEmitter{}
+	engA := NewEngine(sgStore, pStore, nil, nil).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.50}).
+		WithEmitter(emitterA)
+	_, _ = engA.PlanAndEmitTasks(ctx)
+
+	// Reset store timestamp so cooldown doesn't block second emission.
+	_ = sgStore.UpdateLastTaskEmitted(ctx, "sg-vec-pri", time.Time{})
+
+	// With high exploration vector: diversify_attempts adds +0.10 to RiskLevel
+	// instead of priority boost. Also income boost adds to urgency-derived priority.
+	emitterB := &mockEmitter{}
+	engB := NewEngine(sgStore, pStore, nil, nil).
+		WithObjective(&mockObjectiveProvider{netUtility: 0.50}).
+		WithVector(&mockVectorProvider{incomePriority: 1.00, explorationLevel: 0.80, riskTolerance: 0.30}).
+		WithEmitter(emitterB)
+	_, _ = engB.PlanAndEmitTasks(ctx)
+
+	if len(emitterA.emitted) == 0 || len(emitterB.emitted) == 0 {
+		t.Fatal("expected emissions from both engines")
+	}
+
+	// With high exploration, the strategy should switch to diversify,
+	// which increases risk level by 0.10.
+	stratNoVec := emitterA.emitted[0].StrategyType
+	stratWithVec := emitterB.emitted[0].StrategyType
+	riskNoVec := emitterA.emitted[0].RiskLevel
+	riskWithVec := emitterB.emitted[0].RiskLevel
+
+	if stratNoVec == stratWithVec {
+		t.Errorf("CAUSAL FAILURE: vector should change strategy: without=%s with=%s", stratNoVec, stratWithVec)
+	}
+	if riskWithVec <= riskNoVec {
+		t.Errorf("CAUSAL FAILURE: diversify strategy should increase risk level: without=%.4f with=%.4f",
+			riskNoVec, riskWithVec)
+	}
+
+	t.Logf("Causal proof: stratNoVec=%s stratWithVec=%s riskNoVec=%.4f riskWithVec=%.4f",
+		stratNoVec, stratWithVec, riskNoVec, riskWithVec)
+}
