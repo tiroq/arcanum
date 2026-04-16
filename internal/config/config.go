@@ -136,8 +136,9 @@ type RetryConfig struct {
 }
 
 type TelegramConfig struct {
-	BotToken    string `envconfig:"TELEGRAM_BOT_TOKEN"`
-	OwnerChatID int64  `envconfig:"TELEGRAM_OWNER_CHAT_ID"`
+	BotToken      string `envconfig:"TELEGRAM_BOT_TOKEN"`
+	OwnerChatID   int64  `envconfig:"TELEGRAM_OWNER_CHAT_ID"`
+	APIGatewayURL string `envconfig:"API_GATEWAY_URL" default:"http://api-gateway:8080"`
 }
 
 type GoogleTasksConfig struct {
