@@ -38,6 +38,11 @@ type ExecutionFeedbackStore interface {
 	CountBySignal(ctx context.Context, signal string, since time.Time) (int, error)
 }
 
+// GoalPlanningRunner runs goal decomposition and task emission cycles.
+type GoalPlanningRunner interface {
+	RunCycle(ctx context.Context) error
+}
+
 // --- Lightweight result types (no import cycles) ---
 
 // CreatedTaskInfo is the result of creating a task via TaskOrchestratorRunner.

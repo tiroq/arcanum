@@ -235,6 +235,9 @@ type Orchestrator struct {
 	executionLoop    ExecutionLoopRunner
 	feedbackStore    ExecutionFeedbackStore
 
+	// Goal planning (Iteration 55)
+	goalPlanning GoalPlanningRunner
+
 	// Control
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -283,6 +286,10 @@ func (o *Orchestrator) WithExecutionLoop(r ExecutionLoopRunner) *Orchestrator {
 }
 func (o *Orchestrator) WithFeedbackStore(s ExecutionFeedbackStore) *Orchestrator {
 	o.feedbackStore = s
+	return o
+}
+func (o *Orchestrator) WithGoalPlanning(r GoalPlanningRunner) *Orchestrator {
+	o.goalPlanning = r
 	return o
 }
 
@@ -527,6 +534,7 @@ func (o *Orchestrator) dueCycles(now time.Time, inWindow bool) []string {
 		{"self_extension", o.cfg.SelfExt.Enabled, true},
 		{"task_recompute", o.taskOrchestrator != nil, true},
 		{"task_dispatch", o.taskOrchestrator != nil, true},
+		{"goal_planning", o.goalPlanning != nil, true},
 		{"reporting", o.cfg.Reporting.Enabled, false},
 	}
 
@@ -592,6 +600,8 @@ func (o *Orchestrator) runCycle(ctx context.Context, cycle string, now time.Time
 		err = o.cycleTaskRecompute(ctx)
 	case "task_dispatch":
 		err = o.cycleTaskDispatch(ctx)
+	case "goal_planning":
+		err = o.cycleGoalPlanning(ctx)
 	case "reporting":
 		err = o.cycleReporting(ctx)
 	default:
@@ -1012,6 +1022,36 @@ func (o *Orchestrator) cycleTaskDispatch(ctx context.Context) error {
 		zap.Int("skipped", result.SkippedCount),
 		zap.Int("blocked", result.BlockedCount),
 	)
+	return nil
+}
+
+// cycleGoalPlanning runs goal decomposition, progress tracking, and task emission (Iteration 55).
+func (o *Orchestrator) cycleGoalPlanning(ctx context.Context) error {
+	if o.goalPlanning == nil {
+		return nil
+	}
+
+	mode := o.getEffectiveMode()
+	if mode == ModeFrozen {
+		o.auditEvent(ctx, "autonomy.goal_planning_skipped", map[string]any{
+			"reason": "frozen_mode",
+		})
+		return nil
+	}
+
+	o.auditEvent(ctx, "autonomy.goal_planning_started", map[string]any{
+		"mode": string(mode),
+	})
+
+	err := o.goalPlanning.RunCycle(ctx)
+	if err != nil {
+		o.auditEvent(ctx, "autonomy.goal_planning_failed", map[string]any{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	o.auditEvent(ctx, "autonomy.goal_planning_completed", nil)
 	return nil
 }
 
