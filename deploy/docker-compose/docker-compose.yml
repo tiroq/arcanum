@@ -39,6 +39,8 @@ services:
       - HTTP_PORT=8080
       - LOG_LEVEL=info
       - ADMIN_TOKEN=${ADMIN_TOKEN:-change-me}
+      - AGENT_SCHEDULER_ENABLED=true
+      - AGENT_SCHEDULER_INTERVAL_SECONDS=60
     ports:
       - "8080:8080"
     depends_on:
@@ -119,6 +121,10 @@ services:
       - NATS_URL=nats://nats:4222
       - HTTP_PORT=8085
       - LOG_LEVEL=info
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-change-me}
+      - API_GATEWAY_URL=http://api-gateway:8080
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_OWNER_CHAT_ID=${TELEGRAM_OWNER_CHAT_ID:-0}
     depends_on:
       postgres:
         condition: service_healthy
