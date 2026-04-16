@@ -58,6 +58,11 @@ type ExternalActionsProvider interface {
 	GetActionCounts(ctx context.Context) (failed, pending, total int)
 }
 
+// ExecutionMetricsProvider reads closed-loop execution feedback (Iteration 55A).
+type ExecutionMetricsProvider interface {
+	GetExecMetrics(ctx context.Context) (successRate float64, repeatedFailures, abortedCount, blockedCount, totalExecutions int)
+}
+
 // Engine orchestrates the global objective function: gathers inputs, computes
 // utility + risk + net utility, persists results, and emits audit events.
 type Engine struct {
@@ -74,6 +79,7 @@ type Engine struct {
 	income          IncomeProvider
 	pricing         PricingProvider
 	externalActions ExternalActionsProvider
+	execMetrics     ExecutionMetricsProvider
 }
 
 // NewEngine creates a new objective function engine.
@@ -135,6 +141,12 @@ func (e *Engine) WithExternalActions(p ExternalActionsProvider) *Engine {
 	return e
 }
 
+// WithExecutionMetrics sets the closed-loop execution metrics provider (Iteration 55A).
+func (e *Engine) WithExecutionMetrics(p ExecutionMetricsProvider) *Engine {
+	e.execMetrics = p
+	return e
+}
+
 // GatherInputs collects all objective inputs from subsystem providers.
 // Fail-open: returns zero for any unavailable provider.
 func (e *Engine) GatherInputs(ctx context.Context) ObjectiveInputs {
@@ -177,6 +189,14 @@ func (e *Engine) GatherInputs(ctx context.Context) ObjectiveInputs {
 
 	if e.externalActions != nil {
 		inputs.FailedActionCount, inputs.PendingActionCount, inputs.TotalActionCount = e.externalActions.GetActionCounts(ctx)
+	}
+
+	if e.execMetrics != nil {
+		inputs.ExecFeedbackSuccessRate,
+			inputs.ExecFeedbackRepeatedFailures,
+			inputs.ExecFeedbackAbortedCount,
+			inputs.ExecFeedbackBlockedCount,
+			inputs.ExecFeedbackTotalExecutions = e.execMetrics.GetExecMetrics(ctx)
 	}
 
 	return inputs

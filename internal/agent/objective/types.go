@@ -137,4 +137,11 @@ type ObjectiveInputs struct {
 	FailedActionCount  int `json:"failed_action_count"`
 	PendingActionCount int `json:"pending_action_count"`
 	TotalActionCount   int `json:"total_action_count"`
+
+	// Execution feedback (from autonomy closed loop — Iteration 55A)
+	ExecFeedbackSuccessRate      float64 `json:"exec_feedback_success_rate"`
+	ExecFeedbackRepeatedFailures int     `json:"exec_feedback_repeated_failures"`
+	ExecFeedbackAbortedCount     int     `json:"exec_feedback_aborted_count"`
+	ExecFeedbackBlockedCount     int     `json:"exec_feedback_blocked_count"`
+	ExecFeedbackTotalExecutions  int     `json:"exec_feedback_total_executions"`
 }

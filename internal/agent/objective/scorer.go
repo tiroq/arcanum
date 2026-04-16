@@ -242,6 +242,49 @@ func ComputeObjectiveSignal(netUtility float64, dominantPos, dominantRisk string
 	}
 }
 
+// --- Execution feedback scoring (Iteration 55A) ---
+
+// ExecFeedbackBlendWeight controls how much closed‐loop feedback influences
+// the execution utility and risk components. 0.30 = 30% feedback, 70% real‐time.
+const ExecFeedbackBlendWeight = 0.30
+
+// ComputeExecFeedbackUtility produces a [0,1] score from closed‐loop success rate.
+// Returns 0.5 (neutral) when no feedback data exists.
+func ComputeExecFeedbackUtility(successRate float64, totalExecutions int) float64 {
+	if totalExecutions == 0 {
+		return 0.5 // neutral — no data, no influence
+	}
+	return clamp01(successRate)
+}
+
+// ComputeExecFeedbackRisk produces a [0,1] risk score from closed‐loop feedback.
+// Considers repeated failures, aborted tasks, and blocked tasks.
+func ComputeExecFeedbackRisk(repeatedFailures, abortedCount, blockedCount, totalExecutions int) float64 {
+	if totalExecutions == 0 {
+		return 0 // no data = no incremental risk
+	}
+	// Repeated failure severity: 2+ is concerning, 5+ is severe.
+	repeatComponent := clamp01(float64(repeatedFailures) / 5.0)
+	// Abort severity: any abort is significant, 3+ is severe.
+	abortComponent := clamp01(float64(abortedCount) / 3.0)
+	// Blocked severity: 2+ blocked = friction, 5+ = severe.
+	blockedComponent := clamp01(float64(blockedCount) / 5.0)
+	return clamp01(repeatComponent*0.40 + abortComponent*0.35 + blockedComponent*0.25)
+}
+
+// BlendExecFeedback blends a real‐time score with closed‐loop feedback.
+// When feedback data exists (totalExecutions > 0), the result is:
+//
+//	realTime*(1-weight) + feedback*weight
+//
+// When no feedback data exists, the real‐time score passes through unchanged.
+func BlendExecFeedback(realTimeScore, feedbackScore float64, totalExecutions int) float64 {
+	if totalExecutions == 0 {
+		return realTimeScore
+	}
+	return clamp01(realTimeScore*(1-ExecFeedbackBlendWeight) + feedbackScore*ExecFeedbackBlendWeight)
+}
+
 // --- Full pipeline from inputs ---
 
 // ComputeFromInputs runs the full scoring pipeline from raw inputs.
@@ -253,6 +296,10 @@ func ComputeFromInputs(inputs ObjectiveInputs) (ObjectiveState, RiskState, Objec
 	executionUtil := ComputeExecutionUtility(inputs.FailedActionCount, inputs.PendingActionCount, inputs.TotalActionCount, inputs.AvailableHoursToday, inputs.MaxDailyWorkHours)
 	strategicUtil := ComputeStrategicUtility(inputs.DiversificationIndex, inputs.PortfolioROI, inputs.ActiveStrategies)
 
+	// Iteration 55A: Blend execution feedback into the execution utility component.
+	execFeedbackUtil := ComputeExecFeedbackUtility(inputs.ExecFeedbackSuccessRate, inputs.ExecFeedbackTotalExecutions)
+	executionUtil = BlendExecFeedback(executionUtil, execFeedbackUtil, inputs.ExecFeedbackTotalExecutions)
+
 	utility := ComputeUtilityScore(incomeUtil, familyUtil, ownerUtil, executionUtil, strategicUtil)
 
 	// Risk components.
@@ -261,6 +308,15 @@ func ComputeFromInputs(inputs ObjectiveInputs) (ObjectiveState, RiskState, Objec
 	executionRisk := ComputeExecutionRisk(inputs.FailedActionCount, inputs.TotalActionCount)
 	concentrationRisk := ComputeConcentrationRisk(inputs.DominantAllocation, inputs.DiversificationIndex, inputs.ActiveStrategies)
 	pricingRisk := ComputePricingRisk(inputs.PricingConfidence, inputs.WinRate)
+
+	// Iteration 55A: Blend execution feedback into the execution risk component.
+	execFeedbackRisk := ComputeExecFeedbackRisk(
+		inputs.ExecFeedbackRepeatedFailures,
+		inputs.ExecFeedbackAbortedCount,
+		inputs.ExecFeedbackBlockedCount,
+		inputs.ExecFeedbackTotalExecutions,
+	)
+	executionRisk = BlendExecFeedback(executionRisk, execFeedbackRisk, inputs.ExecFeedbackTotalExecutions)
 
 	risk := ComputeRiskScore(financialRisk, overloadRisk, executionRisk, concentrationRisk, pricingRisk)
 
