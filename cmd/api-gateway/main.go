@@ -52,6 +52,7 @@ import (
 	"github.com/tiroq/arcanum/internal/agent/strategy"
 	strategylearning "github.com/tiroq/arcanum/internal/agent/strategy_learning"
 	taskorchestrator "github.com/tiroq/arcanum/internal/agent/task_orchestrator"
+	"github.com/tiroq/arcanum/internal/agent/vector"
 	"github.com/tiroq/arcanum/internal/api"
 	"github.com/tiroq/arcanum/internal/audit"
 	"github.com/tiroq/arcanum/internal/config"
@@ -724,6 +725,15 @@ func run() error {
 	goalPlanAdapter := goalplanning.NewGraphAdapter(goalPlanEngine, logger)
 	logger.Info("goal planning engine initialised")
 
+	// System vector (Operationalization Sprint).
+	// Single-row runtime vector that the owner can change live via Telegram
+	// to alter system behavior: income priority, risk tolerance, review strictness, etc.
+	vectorStore := vector.NewStore(pool)
+	vectorEngine := vector.NewEngine(vectorStore, auditor, logger)
+	vectorAdapter := vector.NewGraphAdapter(vectorEngine)
+	_ = vectorAdapter // wired into objective/actuation/goal_planning below
+	logger.Info("system vector engine initialised")
+
 	// Autonomy runtime orchestrator (Iteration 52).
 	// Loads autonomy config, creates orchestrator, wires all subsystem providers.
 	// Orchestrator runs recurring cycles: reflection, objective, actuation,
@@ -817,7 +827,8 @@ func run() error {
 		WithActuation(actuationGraphAdapter).
 		WithExecutionLoop(execLoopAdapter).
 		WithTaskOrchestrator(taskOrchAdapter).
-		WithGoalPlanning(goalPlanAdapter)
+		WithGoalPlanning(goalPlanAdapter).
+		WithVector(vectorEngine)
 
 	// Conditionally wire autonomy (avoids nil interface gotcha).
 	if autonomyAdapter != nil {
