@@ -438,3 +438,90 @@ func TestNetUtilityBounds(t *testing.T) {
 		t.Errorf("net utility out of bounds: %f", net)
 	}
 }
+
+// --- Causal proof: same inputs, different vector, different output ---
+
+func TestCausalProof_VectorChangesNetUtility(t *testing.T) {
+	// Scenario: moderate system state — some income, some risk.
+	inputs := ObjectiveInputs{
+		VerifiedMonthlyIncome: 3000,
+		TargetMonthlyIncome:   5000,
+		BestOpenOppScore:      0.6,
+		OpenOpportunityCount:  3,
+		PressureScore:         0.4,
+		OwnerLoadScore:        0.5,
+		AvailableHoursToday:   4,
+		MaxDailyWorkHours:     8,
+		BlockedHoursToday:     3,
+		MinFamilyTimeHours:    4,
+		DiversificationIndex:  0.6,
+		PortfolioROI:          25,
+		ActiveStrategies:      2,
+		PricingConfidence:     0.7,
+		WinRate:               0.5,
+		FailedActionCount:     2,
+		PendingActionCount:    3,
+		TotalActionCount:      10,
+	}
+
+	// Baseline: no vector.
+	_, _, baselineSummary := ComputeFromInputs(inputs)
+
+	// Vector A: high income priority, low risk tolerance.
+	incomeHawk := &VectorSnapshot{
+		IncomePriority:       1.00, // max income priority
+		FamilySafetyPriority: 0.50, // reduced family weight
+		AutomationPriority:   0.40, // same as baseline
+		ExplorationLevel:     0.30, // same as baseline
+		RiskTolerance:        0.10, // very risk-averse → higher penalty
+	}
+	_, _, incomeHawkSummary := ComputeFromInputsWithVector(inputs, incomeHawk)
+
+	// Vector B: low income priority, high risk tolerance.
+	explorerVec := &VectorSnapshot{
+		IncomePriority:       0.30, // low income priority
+		FamilySafetyPriority: 1.00, // same as baseline
+		AutomationPriority:   0.80, // double automation weight
+		ExplorationLevel:     0.90, // 3× exploration weight
+		RiskTolerance:        0.80, // very risk-tolerant → lower penalty
+	}
+	_, _, explorerSummary := ComputeFromInputsWithVector(inputs, explorerVec)
+
+	// --- Assertions ---
+	// 1. The three summaries must differ.
+	if math.Abs(baselineSummary.NetUtility-incomeHawkSummary.NetUtility) < 1e-6 &&
+		math.Abs(baselineSummary.NetUtility-explorerSummary.NetUtility) < 1e-6 {
+		t.Fatal("CAUSAL FAILURE: all three vectors produced identical NetUtility")
+	}
+
+	// 2. Income hawk has lower risk tolerance → higher risk penalty → lower NetUtility
+	//    (with moderate risk present in the inputs).
+	if incomeHawkSummary.NetUtility >= explorerSummary.NetUtility {
+		t.Errorf("CAUSAL FAILURE: risk-averse vector should produce lower NetUtility than risk-tolerant: hawk=%f explorer=%f",
+			incomeHawkSummary.NetUtility, explorerSummary.NetUtility)
+	}
+
+	// 3. The default vector must produce identical output to baseline (no vector).
+	defaultVec := &VectorSnapshot{
+		IncomePriority:       0.70,
+		FamilySafetyPriority: 1.00,
+		AutomationPriority:   0.40,
+		ExplorationLevel:     0.30,
+		RiskTolerance:        0.30,
+	}
+	_, _, defaultSummary := ComputeFromInputsWithVector(inputs, defaultVec)
+	if math.Abs(baselineSummary.NetUtility-defaultSummary.NetUtility) > 1e-9 {
+		t.Errorf("CAUSAL FAILURE: default vector should match no-vector baseline: baseline=%f default=%f",
+			baselineSummary.NetUtility, defaultSummary.NetUtility)
+	}
+
+	// 4. All values bounded [0,1].
+	for _, s := range []ObjectiveSummary{baselineSummary, incomeHawkSummary, explorerSummary} {
+		if s.NetUtility < 0 || s.NetUtility > 1 {
+			t.Errorf("NetUtility out of bounds: %f", s.NetUtility)
+		}
+	}
+
+	t.Logf("Causal proof: baseline=%.4f incomeHawk=%.4f explorer=%.4f",
+		baselineSummary.NetUtility, incomeHawkSummary.NetUtility, explorerSummary.NetUtility)
+}

@@ -289,6 +289,56 @@ func BlendExecFeedback(realTimeScore, feedbackScore float64, totalExecutions int
 
 // ComputeFromInputs runs the full scoring pipeline from raw inputs.
 func ComputeFromInputs(inputs ObjectiveInputs) (ObjectiveState, RiskState, ObjectiveSummary) {
+	return computeFromInputsCore(inputs, nil)
+}
+
+// ComputeFromInputsWithVector runs the full scoring pipeline with
+// vector-adjusted utility weights and risk penalty.
+func ComputeFromInputsWithVector(inputs ObjectiveInputs, v *VectorSnapshot) (ObjectiveState, RiskState, ObjectiveSummary) {
+	return computeFromInputsCore(inputs, v)
+}
+
+// VectorSnapshot holds the system vector fields relevant to objective scoring.
+// Local type avoids import cycles with the vector package.
+type VectorSnapshot struct {
+	IncomePriority       float64
+	FamilySafetyPriority float64
+	AutomationPriority   float64
+	ExplorationLevel     float64
+	RiskTolerance        float64
+}
+
+// vectorBaseline matches vector.DefaultVector() — used as the reference
+// point so that the default vector produces identical output to the
+// unweighted pipeline.
+var vectorBaseline = VectorSnapshot{
+	IncomePriority:       0.70,
+	FamilySafetyPriority: 1.00,
+	AutomationPriority:   0.40,
+	ExplorationLevel:     0.30,
+	RiskTolerance:        0.30,
+}
+
+// vectorScale computes the ratio current/baseline (safe division).
+func vectorScale(current, baseline float64) float64 {
+	if baseline <= 0 {
+		return 1.0
+	}
+	return current / baseline
+}
+
+// clampRange clamps v to [lo, hi].
+func clampRange(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func computeFromInputsCore(inputs ObjectiveInputs, v *VectorSnapshot) (ObjectiveState, RiskState, ObjectiveSummary) {
 	// Utility components.
 	incomeUtil := ComputeIncomeUtility(inputs.VerifiedMonthlyIncome, inputs.TargetMonthlyIncome, inputs.BestOpenOppScore, inputs.OpenOpportunityCount)
 	familyUtil := ComputeFamilyUtility(inputs.PressureScore, inputs.BlockedHoursToday, inputs.MinFamilyTimeHours)
@@ -299,8 +349,6 @@ func ComputeFromInputs(inputs ObjectiveInputs) (ObjectiveState, RiskState, Objec
 	// Iteration 55A: Blend execution feedback into the execution utility component.
 	execFeedbackUtil := ComputeExecFeedbackUtility(inputs.ExecFeedbackSuccessRate, inputs.ExecFeedbackTotalExecutions)
 	executionUtil = BlendExecFeedback(executionUtil, execFeedbackUtil, inputs.ExecFeedbackTotalExecutions)
-
-	utility := ComputeUtilityScore(incomeUtil, familyUtil, ownerUtil, executionUtil, strategicUtil)
 
 	// Risk components.
 	financialRisk := ComputeFinancialRisk(inputs.PressureScore, inputs.VerifiedMonthlyIncome, inputs.TargetMonthlyIncome)
@@ -318,9 +366,25 @@ func ComputeFromInputs(inputs ObjectiveInputs) (ObjectiveState, RiskState, Objec
 	)
 	executionRisk = BlendExecFeedback(executionRisk, execFeedbackRisk, inputs.ExecFeedbackTotalExecutions)
 
-	risk := ComputeRiskScore(financialRisk, overloadRisk, executionRisk, concentrationRisk, pricingRisk)
+	// Utility + risk aggregation — vector-adjusted if provided.
+	var utility, risk, netUtil float64
+	if v != nil {
+		utility = computeVectorUtility(incomeUtil, familyUtil, ownerUtil, executionUtil, strategicUtil, v)
+		risk = ComputeRiskScore(financialRisk, overloadRisk, executionRisk, concentrationRisk, pricingRisk)
+		// Risk penalty: higher risk tolerance → lower penalty → higher net utility.
+		// Uses baseline ratio so that default vector produces identical output.
+		// Clamped to [0.30, 0.90] to prevent degenerate extremes.
+		adjPenalty := clampRange(
+			RiskPenaltyWeight*vectorScale(1.0-v.RiskTolerance, 1.0-vectorBaseline.RiskTolerance),
+			0.30, 0.90,
+		)
+		netUtil = clamp01(utility - risk*adjPenalty)
+	} else {
+		utility = ComputeUtilityScore(incomeUtil, familyUtil, ownerUtil, executionUtil, strategicUtil)
+		risk = ComputeRiskScore(financialRisk, overloadRisk, executionRisk, concentrationRisk, pricingRisk)
+		netUtil = ComputeNetUtility(utility, risk)
+	}
 
-	netUtil := ComputeNetUtility(utility, risk)
 	domPos := DominantPositiveFactor(incomeUtil, familyUtil, ownerUtil, executionUtil, strategicUtil)
 	domRisk := DominantRiskFactor(financialRisk, overloadRisk, executionRisk, concentrationRisk, pricingRisk)
 
@@ -350,4 +414,31 @@ func ComputeFromInputs(inputs ObjectiveInputs) (ObjectiveState, RiskState, Objec
 	}
 
 	return objState, riskState, summary
+}
+
+// computeVectorUtility aggregates utility components with vector-adjusted weights.
+// Each weight is scaled by the ratio (vector_field / baseline_field), then the
+// set is re-normalised to sum to 1.0. This means the default vector produces
+// identical output to the base ComputeUtilityScore.
+func computeVectorUtility(income, family, owner, execution, strategic float64, v *VectorSnapshot) float64 {
+	weights := [5]float64{
+		WeightIncome * vectorScale(v.IncomePriority, vectorBaseline.IncomePriority),
+		WeightFamily * vectorScale(v.FamilySafetyPriority, vectorBaseline.FamilySafetyPriority),
+		WeightOwner, // owner weight is always base — not configurable via vector
+		WeightExecution * vectorScale(v.AutomationPriority, vectorBaseline.AutomationPriority),
+		WeightStrategic * vectorScale(v.ExplorationLevel, vectorBaseline.ExplorationLevel),
+	}
+	sum := 0.0
+	for _, w := range weights {
+		sum += w
+	}
+	if sum <= 0 {
+		return ComputeUtilityScore(income, family, owner, execution, strategic)
+	}
+	components := [5]float64{clamp01(income), clamp01(family), clamp01(owner), clamp01(execution), clamp01(strategic)}
+	result := 0.0
+	for i, c := range components {
+		result += c * (weights[i] / sum)
+	}
+	return clamp01(result)
 }

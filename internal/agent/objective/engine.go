@@ -63,6 +63,15 @@ type ExecutionMetricsProvider interface {
 	GetExecMetrics(ctx context.Context) (successRate float64, repeatedFailures, abortedCount, blockedCount, totalExecutions int)
 }
 
+// VectorProvider reads system vector fields for objective weight adjustment.
+type VectorProvider interface {
+	GetIncomePriority() float64
+	GetFamilySafetyPriority() float64
+	GetAutomationPriority() float64
+	GetExplorationLevel() float64
+	GetRiskTolerance() float64
+}
+
 // Engine orchestrates the global objective function: gathers inputs, computes
 // utility + risk + net utility, persists results, and emits audit events.
 type Engine struct {
@@ -80,6 +89,7 @@ type Engine struct {
 	pricing         PricingProvider
 	externalActions ExternalActionsProvider
 	execMetrics     ExecutionMetricsProvider
+	vector          VectorProvider
 }
 
 // NewEngine creates a new objective function engine.
@@ -147,6 +157,12 @@ func (e *Engine) WithExecutionMetrics(p ExecutionMetricsProvider) *Engine {
 	return e
 }
 
+// WithVector sets the system vector provider for weight adjustment.
+func (e *Engine) WithVector(p VectorProvider) *Engine {
+	e.vector = p
+	return e
+}
+
 // GatherInputs collects all objective inputs from subsystem providers.
 // Fail-open: returns zero for any unavailable provider.
 func (e *Engine) GatherInputs(ctx context.Context) ObjectiveInputs {
@@ -208,7 +224,28 @@ func (e *Engine) Recompute(ctx context.Context) (ObjectiveSummary, error) {
 	inputs := e.GatherInputs(ctx)
 	now := time.Now().UTC()
 
-	objState, riskState, summary := ComputeFromInputs(inputs)
+	var objState ObjectiveState
+	var riskState RiskState
+	var summary ObjectiveSummary
+
+	if e.vector != nil {
+		vs := &VectorSnapshot{
+			IncomePriority:       e.vector.GetIncomePriority(),
+			FamilySafetyPriority: e.vector.GetFamilySafetyPriority(),
+			AutomationPriority:   e.vector.GetAutomationPriority(),
+			ExplorationLevel:     e.vector.GetExplorationLevel(),
+			RiskTolerance:        e.vector.GetRiskTolerance(),
+		}
+		objState, riskState, summary = ComputeFromInputsWithVector(inputs, vs)
+		e.logger.Info("objective recomputed with vector",
+			zap.Float64("income_priority", vs.IncomePriority),
+			zap.Float64("family_safety_priority", vs.FamilySafetyPriority),
+			zap.Float64("risk_tolerance", vs.RiskTolerance),
+			zap.Float64("net_utility", summary.NetUtility),
+		)
+	} else {
+		objState, riskState, summary = ComputeFromInputs(inputs)
+	}
 	objState.ComputedAt = now
 	riskState.ComputedAt = now
 	summary.UpdatedAt = now
